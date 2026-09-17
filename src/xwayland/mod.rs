@@ -262,12 +262,21 @@ impl<D: SessionDriver> State<D> {
         }
     }
 
-    pub fn sync_active_window(&self, window: Option<u32>) {
+    pub fn sync_active_window(&self, window: Option<u32>, has_keyboard_focus: bool) {
         let Some(control) = self.control.as_ref() else {
             return;
         };
-        if let Err(err) = control.set_active_window(window) {
+        if let Err(err) = control.set_active_window(window, has_keyboard_focus) {
             eventline::warn!("xwayland: failed to publish active window {window:?}: {err}");
+        }
+    }
+
+    pub fn focus_globally_active_window(&self, window: Option<u32>) {
+        let (Some(control), Some(window)) = (self.control.as_ref(), window) else {
+            return;
+        };
+        if let Err(err) = control.focus_window(window) {
+            eventline::warn!("xwayland: failed to focus globally-active xid={window}: {err}");
         }
     }
 

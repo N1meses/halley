@@ -56,10 +56,12 @@ struct CapturedWindow {
 struct ActiveClose {
     captured: CapturedWindow,
     timeline: CloseTimeline,
+    random_seed: f32,
 }
 
 pub struct ClosingWindowRender {
     pub texture: TextureRenderElement<GlesTexture>,
+    pub shader: Option<super::window_shader::WindowShaderRenderElement>,
     /// The snapshot's own identity, namespaced for the border so both parts
     /// stay stable for the life of the animation.
     pub border_id: Id,
@@ -100,11 +102,12 @@ impl WindowCloseAnimations {
         window: &Window,
         texture: super::window_texture::WindowTexture,
         metadata: CloseSnapshotMetadata,
+        node_collapse: bool,
     ) -> Result<bool, Box<dyn Error>> {
         let Some(surface) = window.wl_surface().map(|surface| surface.into_owned()) else {
             return Ok(false);
         };
-        if !close_enabled(self.config) {
+        if !snapshot_enabled(&self.config, node_collapse) {
             self.provisional.remove(&surface);
             self.pending.remove(&surface);
             return Ok(false);
@@ -136,16 +139,18 @@ impl WindowCloseAnimations {
         let Some(captured) = self.pending.remove(surface) else {
             return false;
         };
-        if !close_enabled(self.config) {
+        let node_collapse = captured.metadata.collapse_target.is_some();
+        if !snapshot_enabled(&self.config, node_collapse) {
             return false;
         }
 
-        let config = self.config.window_close;
+        let config = snapshot_animation(&self.config, node_collapse);
         self.active.insert(
             surface.clone(),
             ActiveClose {
                 timeline: CloseTimeline::new(config, now, captured.metadata.start_alpha),
                 captured,
+                random_seed: crate::animation::animation_seed(),
             },
         );
         true
@@ -212,11 +217,13 @@ impl WindowCloseAnimations {
 
     pub fn reload(&mut self, config: Animations) {
         self.config = config;
-        if !close_enabled(config) {
+        if !close_enabled(&self.config) {
             self.provisional.clear();
             self.speculative.clear();
-            self.pending.clear();
         }
+        self.pending.retain(|_, captured| {
+            snapshot_enabled(&self.config, captured.metadata.collapse_target.is_some())
+        });
     }
 
     pub fn is_animating_on_output(&self, output: &Output, now: Duration) -> bool {
@@ -229,6 +236,7 @@ impl WindowCloseAnimations {
     pub fn renders_for_output(
         &self,
         renderer: &GlesRenderer,
+        shaders: &super::window_shader::WindowAnimationShaders,
         output: &Output,
         output_geometry: Rectangle<i32, Logical>,
         cameras: &OutputCameras,
@@ -241,7 +249,7 @@ impl WindowCloseAnimations {
                 return None;
             }
             let destination = destination_for(metadata, output, output_geometry, cameras)?;
-            closing_render(captured, destination, metadata.start_alpha)
+            closing_render(captured, destination, metadata.start_alpha, None)
         });
         let active = self
             .active
@@ -255,6 +263,42 @@ impl WindowCloseAnimations {
                 let metadata = &active.captured.metadata;
                 let start = destination_for(metadata, output, output_geometry, cameras)?;
                 let visual = active.timeline.visual_at(now);
+                let shader_geo = visual.shader_geo(start, metadata.retract_origin);
+                if metadata.collapse_target.is_none()
+                    && active.timeline.shader_pixels()
+                    && shaders.close_available()
+                    && shader_geo.size.w > 0
+                    && shader_geo.size.h > 0
+                    && let Some(shader) = shaders.close_element(
+                        renderer,
+                        &active.captured.texture,
+                        active.captured.id.clone(),
+                        shader_geo,
+                        visual.linear_progress as f32,
+                        visual.linear_progress.clamp(0.0, 1.0) as f32,
+                        active.random_seed,
+                        metadata.start_alpha,
+                    )
+                {
+                    return Some(ClosingWindowRender {
+                        texture: active.captured.texture.render_element(
+                            active.captured.id.clone(),
+                            shader_geo,
+                            metadata.start_alpha,
+                        ),
+                        shader: Some(shader),
+                        border_id: active
+                            .captured
+                            .id
+                            .namespaced(crate::render::window_decoration::slot::BORDER),
+                        source_texture: active.captured.texture.texture.clone(),
+                        destination: shader_geo,
+                        border: None,
+                        content_radius: 0.0,
+                        stack_index: metadata.stack_index,
+                        order: active.captured.order,
+                    });
+                }
                 let destination = if let Some(target) = metadata.collapse_target {
                     let camera = cameras.get(&output.name())?;
                     let target = crate::nodes::screen_from_world(target, camera, output_geometry)
@@ -266,7 +310,7 @@ impl WindowCloseAnimations {
                 if destination.size.w <= 0 || destination.size.h <= 0 || visual.alpha <= 0.0 {
                     return None;
                 }
-                closing_render(&active.captured, destination, visual.alpha)
+                closing_render(&active.captured, destination, visual.alpha, None)
             });
         pending.chain(active).collect()
     }
@@ -290,6 +334,7 @@ fn closing_render(
     captured: &CapturedWindow,
     destination: Rectangle<i32, Physical>,
     alpha: f32,
+    shader: Option<super::window_shader::WindowShaderRenderElement>,
 ) -> Option<ClosingWindowRender> {
     if destination.size.w <= 0 || destination.size.h <= 0 || alpha <= 0.0 {
         return None;
@@ -309,6 +354,7 @@ fn closing_render(
         texture: captured
             .texture
             .render_element(captured.id.clone(), destination, alpha),
+        shader,
         border_id: captured
             .id
             .namespaced(crate::render::window_decoration::slot::BORDER),
@@ -350,7 +396,31 @@ fn collapse_destination(
     )
 }
 
-fn close_enabled(config: Animations) -> bool {
+fn snapshot_enabled(config: &Animations, node_collapse: bool) -> bool {
+    if node_collapse {
+        config.enabled && config.node.enabled && config.node.collapse_duration_ms > 0
+    } else {
+        close_enabled(config)
+    }
+}
+
+fn snapshot_animation(
+    config: &Animations,
+    node_collapse: bool,
+) -> halley_config::WindowCloseAnimation {
+    if node_collapse {
+        halley_config::WindowCloseAnimation {
+            enabled: config.node.enabled,
+            duration_ms: config.node.collapse_duration_ms,
+            animation_type: halley_config::WindowCloseAnimationType::Shrink,
+            custom_shader: None,
+        }
+    } else {
+        config.window_close.clone()
+    }
+}
+
+fn close_enabled(config: &Animations) -> bool {
     config.enabled && config.window_close.enabled && config.window_close.duration_ms > 0
 }
 
@@ -400,16 +470,56 @@ mod tests {
     #[test]
     fn close_policy_respects_master_local_and_zero_duration_killswitches() {
         let mut animations = Animations::default();
-        assert!(close_enabled(animations));
+        assert!(close_enabled(&animations));
 
         animations.enabled = false;
-        assert!(!close_enabled(animations));
+        assert!(!close_enabled(&animations));
         animations.enabled = true;
         animations.window_close.enabled = false;
-        assert!(!close_enabled(animations));
+        assert!(!close_enabled(&animations));
         animations.window_close.enabled = true;
         animations.window_close.duration_ms = 0;
-        assert!(!close_enabled(animations));
+        assert!(!close_enabled(&animations));
+    }
+
+    #[test]
+    fn node_collapse_timeline_is_independent_of_marker_and_close_shader() {
+        let mut animations = Animations::default();
+        animations.node.duration_ms = 900;
+        animations.node.collapse_duration_ms = 280;
+        animations.window_close.duration_ms = 1700;
+        animations.window_close.custom_shader = Some("close.frag".into());
+        let collapse =
+            CloseTimeline::new(snapshot_animation(&animations, true), Duration::ZERO, 1.0);
+        let close = CloseTimeline::new(snapshot_animation(&animations, false), Duration::ZERO, 1.0);
+        assert!(!collapse.shader_pixels());
+        assert!(close.shader_pixels());
+        assert_eq!(collapse.visual_at(Duration::from_millis(140)).progress, 0.5);
+        assert!(collapse.is_finished_at(Duration::from_millis(280)));
+        assert!(!close.is_finished_at(Duration::from_millis(280)));
+        assert!(close.is_finished_at(Duration::from_millis(1700)));
+        assert_eq!(animations.node.duration_ms, 900);
+    }
+
+    #[test]
+    fn node_collapse_has_its_own_enable_and_zero_duration_policy() {
+        let mut animations = Animations::default();
+        animations.window_close.enabled = false;
+        animations.window_close.duration_ms = 0;
+        animations.node.duration_ms = 0;
+        assert!(snapshot_enabled(&animations, true));
+        assert!(!snapshot_enabled(&animations, false));
+        animations.node.collapse_duration_ms = 0;
+        assert!(!snapshot_enabled(&animations, true));
+        animations.node.collapse_duration_ms = 280;
+        animations.node.enabled = false;
+        assert!(!snapshot_enabled(&animations, true));
+        animations.node.enabled = true;
+        animations.enabled = false;
+        assert!(!snapshot_enabled(&animations, true));
+        animations = Animations::default();
+        animations.node.enabled = false;
+        assert!(snapshot_enabled(&animations, false));
     }
 
     #[test]

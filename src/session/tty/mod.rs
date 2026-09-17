@@ -381,8 +381,11 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     };
     let mut applied_input = runtime_config.input.clone();
     applied_input.keyboard = applied_keyboard;
+    let startup_cluster_declarations = runtime_config.autostart.clusters.clone();
+    let startup_cluster_default_layout = runtime_config.clusters.default_layout;
     let launch_environment = super::environment::LaunchEnvironment::new(&runtime_config.env);
     let launch_path = launch_environment.path();
+    let system_color_scheme = crate::appearance::current_color_scheme();
     let mut app = TtyApp {
         driver,
         keyboard: Keyboard::from_config(
@@ -393,6 +396,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         key_repeat: super::input::repeat::Policy::new(loop_handle.clone()),
         launch_environment,
         autostart: super::autostart::Autostart::enabled(),
+        startup_clusters: super::startup_clusters::StartupClusters::default(),
         pointer: Pointer::new((100.0, 100.0)),
         cursor: CursorManager::new(&runtime_config.cursor),
         cursor_policy: super::cursor::Policy::new(&runtime_config.cursor, loop_handle.clone()),
@@ -400,6 +404,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         wayland,
         seat_state,
         seat,
+        popup_grab: None,
         idle_notifier_state,
         presentation_state,
         drm_syncobj_state,
@@ -410,15 +415,21 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         config_watcher: None,
         startup_config_diagnostic: initial.diagnostic,
         shell: crate::shell::state::ShellState::new(&runtime_config),
-        settings: super::RuntimeSettings::new(&runtime_config, applied_input),
-        nodes: crate::nodes::NodesState::new(&runtime_config),
+        settings: super::RuntimeSettings::new_with_color_scheme(
+            &runtime_config,
+            applied_input,
+            system_color_scheme,
+        ),
+        nodes: crate::nodes::NodesState::new_with_color_scheme(
+            &runtime_config,
+            system_color_scheme,
+        ),
         trail: crate::trail::TrailState::new(runtime_config.trail),
         clusters: crate::clusters::ClusterSystem::new(
             runtime_config.clusters,
             runtime_config.animations.cluster,
         ),
         api_subscriptions: crate::ipc::ApiSubscriptions::default(),
-        pending_pointer_warp: None,
         window_rules: crate::window::rules::WindowRulesState::new(
             runtime_config.window_rules.clone(),
         ),
@@ -435,17 +446,19 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         window_trace: super::trace::WindowTrace::from_env(),
         keyboard_monitor,
         opening_origins: super::opening::OpeningOrigins::default(),
-        window_open_animations: crate::animation::WindowOpenAnimations::new(
-            runtime_config.animations,
+        window_animations: crate::animation::WindowAnimations::new(
+            runtime_config.animations.clone(),
         ),
         render: crate::render::resources::RenderState::new(
-            runtime_config.animations,
+            runtime_config.animations.clone(),
             &runtime_config.font,
         ),
-        fullscreen: crate::wayland::fullscreen::FullscreenManager::new(runtime_config.animations),
+        fullscreen: crate::wayland::fullscreen::FullscreenManager::new(
+            runtime_config.animations.clone(),
+        ),
         maximize: crate::presentation::maximize::FieldMaximizeManager::new(
             runtime_config.field,
-            runtime_config.animations,
+            runtime_config.animations.clone(),
         ),
         xwayland,
     };
@@ -461,6 +474,11 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         app.cameras
             .insert(output.name(), geometry.size.to_physical(1));
     }
+    app.initialize_startup_clusters(
+        &startup_cluster_declarations,
+        startup_cluster_default_layout,
+        true,
+    );
     app.initialize_config_notification();
 
     let socket_name = super::protocol::init_wayland_listener(display, &mut event_loop);
@@ -495,14 +513,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
             Err(err) => eventline::warn!("config: failed to start watcher: {err}"),
         }
     }
+    if let Err(err) = crate::appearance::watch(&event_loop.handle(), |app: &mut TtyApp, scheme| {
+        app.apply_system_color_scheme(scheme);
+    }) {
+        eventline::warn!("appearance: failed to start system colour watcher: {err}");
+    }
     if let Err(err) = super::install_node_decay_timer(&event_loop.handle()) {
         eventline::warn!("nodes: failed to start decay timer: {err}");
     }
     if let Err(err) = sleep::install(&event_loop.handle()) {
         eventline::warn!("system sleep: failed to install monitor: {err}");
-    }
-    if let Err(err) = super::install_apogee_preview_timer(&event_loop.handle()) {
-        eventline::warn!("apogee: failed to start preview timer: {err}");
     }
     if let Err(err) = super::install_overlay_timer(&event_loop.handle()) {
         eventline::warn!("overlays: failed to start lifecycle timer: {err}");
@@ -533,6 +553,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                     // The switch may prevent every held key's release from
                     // reaching this VT. Do not retain compositor release-pair
                     // bookkeeping across that boundary.
+                    app.interactions.steam_close_pressed = None;
                     app.interactions.suppressed_keys.clear();
                     app.key_repeat.cancel();
                     match app.driver.backend.change_vt(vt) {
@@ -601,6 +622,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                     eventline::info!("session event: pause");
                     let was_paused = app.driver.pause_reasons.any();
                     app.driver.pause_reasons.session = true;
+                    app.interactions.steam_close_pressed = None;
                     libinput_for_session.suspend();
                     if !was_paused {
                         suspend_redraw_state(app, &loop_handle);
@@ -750,13 +772,13 @@ fn complete_vblank(
             output.name()
         );
     }
-    if !app.driver.backend.output_dpms_enabled(&output) {
+    if !app.driver.backend.output_dpms_enabled(output) {
         return;
     }
 
     if let Some(mut submission) = submission {
         if let Some(generation) = submission.session_lock_generation {
-            app.session_lock.presented(&output, generation);
+            app.session_lock.presented(output, generation);
         }
         // Keep the prediction attached to its submitted frame for
         // diagnostics, while reporting the kernel page-flip timestamp to
@@ -810,20 +832,38 @@ fn send_output_frame_callbacks(app: &mut TtyApp, output: &Output) {
             elapsed,
             frame_callback_sequence,
         );
+    } else if app
+        .shell
+        .cluster_composer
+        .target_output()
+        .is_some_and(|name| name == output.name())
+    {
+        crate::shell::cluster_composer::send_preview_frames(
+            &app.shell.cluster_composer,
+            &app.nodes,
+            output,
+            elapsed,
+            frame_callback_sequence,
+        );
     } else if app.shell.apogee.is_active() {
-        if app.shell.apogee.take_callback_due(
-            &output.name(),
-            callback_now,
-            app.settings.apogee.preview_max_fps,
-        ) {
-            crate::shell::apogee::send_preview_frames(
-                &app.shell.apogee,
-                &app.nodes,
-                output,
-                elapsed,
-                frame_callback_sequence,
-            );
-        }
+        // Direct surface previews are damage tracked by Smithay, so let the
+        // output's own vblank cadence drive every visible client. Static
+        // clients stop committing and therefore stop scheduling work.
+        crate::shell::apogee::send_preview_frames(
+            &app.shell.apogee,
+            &app.nodes,
+            output,
+            elapsed,
+            frame_callback_sequence,
+        );
+    } else if app.shell.focus_cycle.is_active() {
+        crate::shell::focus_cycle::send_preview_frames(
+            &app.shell.focus_cycle,
+            &app.nodes,
+            output,
+            elapsed,
+            frame_callback_sequence,
+        );
     } else {
         let cluster_exclusive_member =
             crate::wayland::frame_callbacks::cluster_exclusive_callback_member(
@@ -847,6 +887,10 @@ fn send_output_frame_callbacks(app: &mut TtyApp, output: &Output) {
                     app.render
                         .fullscreen_textures
                         .awaiting_target(surface.as_ref())
+                        || app
+                            .render
+                            .arrange_textures
+                            .awaiting_target(surface.as_ref())
                 });
                 let require_visible = crate::wayland::frame_callbacks::requires_render_visibility(
                     window_member,
@@ -1010,7 +1054,9 @@ fn apply_tty_output_config(app: &mut TtyApp, outputs_config: &[halley_config::Ou
 }
 
 fn redraw_queued_outputs(app: &mut TtyApp, loop_handle: &LoopHandle<'_, TtyApp>) {
-    let _ = crate::nodes::tick_physics(app, crate::frame_clock::monotonic_now());
+    let now = crate::frame_clock::monotonic_now();
+    let _ = super::input::tick_grabbed_window_edge_pan(app, now);
+    let _ = crate::nodes::tick_physics(app, now);
     // Match startup's connector/CRTC activation order. Iterating the
     // `HashMap` made a multi-output DPMS wake nondeterministic, so the
     // primary could intermittently queue its modeset before the secondary
@@ -1065,13 +1111,17 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             app.settings.input.gestures.pan_decay_rate,
             dt.as_secs_f32(),
         );
-        (animating, (before != after).then_some(after))
+        (animating, (before != after).then_some((before, after)))
     });
     let camera_animating = zoom_tick.is_some_and(|(animating, _)| animating);
-    if let Some(scale) = zoom_tick.and_then(|(_, scale)| scale) {
+    let edge_pan_animating = super::input::grabbed_window_edge_pan_active_on(app, &output.name());
+    if let Some((before, after)) = zoom_tick.and_then(|(_, scales)| scales) {
+        if after < before && app.clusters.active_on(&output.name()).is_none() {
+            crate::nodes::reconcile_landmarks_for_zoom(app, &output.name(), after);
+        }
         app.shell.overlays.show_zoom_indicator(
             &output.name(),
-            scale,
+            after,
             &app.settings.overlays.zoom_indicator,
             target_presentation_time,
         );
@@ -1080,11 +1130,17 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
     let window_animating = app.wayland.space.elements().any(|window| {
         wayland::window_is_on_output(window, output, primary)
             && window.wl_surface().is_some_and(|surface| {
-                app.window_open_animations
+                app.window_animations
                     .is_animating(surface.as_ref(), target_presentation_time)
             })
     });
-    let _ = crate::shell::focus_cycle::finish_pending_pointer_warp(app);
+    let arrange_animating = app.wayland.space.elements().any(|window| {
+        wayland::window_is_on_output(window, output, primary)
+            && window.wl_surface().is_some_and(|surface| {
+                app.window_animations
+                    .is_arranging(surface.as_ref(), target_presentation_time)
+            })
+    });
     let presentation_workspace = crate::presentation::active_workspace_on_output(
         &app.clusters,
         &output.name(),
@@ -1110,11 +1166,27 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
     let node_animating = app
         .nodes
         .is_animating_on_output(&output.name(), target_presentation_time);
-    let bearings_animating = app
-        .shell
-        .bearings
-        .tick(&output.name(), target_presentation_time);
+    let bearings_animating = app.shell.bearings.tick(
+        &output.name(),
+        target_presentation_time,
+        !app.fullscreen
+            .presents_immersive_on_output_matching(output, |surface| {
+                crate::presentation::surface_workspace_is_active(
+                    &app.clusters,
+                    &app.nodes,
+                    surface,
+                    &output.name(),
+                    target_presentation_time,
+                )
+            }),
+    );
     let focus_cycle_animating = app.shell.focus_cycle.tick(target_presentation_time);
+    let composer_animating = app
+        .shell
+        .cluster_composer
+        .target_output()
+        .is_some_and(|name| name == output.name())
+        && crate::shell::cluster_composer::tick_session(app, target_presentation_time);
     let apogee_animating = crate::shell::apogee::tick(app, target_presentation_time);
     let background_animating = app.background_animates_on_output(output, target_presentation_time);
     let overlay_animating = app.shell.overlays.animating(target_presentation_time);
@@ -1153,12 +1225,14 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             .schedule_animation(output, next_cursor_frame);
     }
     let mut animating = camera_animating
+        || edge_pan_animating
         || fullscreen_camera_changed
         || window_animating
         || closing_animating
         || node_animating
         || bearings_animating
         || focus_cycle_animating
+        || composer_animating
         || apogee_animating
         || background_animating
         || overlay_animating
@@ -1168,7 +1242,8 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         || app.settings.debug.overlay_fps && !app.session_lock.active();
     if pointer_is_on_output {
         let time = app.start_time.elapsed().as_millis() as u32;
-        if cluster_camera_changed || fullscreen_animating || maximize_animating {
+        if cluster_camera_changed || fullscreen_animating || maximize_animating || arrange_animating
+        {
             super::pointer::update_client_state(app, time);
         } else if cluster_animating {
             super::pointer::refresh_client_focus(app, time);
@@ -1197,7 +1272,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
                 space: &app.wayland.space,
                 focused: app.wayland.focused_window.as_ref(),
                 cameras: &app.cameras,
-                window_open_animations: &app.window_open_animations,
+                window_animations: &app.window_animations,
                 fullscreen: &app.fullscreen,
                 maximize: &app.maximize,
                 nodes: &app.nodes,
@@ -1220,6 +1295,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
                 bearings: &app.shell.bearings,
                 focus_cycle: &app.shell.focus_cycle,
                 apogee: &app.shell.apogee,
+                cluster_composer: &app.shell.cluster_composer,
                 apogee_config: app.settings.apogee,
                 overlays: &app.shell.overlays,
                 overlay_config: &app.settings.overlays,
@@ -1244,7 +1320,16 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         }
     };
     animating |= app.render.node_renderer.has_pending_icons();
-    app.window_open_animations.cleanup(target_presentation_time);
+    if app.window_animations.cleanup(target_presentation_time) {
+        // The frame just composed can still scale a lagging pre-configure
+        // client buffer into the arrangement endpoint. Owe one live-geometry
+        // frame after retiring that endpoint so it cannot stay latched.
+        animating = true;
+        super::pointer::update_client_state(app, app.start_time.elapsed().as_millis() as u32);
+    }
+    app.render
+        .arrange_textures
+        .retain_surfaces(|surface| app.window_animations.has_arrange_timeline(surface));
     app.render
         .window_close_animations
         .cleanup(target_presentation_time);
@@ -1303,6 +1388,11 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
     if app.session_lock.active()
         || app.capture.is_active()
         || app.settings.debug.overlay_fps
+        || app
+            .shell
+            .cluster_composer
+            .target_output()
+            .is_some_and(|name| name == output.name())
         || app.shell.apogee.is_active()
         || app.shell.focus_cycle.session().is_some()
         || app.shell.bearings.mix(&output.name()) > 0.002
@@ -1314,8 +1404,10 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
     }
     let overlays = app.shell.overlays.snapshot(&output.name(), now);
     if overlays.exit_mix.is_some()
+        || overlays.confirmation.is_some()
         || overlays.notification.is_some()
         || overlays.zoom_indicator.is_some()
+        || overlays.cluster_indicator.is_some()
     {
         return false;
     }

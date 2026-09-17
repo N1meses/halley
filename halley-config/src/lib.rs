@@ -29,10 +29,11 @@ pub mod view;
 pub mod zoom;
 
 pub use animations::{
-    AnimationCurve, AnimationMotion, Animations, ClusterAnimation, ClusterStackingAnimation,
-    ClusterTilingAnimation, EasingMotion, FullscreenAnimation, MaximizeAnimation, NodeAnimation,
-    SmoothResizeAnimation, SpringMotion, WindowCloseAnimation, WindowCloseAnimationType,
-    WindowOpenAnimation, WindowOpenAnimationType, load_animations, parse_animations,
+    AnimationCurve, AnimationMotion, Animations, ArrangeAnimation, ClusterAnimation,
+    ClusterStackingAnimation, ClusterTilingAnimation, EasingMotion, FullscreenAnimation,
+    MaximizeAnimation, NodeAnimation, SmoothResizeAnimation, SpringMotion, WindowCloseAnimation,
+    WindowCloseAnimationType, WindowOpenAnimation, WindowOpenAnimationType, load_animations,
+    parse_animations,
 };
 pub use apogee::{Apogee, parse_apogee};
 pub use background::{
@@ -71,11 +72,8 @@ pub use keybinds::{
     Action, BindingScope, ClusterDirection, Direction, FocusCycleDirection, Keybind, Keybinds,
     ModifierKey, Modifiers, MonitorTarget, TrailDirection,
 };
-pub use launch::{Autostart, LaunchConfigError, parse_autostart, parse_env};
-pub use migrate::{
-    CONFIG_VERSION, MigrationError, MigrationMode, MigrationReport, MigrationStatus,
-    migrate_config_at,
-};
+pub use launch::{Autostart, LaunchConfigError, StartupCluster, parse_autostart, parse_env};
+pub use migrate::{MigrationError, MigrationReport, MigrationStatus, migrate_config_at};
 pub use nodes::{
     Debug, Decay, FocusRing, FocusRings, LandmarkPlacement, NodeBackgroundColor, NodeDisplayPolicy,
     NodeParseError, NodeShape, Nodes, RestoreCentering, parse_debug, parse_decay,
@@ -86,7 +84,7 @@ pub use overlays::{
     DEFAULT_ERROR_DURATION_MS, DEFAULT_SUCCESS_DURATION_MS,
     DEFAULT_ZOOM_INDICATOR_FADE_DURATION_MS, DEFAULT_ZOOM_INDICATOR_HOLD_DURATION_MS,
     NotificationPosition, Notifications, OverlayColorMode, OverlayParseError, Overlays,
-    ZoomIndicator, parse_overlays_checked,
+    SystemColorScheme, ZoomIndicator, parse_overlays_checked,
 };
 pub use parse::{ParseError, parse_keybinds};
 pub use physics::{Physics, parse_physics};

@@ -2,7 +2,7 @@ mod constraints;
 
 pub(super) use constraints::PointerConstraintLifecycle;
 
-use smithay::input::pointer::{MotionEvent, PointerHandle};
+use smithay::input::pointer::{ClickGrab, MotionEvent, PointerHandle, RelativeMotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::seat::WaylandFocus;
@@ -81,16 +81,81 @@ fn desktop_refresh_allowed(blockers: DesktopRefreshBlockers) -> bool {
         && !blockers.fullscreen_active
 }
 
+/// Smithay's default click grab retains the mouse-down focus origin. A
+/// client-positioned popup can move underneath that grab, so rebase its current
+/// local coordinates onto that fixed origin before Smithay subtracts it.
+fn popup_grab_location(
+    grab_origin: Point<f64, Logical>,
+    current_source: Point<f64, Logical>,
+    current_origin: Point<f64, Logical>,
+) -> Point<f64, Logical> {
+    grab_origin + (current_source - current_origin)
+}
+
+fn route_grabbed_popup<D: SessionDriver>(
+    session: &Session<D>,
+) -> Option<crate::input::pointer::PointerRoute> {
+    if !matches!(session.interactions.grab, crate::input::grab::Grab::None) {
+        return None;
+    }
+    let pointer = session.seat.get_pointer()?;
+    let (surface, grab_origin) = pointer.with_grab(|_, grab| {
+        grab.downcast_ref::<ClickGrab<Session<D>>>()
+            .and_then(|_| grab.start_data().focus.clone())
+    })??;
+    let window = session.wayland.space.elements().find(|window| {
+        crate::xwayland::is_override_redirect(window)
+            && window
+                .wl_surface()
+                .is_some_and(|candidate| candidate.as_ref() == &surface)
+    })?;
+    let output = session.wayland.space.outputs().find(|output| {
+        crate::wayland::window_is_on_output(window, output, session.driver.primary_output())
+    })?;
+    let presentation = crate::presentation::window::WindowPresentation::for_window(
+        &session.wayland.space,
+        &session.cameras,
+        Some(&session.clusters),
+        Some(&session.nodes),
+        &session.window_animations,
+        &session.fullscreen,
+        &session.maximize,
+        &session.settings.decorations,
+        &session.settings.font,
+        window,
+        output,
+        crate::frame_clock::monotonic_now(),
+    )?;
+    let source = presentation.source_from_screen(session.pointer.position().into());
+    Some(crate::input::pointer::PointerRoute {
+        output: output.clone(),
+        location: popup_grab_location(
+            grab_origin,
+            source,
+            presentation.root_source_origin().to_f64(),
+        ),
+        focus: Some((surface, grab_origin)),
+        target: crate::input::pointer::PointerTarget::Window(window.clone()),
+        visual_geometry: Some(presentation.visual_geometry()),
+        // A held client click keeps its original target, including outside its
+        // shaped input region. Normal hit testing resumes after button release.
+        is_desktop_popup: true,
+    })
+}
+
 pub(super) fn route_client<D: SessionDriver>(
     session: &Session<D>,
 ) -> Option<crate::input::pointer::PointerRoute> {
+    if let Some(route) = route_grabbed_popup(session) {
+        return Some(route);
+    }
     let mut route = crate::input::pointer::route_to_client(
         crate::input::pointer::PointerRoutingContext {
             space: &session.wayland.space,
             cameras: &session.cameras,
             clusters: &session.clusters,
             nodes: &session.nodes,
-            window_open_animations: &session.window_open_animations,
+            window_animations: &session.window_animations,
             primary: session.driver.primary_output(),
             fullscreen: &session.fullscreen,
             maximize: &session.maximize,
@@ -137,6 +202,90 @@ pub(super) fn route_client<D: SessionDriver>(
         route.is_desktop_popup = false;
     }
     Some(route)
+}
+
+fn xwayland_relative_motion_allowed(
+    routed_is_x11: bool,
+    routed_is_immersive: bool,
+    foreign_immersive_x11: bool,
+) -> bool {
+    // Xwayland exposes one relative-pointer object for the whole X server.
+    // Forwarding relative motion while the pointer is on one X11 window
+    // therefore becomes XI_RawMotion for every X11 client that selected it,
+    // including an unfocused fullscreen game on another output. Absolute
+    // wl_pointer motion still reaches the routed X11 window, so shield the
+    // foreign immersive client without breaking ordinary Steam/UI input.
+    !routed_is_x11 || routed_is_immersive || !foreign_immersive_x11
+}
+
+fn immersive_x11_window<D: SessionDriver>(
+    session: &Session<D>,
+    window: &smithay::desktop::Window,
+) -> bool {
+    crate::xwayland::is_x11(window)
+        && (crate::xwayland::is_fullscreen(window)
+            || window.wl_surface().is_some_and(|surface| {
+                session
+                    .fullscreen
+                    .is_fullscreen_or_pending(surface.as_ref())
+            }))
+}
+
+pub(super) fn relative_motion_allowed<D: SessionDriver>(
+    session: &Session<D>,
+    route: Option<&crate::input::pointer::PointerRoute>,
+) -> bool {
+    let Some(route) = route else {
+        // PointerHandle::relative_motion ignores its supplied focus and uses
+        // the handle's current focus. Do not let a failed hit test reuse a
+        // stale client focus.
+        return false;
+    };
+    let routed_window = match &route.target {
+        crate::input::pointer::PointerTarget::Window(window)
+        | crate::input::pointer::PointerTarget::Decoration { window, .. } => Some(window),
+        crate::input::pointer::PointerTarget::Layer(_)
+        | crate::input::pointer::PointerTarget::Background => None,
+    };
+    let routed_is_x11 = routed_window.is_some_and(crate::xwayland::is_x11);
+    if !routed_is_x11 {
+        return true;
+    }
+    let routed_is_immersive =
+        routed_window.is_some_and(|window| immersive_x11_window(session, window));
+    let foreign_immersive_x11 = session.wayland.space.elements().any(|window| {
+        routed_window.is_none_or(|routed| routed != window) && immersive_x11_window(session, window)
+    });
+    xwayland_relative_motion_allowed(routed_is_x11, routed_is_immersive, foreign_immersive_x11)
+}
+
+/// Xwayland coalesces `wl_pointer.motion` and relative-pointer motion until the
+/// pointer frame. When absolute motion arrives alone it emits XI_RawMotion from
+/// its absolute device; Wine games can consume that even while another X11
+/// window owns focus. Pair the absolute update with a zero relative delta so
+/// Xwayland marks the absolute half `POINTER_NORAW` while Steam still receives
+/// its normal core pointer motion.
+fn pair_xwayland_ui_absolute_motion<D: SessionDriver>(
+    session: &mut Session<D>,
+    pointer: &PointerHandle<Session<D>>,
+    route: &crate::input::pointer::PointerRoute,
+    time: u32,
+) {
+    if relative_motion_allowed(session, Some(route)) {
+        return;
+    }
+    let Some(focus) = route.focus.clone() else {
+        return;
+    };
+    pointer.relative_motion(
+        session,
+        Some(focus),
+        &RelativeMotionEvent {
+            delta: Point::from((0.0, 0.0)),
+            delta_unaccel: Point::from((0.0, 0.0)),
+            utime: u64::from(time) * 1_000,
+        },
+    );
 }
 
 pub(super) fn has_active_constraint<D: SessionDriver>(session: &Session<D>) -> bool {
@@ -215,6 +364,7 @@ fn route_and_update_client_focus<D: SessionDriver>(
                 time,
             },
         );
+        pair_xwayland_ui_absolute_motion(session, &pointer, &route, time);
         session.interactions.client_pointer_route = Some(routed_state);
     }
     Some(route)
@@ -354,13 +504,14 @@ pub(crate) fn refresh_desktop_client_focus<D: SessionDriver>(session: &mut Sessi
     }
     pointer.motion(
         session,
-        route.focus,
+        route.focus.clone(),
         &MotionEvent {
             location: route.location,
             serial: SERIAL_COUNTER.next_serial(),
             time,
         },
     );
+    pair_xwayland_ui_absolute_motion(session, &pointer, &route, time);
     session.interactions.client_pointer_route = Some(routed_state);
     finish_frame(session, &pointer);
 }
@@ -520,6 +671,7 @@ fn refresh_new_constraint_focus<D: SessionDriver>(
         return;
     }
 
+    let time = session.start_time.elapsed().as_millis() as u32;
     reset_client_cursor_image(session);
     constraints::deactivate_before_pointer_focus_change(session, routed_surface);
     pointer.motion(
@@ -528,9 +680,10 @@ fn refresh_new_constraint_focus<D: SessionDriver>(
         &MotionEvent {
             location: route.location,
             serial: SERIAL_COUNTER.next_serial(),
-            time: session.start_time.elapsed().as_millis() as u32,
+            time,
         },
     );
+    pair_xwayland_ui_absolute_motion(session, pointer, &route, time);
     session.interactions.client_pointer_route = Some(ClientPointerRoute::from_route(&route));
     eventline::debug!("pointer-constraint: refreshed focus from fresh route surface={surface:?}");
 }
@@ -561,7 +714,57 @@ mod tests {
         constraints, cursor_presentation_visible, desktop_refresh_allowed,
         interactive_overlay_cursor_override, interactive_overlay_forces_cursor,
         should_emit_absolute_motion, should_refresh_constraint_focus,
+        xwayland_relative_motion_allowed,
     };
+
+    #[test]
+    fn moving_popup_does_not_feed_its_own_motion_back_into_pointer_coordinates() {
+        let grab_origin = (1400.0, -300.0).into();
+        let pointer_screen = (1800.0, 1100.0);
+        for origin in [(1400.0, -300.0), (1410.0, -290.0), (2245.0, -1350.0)] {
+            let event =
+                super::popup_grab_location(grab_origin, pointer_screen.into(), origin.into());
+            // Smithay subtracts its frozen origin; XWayland reconstructs root
+            // pointer coordinates using the window's current X11 origin.
+            let client_local = event - grab_origin;
+            assert_eq!(
+                client_local + smithay::utils::Point::<f64, smithay::utils::Logical>::from(origin),
+                smithay::utils::Point::<f64, smithay::utils::Logical>::from(pointer_screen),
+            );
+        }
+    }
+
+    #[test]
+    fn popup_grab_coordinates_follow_target_across_output_camera_transforms() {
+        let grab_origin = (7000.0, -1800.0).into();
+        let expected_local = (370.0, 1400.0);
+        // Different output origins, camera offsets and zoom scales. Coordinates
+        // from another window under the pointer must never enter this equation.
+        for (screen_origin, world_origin, scale) in [
+            ((1400.0, -300.0), (7000.0, -1800.0), 1.0),
+            ((2560.0, -1000.0), (-8000.0, 9500.0), 0.5),
+            ((3100.0, -1300.0), (24000.0, -12500.0), 1.75),
+        ] {
+            let screen = (
+                screen_origin.0 + expected_local.0 * scale,
+                screen_origin.1 + expected_local.1 * scale,
+            );
+            let source = (
+                world_origin.0 + (screen.0 - screen_origin.0) / scale,
+                world_origin.1 + (screen.1 - screen_origin.1) / scale,
+            );
+            let event = super::popup_grab_location(grab_origin, source.into(), world_origin.into());
+            assert_eq!(event - grab_origin, expected_local.into());
+        }
+    }
+
+    #[test]
+    fn held_popup_click_keeps_outside_coordinates_without_clamping() {
+        let grab_origin = (500.0, -300.0).into();
+        let current_origin = (700.0, -900.0).into();
+        let event = super::popup_grab_location(grab_origin, (600.0, 2100.0).into(), current_origin);
+        assert_eq!(event - grab_origin, (-100.0, 3000.0).into());
+    }
 
     #[test]
     fn interactive_overlays_force_the_cursor_visible() {
@@ -620,6 +823,14 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn foreign_fullscreen_x11_client_uses_a_zero_relative_pair_for_ui_motion() {
+        assert!(!xwayland_relative_motion_allowed(true, false, true));
+        assert!(xwayland_relative_motion_allowed(true, true, true));
+        assert!(xwayland_relative_motion_allowed(true, false, false));
+        assert!(xwayland_relative_motion_allowed(false, false, true));
     }
 
     #[test]
@@ -696,4 +907,25 @@ mod tests {
         assert!(!cursor_presentation_visible(true, false));
         assert!(!cursor_presentation_visible(false, false));
     }
+}
+
+/// Transfer handoffs must not interrupt an existing drag or constrained pointer.
+pub(crate) fn transfer_pointer_available<D: SessionDriver>(session: &Session<D>) -> bool {
+    matches!(session.interactions.grab, crate::input::grab::Grab::None)
+        && !session
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        && !has_active_constraint(session)
+}
+
+/// Refresh pointer delivery without treating a compositor warp as hover input.
+pub(crate) fn warp_after_transfer<D: SessionDriver>(
+    session: &mut Session<D>,
+    position: (f64, f64),
+) {
+    session.pointer.set_position(position);
+    session.cursor_policy.pointer_activity();
+    update_client_state(session, session.start_time.elapsed().as_millis() as u32);
+    session.request_redraw();
 }

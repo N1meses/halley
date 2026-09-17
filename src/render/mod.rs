@@ -1,4 +1,5 @@
 mod app_icon;
+pub mod arrange_texture;
 pub mod background;
 pub mod close;
 pub mod effects;
@@ -11,9 +12,11 @@ pub mod rescale;
 pub mod resize;
 pub mod resources;
 pub mod scene;
+mod selection_check;
 pub mod text;
 pub mod titlebar;
 pub mod window_decoration;
+pub mod window_shader;
 pub mod window_texture;
 
 use halley_config::Decorations;
@@ -207,7 +210,7 @@ pub struct DesktopContext<'a> {
     pub space: &'a Space<Window>,
     pub focused: Option<&'a WlSurface>,
     pub cameras: &'a crate::presentation::camera::OutputCameras,
-    pub window_open_animations: &'a crate::animation::WindowOpenAnimations,
+    pub window_animations: &'a crate::animation::WindowAnimations,
     pub fullscreen: &'a crate::wayland::fullscreen::FullscreenManager,
     pub maximize: &'a crate::presentation::maximize::FieldMaximizeManager,
     pub nodes: &'a crate::nodes::NodesState,
@@ -235,6 +238,7 @@ pub struct OverlayContext<'a> {
     pub bearings: &'a crate::shell::bearings::BearingsState,
     pub focus_cycle: &'a crate::shell::focus_cycle::FocusCycleState,
     pub apogee: &'a crate::shell::apogee::ApogeeState,
+    pub cluster_composer: &'a crate::shell::cluster_composer::ClusterComposerState,
     pub apogee_config: halley_config::Apogee,
     pub overlays: &'a crate::shell::overlay::OverlayManager,
     pub overlay_config: &'a halley_config::Overlays,

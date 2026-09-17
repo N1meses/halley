@@ -152,6 +152,7 @@ impl BackdropBlurRenderer {
         self.outputs.remove(output);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn blur_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -630,13 +631,7 @@ fn run_blur(
                     up,
                 )?;
             }
-            render_pass(
-                &textures.chain[0],
-                level_size(size, 0),
-                result,
-                size,
-                up,
-            )?;
+            render_pass(&textures.chain[0], level_size(size, 0), result, size, up)?;
             Ok(())
         })();
         gl.DeleteFramebuffers(1, &fbo);

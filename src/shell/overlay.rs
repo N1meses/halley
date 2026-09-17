@@ -50,31 +50,6 @@ impl Notification {
 }
 
 #[derive(Clone, Debug)]
-struct ExitConfirmation {
-    opened_at: Duration,
-    closing: Option<(Duration, f32)>,
-}
-
-impl ExitConfirmation {
-    fn mix(&self, now: Duration) -> f32 {
-        self.closing.map_or_else(
-            || transition_progress(now.saturating_sub(self.opened_at)),
-            |(closed_at, from)| from * (1.0 - transition_progress(now.saturating_sub(closed_at))),
-        )
-    }
-
-    fn finished(&self, now: Duration) -> bool {
-        self.closing
-            .is_some_and(|(at, _)| now >= at + TRANSITION_DURATION)
-    }
-
-    fn animating(&self, now: Duration) -> bool {
-        !self.finished(now)
-            && (now < self.opened_at + TRANSITION_DURATION || self.closing.is_some())
-    }
-}
-
-#[derive(Clone, Debug)]
 struct ZoomIndicator {
     scale: f32,
     shown_at: Duration,
@@ -106,11 +81,45 @@ impl ZoomIndicator {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ClusterIndicator {
+    label: String,
+    shown_at: Duration,
+    expires_at: Duration,
+    expiry_notified: bool,
+}
+
+impl ClusterIndicator {
+    fn mix(&self, now: Duration) -> f32 {
+        if now >= self.expires_at {
+            return 1.0 - transition_progress(now.saturating_sub(self.expires_at));
+        }
+        transition_progress(now.saturating_sub(self.shown_at))
+    }
+
+    fn finished(&self, now: Duration) -> bool {
+        now >= self.expires_at + TRANSITION_DURATION
+    }
+
+    fn animating(&self, now: Duration) -> bool {
+        !self.finished(now) && (now < self.shown_at + TRANSITION_DURATION || now >= self.expires_at)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ClusterDeleteConfirmation {
+    cluster_id: halley_core::cluster::ClusterId,
+    output: String,
+    name: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OverlayManager {
-    exit: Option<ExitConfirmation>,
+    exit: bool,
+    cluster_delete: Option<ClusterDeleteConfirmation>,
     notification: Option<Notification>,
     zoom_indicators: HashMap<String, ZoomIndicator>,
+    cluster_indicators: HashMap<String, ClusterIndicator>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,40 +135,78 @@ pub struct ZoomIndicatorSnapshot {
     pub mix: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct ClusterIndicatorSnapshot {
+    pub label: String,
+    pub mix: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfirmationSnapshot {
+    pub title: String,
+    pub message: String,
+    pub confirm_label: &'static str,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OverlaySnapshot {
     pub exit_mix: Option<f32>,
+    pub confirmation: Option<ConfirmationSnapshot>,
     pub notification: Option<NotificationSnapshot>,
     pub zoom_indicator: Option<ZoomIndicatorSnapshot>,
+    pub cluster_indicator: Option<ClusterIndicatorSnapshot>,
 }
 
 impl OverlayManager {
-    pub fn exit_modal_active(&self) -> bool {
-        self.exit
-            .as_ref()
-            .is_some_and(|confirmation| confirmation.closing.is_none())
+    pub fn confirmation_modal_active(&self) -> bool {
+        self.exit || self.cluster_delete.is_some()
     }
 
-    pub fn show_exit(&mut self, now: Duration) -> bool {
-        if self.exit_modal_active() {
+    pub fn exit_modal_active(&self) -> bool {
+        self.exit
+    }
+
+    pub fn cluster_delete_modal_active(&self) -> bool {
+        self.cluster_delete.is_some()
+    }
+
+    pub fn show_exit(&mut self, _now: Duration) -> bool {
+        if self.confirmation_modal_active() {
             return false;
         }
-        self.exit = Some(ExitConfirmation {
-            opened_at: now,
-            closing: None,
+        self.exit = true;
+        true
+    }
+
+    pub fn cancel_exit(&mut self, _now: Duration) -> bool {
+        std::mem::take(&mut self.exit)
+    }
+
+    pub fn show_cluster_delete(
+        &mut self,
+        cluster_id: halley_core::cluster::ClusterId,
+        output: String,
+        name: String,
+    ) -> bool {
+        if self.confirmation_modal_active() {
+            return false;
+        }
+        self.cluster_delete = Some(ClusterDeleteConfirmation {
+            cluster_id,
+            output,
+            name,
         });
         true
     }
 
-    pub fn cancel_exit(&mut self, now: Duration) -> bool {
-        let Some(exit) = self.exit.as_mut() else {
-            return false;
-        };
-        if exit.closing.is_some() {
-            return false;
-        }
-        exit.closing = Some((now, exit.mix(now)));
-        true
+    pub fn cancel_cluster_delete(&mut self) -> bool {
+        self.cluster_delete.take().is_some()
+    }
+
+    pub fn take_cluster_delete(&mut self) -> Option<(halley_core::cluster::ClusterId, String)> {
+        self.cluster_delete
+            .take()
+            .map(|confirmation| (confirmation.cluster_id, confirmation.output))
     }
 
     pub fn show_config_success(
@@ -295,6 +342,28 @@ impl OverlayManager {
         true
     }
 
+    pub fn show_cluster_indicator(
+        &mut self,
+        output: &str,
+        name: &str,
+        layout: halley_core::cluster::layout::ClusterWorkspaceLayoutKind,
+        now: Duration,
+    ) {
+        let layout = match layout {
+            halley_core::cluster::layout::ClusterWorkspaceLayoutKind::Tiling => "Tiling",
+            halley_core::cluster::layout::ClusterWorkspaceLayoutKind::Stacking => "Stacking",
+        };
+        self.cluster_indicators.insert(
+            output.to_string(),
+            ClusterIndicator {
+                label: format!("{}  ·  {layout}", name.trim()),
+                shown_at: now,
+                expires_at: now + Duration::from_millis(900),
+                expiry_notified: false,
+            },
+        );
+    }
+
     pub fn reload_zoom_indicator(&mut self, config: &halley_config::ZoomIndicator) -> bool {
         if config.enabled || self.zoom_indicators.is_empty() {
             return false;
@@ -305,15 +374,20 @@ impl OverlayManager {
 
     pub fn remove_output(&mut self, output: &str) {
         self.zoom_indicators.remove(output);
+        self.cluster_indicators.remove(output);
     }
 
     pub fn snapshot(&self, output: &str, now: Duration) -> OverlaySnapshot {
         OverlaySnapshot {
-            exit_mix: self
-                .exit
-                .as_ref()
-                .map(|confirmation| confirmation.mix(now))
-                .filter(|mix| *mix > 0.001),
+            exit_mix: self.exit.then_some(1.0),
+            confirmation: self.cluster_delete.as_ref().and_then(|confirmation| {
+                (confirmation.output == output).then(|| ConfirmationSnapshot {
+                    title: format!("Delete {}?", confirmation.name.trim()),
+                    message: "Its windows will return to the Field. Applications will remain open."
+                        .to_string(),
+                    confirm_label: "delete",
+                })
+            }),
             notification: self.notification.as_ref().and_then(|notification| {
                 (notification.output == output && !notification.finished(now)).then(|| {
                     NotificationSnapshot {
@@ -329,19 +403,25 @@ impl OverlayManager {
                     mix: indicator.mix(now),
                 })
             }),
+            cluster_indicator: self.cluster_indicators.get(output).and_then(|indicator| {
+                (!indicator.finished(now)).then(|| ClusterIndicatorSnapshot {
+                    label: indicator.label.clone(),
+                    mix: indicator.mix(now),
+                })
+            }),
         }
     }
 
     pub fn animating(&self, now: Duration) -> bool {
-        self.exit
+        self.notification
             .as_ref()
-            .is_some_and(|confirmation| confirmation.animating(now))
-            || self
-                .notification
-                .as_ref()
-                .is_some_and(|notification| notification.animating(now))
+            .is_some_and(|notification| notification.animating(now))
             || self
                 .zoom_indicators
+                .values()
+                .any(|indicator| indicator.animating(now))
+            || self
+                .cluster_indicators
                 .values()
                 .any(|indicator| indicator.animating(now))
     }
@@ -366,14 +446,6 @@ impl OverlayManager {
             self.notification = None;
             redraw = true;
         }
-        if self
-            .exit
-            .as_ref()
-            .is_some_and(|confirmation| confirmation.finished(now))
-        {
-            self.exit = None;
-            redraw = true;
-        }
         for indicator in self.zoom_indicators.values_mut() {
             if now >= indicator.expires_at && !indicator.expiry_notified {
                 indicator.expiry_notified = true;
@@ -384,6 +456,16 @@ impl OverlayManager {
         self.zoom_indicators
             .retain(|_, indicator| !indicator.finished(now));
         redraw |= self.zoom_indicators.len() != before;
+        for indicator in self.cluster_indicators.values_mut() {
+            if now >= indicator.expires_at && !indicator.expiry_notified {
+                indicator.expiry_notified = true;
+                redraw = true;
+            }
+        }
+        let before = self.cluster_indicators.len();
+        self.cluster_indicators
+            .retain(|_, indicator| !indicator.finished(now));
+        redraw |= self.cluster_indicators.len() != before;
         redraw
     }
 }
@@ -456,13 +538,85 @@ mod tests {
     }
 
     #[test]
-    fn exit_confirmation_is_idempotent_and_modal_only_while_open() {
+    fn exit_confirmation_is_instant_and_idempotent() {
         let mut overlays = OverlayManager::default();
         assert!(overlays.show_exit(Duration::ZERO));
+        assert_eq!(
+            overlays.snapshot("DP-1", Duration::ZERO).exit_mix,
+            Some(1.0)
+        );
+        assert!(!overlays.animating(Duration::ZERO));
         assert!(!overlays.show_exit(Duration::from_millis(1)));
         assert!(overlays.exit_modal_active());
+
         assert!(overlays.cancel_exit(Duration::from_millis(20)));
+        assert_eq!(
+            overlays
+                .snapshot("DP-1", Duration::from_millis(20))
+                .exit_mix,
+            None
+        );
         assert!(!overlays.exit_modal_active());
+        assert!(!overlays.cancel_exit(Duration::from_millis(21)));
+    }
+
+    #[test]
+    fn populated_cluster_delete_explains_that_windows_survive() {
+        let mut overlays = OverlayManager::default();
+        let cluster = halley_core::cluster::ClusterId::new(7);
+        assert!(overlays.show_cluster_delete(cluster, "DP-1".into(), "Work".into()));
+        assert!(overlays.confirmation_modal_active());
+        assert!(!overlays.show_exit(Duration::ZERO));
+        assert!(
+            overlays
+                .snapshot("DP-2", Duration::ZERO)
+                .confirmation
+                .is_none()
+        );
+
+        let confirmation = overlays
+            .snapshot("DP-1", Duration::ZERO)
+            .confirmation
+            .expect("confirmation");
+        assert_eq!(confirmation.title, "Delete Work?");
+        assert!(confirmation.message.contains("return to the Field"));
+        assert!(confirmation.message.contains("remain open"));
+        assert_eq!(
+            overlays.take_cluster_delete(),
+            Some((cluster, "DP-1".into()))
+        );
+        assert!(!overlays.confirmation_modal_active());
+    }
+
+    #[test]
+    fn cluster_indicator_names_the_workspace_and_layout_then_expires() {
+        let mut overlays = OverlayManager::default();
+        overlays.show_cluster_indicator(
+            "DP-1",
+            "Work",
+            halley_core::cluster::layout::ClusterWorkspaceLayoutKind::Tiling,
+            Duration::ZERO,
+        );
+
+        let visible = overlays
+            .snapshot("DP-1", Duration::from_millis(180))
+            .cluster_indicator
+            .unwrap();
+        assert_eq!(visible.label, "Work  ·  Tiling");
+        assert_eq!(visible.mix, 1.0);
+        assert!(
+            overlays
+                .snapshot("DP-2", Duration::from_millis(180))
+                .cluster_indicator
+                .is_none()
+        );
+        assert!(overlays.wakeup(Duration::from_millis(900)));
+        assert!(
+            overlays
+                .snapshot("DP-1", Duration::from_millis(1_080))
+                .cluster_indicator
+                .is_none()
+        );
     }
 
     #[test]

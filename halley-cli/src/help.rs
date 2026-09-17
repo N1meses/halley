@@ -10,7 +10,8 @@ Commands:
   cluster        List, inspect, switch, or change cluster workspaces
   bearings       Show, hide, toggle, or inspect Bearings
   trail          Navigate or inspect per-monitor focus history
-  monitor        Focus a directional or exactly named monitor
+  pan            Pan the selected Field: left|right|up|down
+  monitor        Focus a monitor or transfer the selected Field window
   stack          Cycle an active stacking cluster
   tile           Focus or swap cluster tiles
   portal         Inspect the desktop portal backend
@@ -55,9 +56,9 @@ Usage:
   halleyctl config migrate [--dry-run] --config PATH
 
 `edit` uses $VISUAL, then $EDITOR, and falls back to vi.
-`migrate` replaces pre-0.6 files with the current default (keeping a
-timestamped backup), then applies versioned compatibility entries to 0.6
-configs. Use --dry-run to inspect it first.
+`migrate` explicitly applies structurally detected compatibility updates. It
+validates the complete result and keeps a timestamped backup. Pre-0.6 files
+require replacement with the current default. Use --dry-run to inspect first.
 ";
 
 pub const NODE_HELP: &str = "\
@@ -102,6 +103,7 @@ Selectors:
 pub const MONITOR_HELP: &str = "\
 Usage:
   halleyctl monitor focus left|right|up|down|OUTPUT
+  halleyctl monitor transfer left|right|up|down
 ";
 
 pub const STACK_HELP: &str = "\

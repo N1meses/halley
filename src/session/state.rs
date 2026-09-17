@@ -17,6 +17,7 @@ use smithay::wayland::drm_syncobj::{DrmSyncPointSource, DrmSyncobjState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
+use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::pointer_constraints::PointerConstraintsState;
@@ -31,6 +32,7 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::ShmState;
+use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
@@ -114,6 +116,7 @@ pub struct Session<D: SessionDriver> {
     pub(crate) key_repeat: super::input::repeat::Policy<D>,
     pub(super) launch_environment: super::environment::LaunchEnvironment,
     pub(super) autostart: super::autostart::Autostart,
+    pub(super) startup_clusters: super::startup_clusters::StartupClusters,
     pub pointer: Pointer,
     pub cursor: CursorManager,
     pub(crate) cursor_policy: super::cursor::Policy<D>,
@@ -121,6 +124,7 @@ pub struct Session<D: SessionDriver> {
     pub wayland: WaylandState,
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
+    pub(crate) popup_grab: Option<smithay::desktop::PopupGrab<Self>>,
     pub idle_notifier_state: IdleNotifierState<Self>,
     pub presentation_state: PresentationState,
     pub drm_syncobj_state: Option<DrmSyncobjState>,
@@ -136,7 +140,6 @@ pub struct Session<D: SessionDriver> {
     pub(crate) trail: crate::trail::TrailState,
     pub clusters: crate::clusters::ClusterSystem,
     pub(crate) api_subscriptions: crate::ipc::ApiSubscriptions,
-    pub pending_pointer_warp: Option<WlSurface>,
     pub window_rules: crate::window::rules::WindowRulesState,
     pub(crate) presentation_close_size_recovery:
         crate::window::recovery::PresentationCloseSizeRecovery,
@@ -152,7 +155,7 @@ pub struct Session<D: SessionDriver> {
     pub(super) window_trace: super::trace::WindowTrace,
     pub keyboard_monitor: Option<crate::accessibility::KeyboardMonitorService>,
     pub opening_origins: super::opening::OpeningOrigins,
-    pub window_open_animations: crate::animation::WindowOpenAnimations,
+    pub window_animations: crate::animation::WindowAnimations,
     pub render: crate::render::resources::RenderState,
     pub fullscreen: crate::wayland::fullscreen::FullscreenManager,
     pub maximize: crate::presentation::maximize::FieldMaximizeManager,
@@ -175,6 +178,7 @@ impl<D: SessionDriver> Session<D> {
             self.cursor.size(),
             &self.launch_environment,
         );
+        self.run_startup_cluster_commands();
     }
 
     pub(crate) fn run_autostart_reload(&mut self, commands: &[String]) {
@@ -222,6 +226,10 @@ impl<D: SessionDriver> Session<D> {
             VirtualKeyboardManagerState::new::<Self, _>(&display_handle, |client| {
                 client.get_data::<ClientState>().is_some()
             }),
+            TextInputManagerState::new::<Self>(&display_handle),
+            InputMethodManagerState::new::<Self, _>(&display_handle, |client| {
+                client.get_data::<ClientState>().is_some()
+            }),
             KeyboardShortcutsInhibitState::new::<Self>(&display_handle),
             ShmState::new::<Self>(&display_handle, vec![]),
             OutputManagerState::new_with_xdg_output::<Self>(&display_handle),
@@ -244,6 +252,15 @@ impl<D: SessionDriver> Session<D> {
 
     pub fn request_output_redraw(&mut self, output: &Output) {
         self.driver.request_redraw(Some(output));
+    }
+
+    pub fn apply_system_color_scheme(&mut self, scheme: halley_config::SystemColorScheme) {
+        let changed = self.settings.set_system_color_scheme(scheme)
+            | self.nodes.set_system_color_scheme(scheme);
+        if changed {
+            eventline::debug!("appearance: applied system colour scheme {scheme:?}");
+            self.request_redraw();
+        }
     }
 
     pub fn notification_output_name(&self) -> String {
@@ -290,6 +307,43 @@ impl<D: SessionDriver> Session<D> {
         {
             self.request_redraw();
         }
+    }
+
+    pub(crate) fn request_cluster_dissolution(
+        &mut self,
+        cluster_id: halley_core::cluster::ClusterId,
+    ) {
+        let Some(metadata) = self.clusters.metadata(cluster_id).cloned() else {
+            return;
+        };
+        if self.clusters.member_ids(cluster_id).is_empty() {
+            super::dissolve_cluster(self, cluster_id);
+            return;
+        }
+        if !self
+            .shell
+            .overlays
+            .show_cluster_delete(cluster_id, metadata.output, metadata.name)
+        {
+            return;
+        }
+        super::cancel_compositor_grab(self);
+        super::gesture::cancel_all(self);
+        super::touch::cancel_all(self);
+        self.request_redraw();
+    }
+
+    pub(crate) fn cancel_cluster_dissolution(&mut self) {
+        if self.shell.overlays.cancel_cluster_delete() {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn confirm_cluster_dissolution(&mut self) {
+        let Some((cluster_id, _)) = self.shell.overlays.take_cluster_delete() else {
+            return;
+        };
+        super::dissolve_cluster(self, cluster_id);
     }
 
     pub fn show_exit_confirmation(&mut self) {
@@ -379,17 +433,20 @@ impl<D: SessionDriver> Session<D> {
                 &self.settings.font,
             );
         }
-        self.window_open_animations.reload(config.animations);
+        self.window_animations.reload(config.animations.clone());
         self.render
             .window_close_animations
-            .reload(config.animations);
-        let fullscreen_redraw = self.fullscreen.reload(config.animations);
+            .reload(config.animations.clone());
+        self.render.window_shaders.reload(&config.animations);
+        let fullscreen_redraw = self.fullscreen.reload(config.animations.clone());
         if fullscreen_redraw {
             self.render.fullscreen_textures.remove_owner(
                 crate::render::fullscreen_texture::TextureTransitionOwner::Fullscreen,
             );
         }
-        let maximize_redraw = self.maximize.reload(config.field, config.animations);
+        let maximize_redraw = self
+            .maximize
+            .reload(config.field, config.animations.clone());
         if maximize_redraw {
             self.render
                 .fullscreen_textures

@@ -19,6 +19,10 @@ pub(crate) struct WindowVisualState {
     pub(crate) presentation_rect: Rectangle<i32, Physical>,
     pub(crate) animated_rect: Rectangle<i32, Physical>,
     pub(crate) opening_alpha: f32,
+    opening_progress: f32,
+    opening_clamped_progress: f32,
+    opening_random_seed: f32,
+    shader_pixels: bool,
     pub(crate) fullscreen: Option<crate::wayland::fullscreen::FullscreenPresentation>,
     pub(crate) maximize: Option<crate::presentation::maximize::FieldMaximizePresentation>,
     pub(crate) camera_center: Point<f32, Physical>,
@@ -91,6 +95,22 @@ impl WindowVisualState {
     pub(crate) fn maps_from_source(self) -> bool {
         self.inherited_presentation || self.fullscreen.is_some() || self.maximize.is_some()
     }
+
+    pub(crate) fn shader_pixels(self) -> bool {
+        self.shader_pixels
+    }
+
+    pub(crate) fn opening_progress(self) -> f32 {
+        self.opening_progress
+    }
+
+    pub(crate) fn opening_clamped_progress(self) -> f32 {
+        self.opening_clamped_progress
+    }
+
+    pub(crate) fn opening_random_seed(self) -> f32 {
+        self.opening_random_seed
+    }
 }
 
 fn output_local_zoom_scale(space: PresentationSpace, view_scale: f32) -> f32 {
@@ -147,7 +167,7 @@ pub(crate) fn window_visual_state(
     nodes: Option<&crate::nodes::NodesState>,
     window: &Window,
     output: &Output,
-    window_open_animations: &crate::animation::WindowOpenAnimations,
+    window_animations: &crate::animation::WindowAnimations,
     fullscreen: &crate::wayland::fullscreen::FullscreenManager,
     maximize: &crate::presentation::maximize::FieldMaximizeManager,
     decorations: &halley_config::Decorations,
@@ -161,7 +181,7 @@ pub(crate) fn window_visual_state(
         nodes,
         window,
         output,
-        window_open_animations,
+        window_animations,
         fullscreen,
         maximize,
         decorations,
@@ -179,7 +199,7 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
     nodes: Option<&crate::nodes::NodesState>,
     window: &Window,
     output: &Output,
-    window_open_animations: &crate::animation::WindowOpenAnimations,
+    window_animations: &crate::animation::WindowAnimations,
     fullscreen: &crate::wayland::fullscreen::FullscreenManager,
     maximize: &crate::presentation::maximize::FieldMaximizeManager,
     decorations: &halley_config::Decorations,
@@ -257,6 +277,16 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
             (Some(rect.to_physical(1)), Some(depth), alpha)
         }
     };
+    // Unparented override-redirect surfaces are positioned by the X11 client
+    // in root-screen coordinates. Keep their size and position independent of
+    // the Field camera; attached menus still inherit their owner's transform.
+    let cluster_rect = standalone_x11_screen_rect(
+        crate::xwayland::is_override_redirect(window),
+        crate::wayland::window_presentation_owner(window).is_some(),
+        source_geometry,
+        output_geometry.loc,
+    )
+    .or(cluster_rect);
     let mut camera_rect = output_local_or_field_rect(
         cluster_rect,
         source_geometry,
@@ -264,7 +294,7 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
         output_size,
         view.scale,
     );
-    let opening_visual = window_open_animations
+    let opening_visual = window_animations
         .visual(window_surface.as_ref(), now, camera_rect)
         .unwrap_or_default();
     let fullscreen_presentation = fullscreen.presentation(window_surface.as_ref(), output, now);
@@ -314,8 +344,15 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
             })
         })
         .unwrap_or(camera_rect);
-    let mut animated_rect = opening_visual.transform_rect(presentation_rect, presentation_rect);
+    let opening_rect = opening_visual.transform_rect(presentation_rect, presentation_rect);
+    let mut animated_rect = window_animations
+        .arrange_visual(window_surface.as_ref(), now)
+        .unwrap_or(opening_rect);
     let mut opening_alpha = opening_visual.alpha() * cluster_alpha;
+    let mut opening_progress = opening_visual.progress() as f32;
+    let mut opening_clamped_progress = opening_visual.clamped_progress() as f32;
+    let mut opening_random_seed = opening_visual.random_seed();
+    let mut shader_pixels = opening_visual.shader_pixels();
     let mut inherited_presentation = cluster_rect.is_some();
     let mut presentation_space = if cluster_rect.is_some()
         || fullscreen_presentation.is_some()
@@ -366,7 +403,7 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
             nodes,
             &owner,
             output,
-            window_open_animations,
+            window_animations,
             fullscreen,
             maximize,
             decorations,
@@ -385,6 +422,10 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
             owner_visual.animated_rect,
         );
         opening_alpha = owner_visual.opening_alpha;
+        opening_progress = owner_visual.opening_progress;
+        opening_clamped_progress = owner_visual.opening_clamped_progress;
+        opening_random_seed = owner_visual.opening_random_seed;
+        shader_pixels = owner_visual.shader_pixels;
         inherited_camera_center = owner_visual.camera_center;
         inherited_zoom_scale = owner_visual.zoom_scale;
         inherited_cluster_depth = owner_visual.cluster_depth;
@@ -400,6 +441,10 @@ pub(crate) fn window_visual_state_with_cluster_presentation(
         presentation_rect,
         animated_rect,
         opening_alpha,
+        opening_progress,
+        opening_clamped_progress,
+        opening_random_seed,
+        shader_pixels,
         fullscreen: fullscreen_presentation,
         maximize: maximize_presentation,
         camera_center: inherited_camera_center,
@@ -437,7 +482,7 @@ impl WindowPresentation {
         cameras: &OutputCameras,
         clusters: Option<&crate::clusters::ClusterSystem>,
         nodes: Option<&crate::nodes::NodesState>,
-        window_open_animations: &crate::animation::WindowOpenAnimations,
+        window_animations: &crate::animation::WindowAnimations,
         fullscreen: &crate::wayland::fullscreen::FullscreenManager,
         maximize: &crate::presentation::maximize::FieldMaximizeManager,
         decorations: &halley_config::Decorations,
@@ -455,7 +500,7 @@ impl WindowPresentation {
             nodes,
             window,
             output,
-            window_open_animations,
+            window_animations,
             fullscreen,
             maximize,
             decorations,
@@ -509,7 +554,7 @@ impl WindowPresentation {
         clusters: Option<&crate::clusters::ClusterSystem>,
         nodes: Option<&crate::nodes::NodesState>,
         primary: &Output,
-        window_open_animations: &crate::animation::WindowOpenAnimations,
+        window_animations: &crate::animation::WindowAnimations,
         fullscreen: &crate::wayland::fullscreen::FullscreenManager,
         maximize: &crate::presentation::maximize::FieldMaximizeManager,
         decorations: &halley_config::Decorations,
@@ -531,7 +576,7 @@ impl WindowPresentation {
             cameras,
             clusters,
             nodes,
-            window_open_animations,
+            window_animations,
             fullscreen,
             maximize,
             decorations,
@@ -1056,13 +1101,15 @@ mod tests {
         };
         use smithay::wayland::shell::xdg::PositionerState;
 
-        let mut positioner = PositionerState::default();
-        positioner.rect_size = (200, 300).into();
-        positioner.anchor_rect = Rectangle::new((50, 50).into(), (1, 1).into());
-        positioner.anchor_edges = Anchor::TopLeft;
-        positioner.gravity = Gravity::BottomRight;
-        positioner.constraint_adjustment = ConstraintAdjustment::SlideX;
-        positioner.offset = (0, 0).into();
+        let positioner = PositionerState {
+            rect_size: (200, 300).into(),
+            anchor_rect: Rectangle::new((50, 50).into(), (1, 1).into()),
+            anchor_edges: Anchor::TopLeft,
+            gravity: Gravity::BottomRight,
+            constraint_adjustment: ConstraintAdjustment::SlideX,
+            offset: (0, 0).into(),
+            ..Default::default()
+        };
 
         let output = Rectangle::<i32, Logical>::new((0, 0).into(), (1920, 1080).into());
         let source = output;
@@ -1087,5 +1134,48 @@ mod tests {
             "the old camera box must actually slide a corner menu"
         );
         assert_eq!(kept.loc, requested.loc);
+    }
+}
+
+fn standalone_x11_screen_rect(
+    override_redirect: bool,
+    has_owner: bool,
+    geometry: Rectangle<i32, Logical>,
+    output_origin: Point<i32, Logical>,
+) -> Option<Rectangle<i32, Physical>> {
+    (override_redirect && !has_owner).then(|| {
+        Rectangle::new(
+            (geometry.loc - output_origin).to_physical(1),
+            geometry.size.to_physical(1),
+        )
+    })
+}
+
+#[cfg(test)]
+mod standalone_popup_tests {
+    use super::*;
+    #[test]
+    fn standalone_popup_keeps_screen_geometry_across_output_origins() {
+        let rect = Rectangle::new((2500, -300).into(), (772, 2849).into());
+        for origin in [Point::from((0, 0)), Point::from((2560, 0))] {
+            let local = standalone_x11_screen_rect(true, false, rect, origin).unwrap();
+            for zoom in [0.25, 0.5, 1.0, 2.0] {
+                let rendered = output_local_or_field_rect(
+                    Some(local),
+                    rect,
+                    Point::from((8000.0, -2000.0)),
+                    (2560, 1440).into(),
+                    zoom,
+                );
+                assert_eq!(rendered, local);
+                assert_eq!(rendered.size, rect.size.to_physical(1));
+            }
+        }
+    }
+    #[test]
+    fn managed_windows_and_attached_popups_keep_existing_transforms() {
+        let rect = Rectangle::new((100, 200).into(), (400, 300).into());
+        assert!(standalone_x11_screen_rect(false, false, rect, (0, 0).into()).is_none());
+        assert!(standalone_x11_screen_rect(true, true, rect, (0, 0).into()).is_none());
     }
 }

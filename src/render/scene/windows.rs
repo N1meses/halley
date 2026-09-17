@@ -24,6 +24,7 @@ pub(super) struct LiveWindowScene {
 }
 
 pub(super) struct LiveWindowRenderers<'a> {
+    pub arrange_textures: &'a mut crate::render::arrange_texture::ArrangeTextureTransitions,
     pub fullscreen_textures:
         &'a mut crate::render::fullscreen_texture::FullscreenTextureTransitions,
     pub backdrop_blur: &'a mut crate::render::effects::backdrop_blur::BackdropBlurRenderer,
@@ -33,6 +34,7 @@ pub(super) struct LiveWindowRenderers<'a> {
     pub node: &'a mut crate::render::node::NodeRenderer,
     pub text: &'a mut crate::render::text::UiTextRenderer,
     pub pin: &'a mut crate::render::pin::PinRenderer,
+    pub window_shaders: &'a mut crate::render::window_shader::WindowAnimationShaders,
 }
 
 #[derive(Clone, Copy)]
@@ -52,7 +54,7 @@ pub(super) struct LiveWindowContext<'a> {
     pub(super) font: &'a halley_config::Font,
     pub(super) blur: halley_config::Blur,
     pub(super) shadow_config: halley_config::ShadowLayer,
-    pub(super) window_open_animations: &'a crate::animation::WindowOpenAnimations,
+    pub(super) window_animations: &'a crate::animation::WindowAnimations,
     pub(super) fullscreen: &'a crate::wayland::fullscreen::FullscreenManager,
     pub(super) maximize: &'a crate::presentation::maximize::FieldMaximizeManager,
     pub(super) window_rules: &'a crate::window::rules::WindowRulesState,
@@ -73,6 +75,129 @@ fn active_crossfade_completion(completion: Option<f64>) -> Option<f64> {
 
 fn compositor_chrome_visible(logical_fullscreen: bool, x11_fullscreen: bool) -> bool {
     !logical_fullscreen && !x11_fullscreen
+}
+
+/// Window-rule opacity fades client pixels. Compositor chrome stays on the
+/// opening/cluster fade only, matching niri's split.
+fn window_content_and_chrome_alpha(
+    opening_alpha: f32,
+    rule_opacity: f32,
+    chrome_visible: bool,
+) -> (f32, f32) {
+    let content_alpha = opening_alpha * rule_opacity;
+    let chrome_alpha = if chrome_visible { opening_alpha } else { 0.0 };
+    (content_alpha, chrome_alpha)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opening_shader_elements(
+    renderer: &mut GlesRenderer,
+    window: &smithay::desktop::Window,
+    context: &LiveWindowContext<'_>,
+    shaders: &crate::render::window_shader::WindowAnimationShaders,
+    titlebar_renderer: &mut crate::render::titlebar::TitlebarRenderer,
+    window_decoration_renderer: &mut crate::render::window_decoration::WindowDecorationRenderer,
+    node_renderer: &mut crate::render::node::NodeRenderer,
+    ui_text: &mut crate::render::text::UiTextRenderer,
+    visual: &crate::presentation::window::WindowVisualState,
+    chrome_visible: bool,
+    focused: bool,
+    alpha: f32,
+) -> Result<Option<Vec<SceneElement>>, Box<dyn Error>> {
+    let Some(surface) = window.wl_surface() else {
+        return Ok(None);
+    };
+    let geo = opening_shader_geo(
+        window,
+        visual,
+        context.decorations,
+        context.font,
+        chrome_visible,
+    );
+    if geo.size.w <= 0 || geo.size.h <= 0 {
+        return Ok(None);
+    }
+    let texture = crate::render::window_texture::capture_decorated(
+        renderer,
+        window,
+        None,
+        context.decorations,
+        context.font,
+        focused,
+        chrome_visible,
+        context.maximize.contains(surface.as_ref()),
+        titlebar_renderer,
+        window_decoration_renderer,
+        node_renderer,
+        ui_text,
+    )?;
+    let Some(shader) = shaders.open_element(
+        renderer,
+        &texture,
+        crate::render::window_decoration::surface_slot_for_instance(
+            surface.as_ref(),
+            crate::render::window_decoration::slot::JOIN_TINT,
+            context.instance_identity,
+        ),
+        geo,
+        visual.opening_progress(),
+        visual.opening_clamped_progress(),
+        visual.opening_random_seed(),
+        alpha,
+    ) else {
+        return Ok(None);
+    };
+    // A geometry shadow would remain a solid rectangle while an arbitrary
+    // shader deforms or dissolves its pixels. Matching that silhouette would
+    // require rendering and blurring a separate alpha mask, so custom window
+    // shaders deliberately own the complete visual here.
+    Ok(Some(vec![SceneElement::WindowShader(shader)]))
+}
+
+fn opening_shader_geo(
+    window: &smithay::desktop::Window,
+    visual: &crate::presentation::window::WindowVisualState,
+    decorations: &halley_config::Decorations,
+    font: &halley_config::Font,
+    chrome_visible: bool,
+) -> Rectangle<i32, Physical> {
+    if !chrome_visible {
+        return visual.animated_rect;
+    }
+    let opening_scale_y = if visual.presentation_rect.size.h > 0 {
+        visual.animated_rect.size.h as f32 / visual.presentation_rect.size.h as f32
+    } else {
+        1.0
+    };
+    let decoration_scale = visual.zoom_scale * opening_scale_y.max(0.0);
+    let chrome = crate::titlebar::WindowChrome::for_window(window, decorations, font);
+    let border_width =
+        crate::render::window_decoration::scaled_metric(chrome.border_width, decoration_scale);
+    if chrome.has_server_titlebar() {
+        let titlebar_height =
+            crate::titlebar::rendered_metrics(&decorations.titlebars, font.size, decoration_scale)
+                .height;
+        crate::titlebar::DecorationLayout::new(
+            visual.animated_rect,
+            border_width,
+            titlebar_height,
+            &decorations.titlebars,
+        )
+        .outer
+    } else {
+        Rectangle::new(
+            (
+                visual.animated_rect.loc.x - border_width,
+                visual.animated_rect.loc.y - border_width,
+            )
+                .into(),
+            (
+                visual.animated_rect.size.w + border_width * 2,
+                visual.animated_rect.size.h + border_width * 2,
+            )
+                .into(),
+        )
+    }
 }
 
 fn quantized_f32(value: f32) -> i32 {
@@ -112,6 +237,7 @@ pub(super) fn live_window_elements(
     renderers: LiveWindowRenderers<'_>,
 ) -> Result<LiveWindowScene, Box<dyn Error>> {
     let LiveWindowRenderers {
+        arrange_textures,
         fullscreen_textures,
         backdrop_blur: backdrop_blur_renderer,
         shadow: shadow_renderer,
@@ -120,6 +246,7 @@ pub(super) fn live_window_elements(
         node: node_renderer,
         text: ui_text,
         pin: pin_renderer,
+        window_shaders,
     } = renderers;
     let Some(location) = context.space.element_location(window) else {
         return Ok(LiveWindowScene {
@@ -154,7 +281,7 @@ pub(super) fn live_window_elements(
         Some(context.nodes),
         window,
         context.output,
-        context.window_open_animations,
+        context.window_animations,
         context.fullscreen,
         context.maximize,
         context.decorations,
@@ -190,7 +317,6 @@ pub(super) fn live_window_elements(
     } else {
         1.0
     };
-    let alpha = visual.opening_alpha * rule_opacity;
     // X11 clients can churn fullscreen requests while changing video modes.
     // Keep their advertised EWMH state as a render-time backstop so a missing
     // or temporarily retired presentation entry cannot expose compositor
@@ -201,19 +327,23 @@ pub(super) fn live_window_elements(
             .suppresses_chrome(window_surface.as_ref()),
         crate::xwayland::is_fullscreen(window),
     );
-    let chrome_alpha = if chrome_visible { alpha } else { 0.0 };
+    let (content_alpha, chrome_alpha) =
+        window_content_and_chrome_alpha(visual.opening_alpha, rule_opacity, chrome_visible);
     let server_titlebar = chrome_visible && chrome.has_server_titlebar();
     let node_id = context.nodes.id_for_surface(window_surface.as_ref());
     let user_pinned = node_id.is_some_and(|id| {
         context.clusters.cluster_for_member(id).is_none()
             && context.nodes.field.node(id).is_some_and(|node| node.pinned)
     });
-    let opening_scale_y = if visual.presentation_rect.size.h > 0 {
-        visual.animated_rect.size.h as f32 / visual.presentation_rect.size.h as f32
-    } else {
-        1.0
-    };
-    let decoration_scale = visual.zoom_scale * opening_scale_y.max(0.0);
+    let arrange_animating = context
+        .window_animations
+        .is_arranging(window_surface.as_ref(), context.target_presentation_time);
+    let presentation_scale_y = decoration_presentation_scale(
+        arrange_animating,
+        visual.presentation_rect.size.h,
+        visual.animated_rect.size.h,
+    );
+    let decoration_scale = visual.zoom_scale * presentation_scale_y.max(0.0);
     let titlebar_metrics = crate::titlebar::rendered_metrics(
         &context.decorations.titlebars,
         context.font.size,
@@ -237,7 +367,7 @@ pub(super) fn live_window_elements(
     let rounded = content_radius > 0.0;
     let rounded_available = rounded && window_decoration_renderer.available(renderer);
     if join_ready {
-        let tint_alpha = alpha * JOIN_READY_TINT_ALPHA;
+        let tint_alpha = content_alpha * JOIN_READY_TINT_ALPHA;
         let focused = context.decorations.border_color_focused;
         let tint_color =
             smithay::backend::renderer::Color32F::new(focused.r, focused.g, focused.b, 1.0);
@@ -277,7 +407,7 @@ pub(super) fn live_window_elements(
     }
     let surface_location = crate::render::window_surface_location(location, window.geometry());
     let (popup_surfaces, surface_elements) =
-        crate::render::window_surface_elements(renderer, window, surface_location, alpha);
+        crate::render::window_surface_elements(renderer, window, surface_location, content_alpha);
     popup_elements.extend(popup_surfaces.into_iter().map(|surface_element| {
         let native_geometry = surface_element.geometry(Scale::from(1.0));
         let destination = if visual.maps_from_source() {
@@ -301,6 +431,39 @@ pub(super) fn live_window_elements(
             destination,
         ))
     }));
+    if visual.shader_pixels()
+        && window_shaders.open_available()
+        && visual.fullscreen.is_none()
+        && visual.maximize.is_none()
+        && !arrange_animating
+    {
+        match opening_shader_elements(
+            renderer,
+            window,
+            &context,
+            window_shaders,
+            titlebar_renderer,
+            window_decoration_renderer,
+            node_renderer,
+            ui_text,
+            &visual,
+            chrome_visible,
+            Some(window_surface.as_ref()) == context.focused,
+            content_alpha,
+        ) {
+            Ok(Some(shader_elements)) => {
+                return Ok(LiveWindowScene {
+                    popup_elements,
+                    elements: shader_elements,
+                    cluster_depth: visual.cluster_depth,
+                    cluster_floating: visual.cluster_floating,
+                    cluster_exclusive: visual.cluster_exclusive,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => eventline::warn!("window open shader: {error}"),
+        }
+    }
     if server_titlebar && chrome_alpha > 0.0 {
         append_titlebar_elements(
             renderer,
@@ -336,7 +499,49 @@ pub(super) fn live_window_elements(
                     .map(|presentation| presentation.transition_completion)
             }),
     );
-    let texture_blend = if let Some(completion) = texture_transition_completion {
+    let client_radii = if rounded_available && server_titlebar {
+        crate::render::window_decoration::CornerRadii::bottom(content_radius)
+    } else if rounded_available {
+        crate::render::window_decoration::CornerRadii::all(content_radius)
+    } else {
+        crate::render::window_decoration::CornerRadii::default()
+    };
+    let arrange_blend = if arrange_animating {
+        let completion = context
+            .window_animations
+            .arrange_completion(window_surface.as_ref(), context.target_presentation_time)
+            .unwrap_or(0.0);
+        match arrange_textures.native_blend_element(
+            renderer,
+            window_surface.as_ref(),
+            visual.animated_rect,
+            visual.zoom_scale,
+            completion,
+            content_alpha,
+            client_radii,
+        ) {
+            Ok(blend) => blend,
+            Err(err) => {
+                eventline::warn!("field arrange: failed to render native reveal: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let arrange_fallback = if arrange_animating && arrange_blend.is_none() {
+        arrange_textures.fallback_element(
+            window_surface.as_ref(),
+            visual.animated_rect,
+            content_alpha,
+        )
+    } else {
+        None
+    };
+    let texture_blend = if arrange_blend.is_none()
+        && arrange_fallback.is_none()
+        && let Some(completion) = texture_transition_completion
+    {
         let hold_x11_fullscreen_exit = should_hold_x11_fullscreen_exit(
             crate::xwayland::is_x11(window),
             visual.fullscreen.is_some(),
@@ -351,14 +556,8 @@ pub(super) fn live_window_elements(
                 destination: visual.animated_rect,
                 progress: completion,
                 hold_previous_until_restored_buffer_matches: hold_x11_fullscreen_exit,
-                alpha,
-                radii: if rounded_available && server_titlebar {
-                    crate::render::window_decoration::CornerRadii::bottom(content_radius)
-                } else if rounded_available {
-                    crate::render::window_decoration::CornerRadii::all(content_radius)
-                } else {
-                    crate::render::window_decoration::CornerRadii::default()
-                },
+                alpha: content_alpha,
+                radii: client_radii,
             },
         ) {
             Ok(blend) => blend,
@@ -370,7 +569,25 @@ pub(super) fn live_window_elements(
     } else {
         None
     };
-    if let Some(blend) = texture_blend {
+    if let Some(blend) = arrange_blend {
+        elements.push(SceneElement::WindowResize(blend));
+    } else if let Some((base, texture)) = arrange_fallback {
+        if rounded_available {
+            let element = window_decoration_renderer
+                .texture_element_with_radii(
+                    renderer,
+                    base,
+                    texture,
+                    visual.animated_rect,
+                    client_radii,
+                    (1.0, 1.0, 1.0, 1.0),
+                )
+                .expect("rounded resources were checked above");
+            elements.push(SceneElement::RoundedTexture(element));
+        } else {
+            elements.push(SceneElement::Closing(base));
+        }
+    } else if let Some(blend) = texture_blend {
         elements.push(SceneElement::WindowResize(blend));
     } else {
         for surface_element in surface_elements {
@@ -488,7 +705,7 @@ pub(super) fn live_window_elements(
                     .map(|rect| crate::render::effects::backdrop_blur::BlurPatch {
                         rect,
                         radius: 0.0,
-                        alpha,
+                        alpha: content_alpha,
                         clip: rounded_available.then_some((
                             visual.animated_rect,
                             if server_titlebar {
@@ -669,7 +886,7 @@ pub(super) fn live_window_elements(
                     visual.zoom_scale,
                 )
             },
-            alpha,
+            chrome_alpha,
             context.pins,
             context.overlays,
             context.decorations,
@@ -829,8 +1046,13 @@ pub(crate) fn append_titlebar_elements(
                 ui_text,
                 title,
                 rgb,
-                layout.max_title_width_scaled(app_id.is_some(), identity_scale),
+                layout.max_title_width_scaled(
+                    config.title_position,
+                    app_id.is_some(),
+                    identity_scale,
+                ),
                 identity_scale,
+                config.text_size_px,
             )?,
             None => None,
         }
@@ -850,11 +1072,21 @@ pub(crate) fn append_titlebar_elements(
         elements.push(SceneElement::NodeTexture(icon));
     }
 
-    if let (Some(title), Some(title_rect)) = (title, identity_layout.title)
-        && let Some(prepared) =
-            ui_text.element_scaled(renderer, title_rect, &title.text, rgb, alpha)?
-    {
-        elements.push(SceneElement::UiText(prepared.element));
+    if let (Some(title), Some(title_rect)) = (title, identity_layout.title) {
+        let prepared = match config.text_size_px {
+            Some(size_px) => ui_text.element_scaled_at_size(
+                renderer,
+                title_rect,
+                &title.text,
+                rgb,
+                alpha,
+                size_px,
+            )?,
+            None => ui_text.element_scaled(renderer, title_rect, &title.text, rgb, alpha)?,
+        };
+        if let Some(prepared) = prepared {
+            elements.push(SceneElement::UiText(prepared.element));
+        }
     }
 
     if let Some(background_element) = window_decoration_renderer.tint_element_with_radii(
@@ -888,6 +1120,24 @@ pub(crate) fn append_titlebar_elements(
     Ok(())
 }
 
+fn decoration_presentation_scale(
+    arranging: bool,
+    presentation_height: i32,
+    animated_height: i32,
+) -> f32 {
+    if arranging {
+        // Arrangement holds a pre-configure client snapshot. Chrome is still
+        // compositor-rendered, so keep it at the Field display scale instead
+        // of deriving its height from a native client size that can change
+        // midway through the timeline.
+        1.0
+    } else if presentation_height > 0 {
+        animated_height as f32 / presentation_height as f32
+    } else {
+        1.0
+    }
+}
+
 fn color_bytes(color: halley_config::BorderColor) -> [u8; 3] {
     [
         (color.r.clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -908,11 +1158,17 @@ fn fitted_title(
     rgb: [u8; 3],
     max_width: i32,
     scale: f32,
+    text_size_px: Option<u16>,
 ) -> Result<Option<FittedTitle>, Box<dyn Error>> {
     if max_width <= 0 || title.is_empty() {
         return Ok(None);
     }
-    if let Some(native_size) = ui_text.measure(renderer, title, rgb)?
+    let mut measure =
+        |ui_text: &mut crate::render::text::UiTextRenderer, text: &str| match text_size_px {
+            Some(size_px) => ui_text.measure_at_size(renderer, text, rgb, size_px),
+            None => ui_text.measure(renderer, text, rgb),
+        };
+    if let Some(native_size) = measure(ui_text, title)?
         && scaled_title_size(native_size, scale).w <= max_width
     {
         return Ok(Some(FittedTitle {
@@ -930,7 +1186,7 @@ fn fitted_title(
             .iter()
             .chain(std::iter::once(&'…'))
             .collect::<String>();
-        let Some(native_size) = ui_text.measure(renderer, &candidate, rgb)? else {
+        let Some(native_size) = measure(ui_text, &candidate)? else {
             return Ok(None);
         };
         let size = scaled_title_size(native_size, scale);
@@ -965,8 +1221,9 @@ mod tests {
     use smithay::utils::{Buffer, Size};
 
     use super::{
-        active_crossfade_completion, compositor_chrome_visible, quantized_f32, scaled_title_size,
-        should_hold_x11_fullscreen_exit,
+        active_crossfade_completion, compositor_chrome_visible, decoration_presentation_scale,
+        quantized_f32, scaled_title_size, should_hold_x11_fullscreen_exit,
+        window_content_and_chrome_alpha,
     };
 
     #[test]
@@ -986,6 +1243,13 @@ mod tests {
     }
 
     #[test]
+    fn arrangement_keeps_chrome_scale_stable_across_client_resize_commits() {
+        assert_eq!(decoration_presentation_scale(true, 600, 900), 1.0);
+        assert_eq!(decoration_presentation_scale(true, 1200, 900), 1.0);
+        assert_eq!(decoration_presentation_scale(false, 600, 900), 1.5);
+    }
+
+    #[test]
     fn title_text_size_shrinks_with_zoom() {
         let native = Size::<i32, Buffer>::from((120, 18));
 
@@ -1000,6 +1264,27 @@ mod tests {
         assert!(!compositor_chrome_visible(true, false));
         assert!(!compositor_chrome_visible(false, true));
         assert!(!compositor_chrome_visible(true, true));
+    }
+
+    #[test]
+    fn window_rule_opacity_fades_content_not_chrome() {
+        let (content, chrome) = window_content_and_chrome_alpha(1.0, 0.9, true);
+        assert_eq!(content, 0.9);
+        assert_eq!(chrome, 1.0);
+    }
+
+    #[test]
+    fn opening_fade_still_applies_to_chrome() {
+        let (content, chrome) = window_content_and_chrome_alpha(0.5, 0.9, true);
+        assert_eq!(content, 0.45);
+        assert_eq!(chrome, 0.5);
+    }
+
+    #[test]
+    fn hidden_chrome_stays_invisible_regardless_of_rule_opacity() {
+        let (content, chrome) = window_content_and_chrome_alpha(1.0, 0.9, false);
+        assert_eq!(content, 0.9);
+        assert_eq!(chrome, 0.0);
     }
 
     #[test]

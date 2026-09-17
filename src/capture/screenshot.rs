@@ -92,7 +92,7 @@ fn save_region_inner<D: SessionDriver>(
     let blur = session.settings.effects.blur;
     let shadows = session.settings.effects.shadows;
     let cameras = &session.cameras;
-    let window_open_animations = &session.window_open_animations;
+    let window_animations = &session.window_animations;
     let fullscreen = &session.fullscreen;
     let maximize = &session.maximize;
     let nodes = &session.nodes;
@@ -124,7 +124,7 @@ fn save_region_inner<D: SessionDriver>(
                             space: &wayland.space,
                             focused: wayland.focused_window.as_ref(),
                             cameras,
-                            window_open_animations,
+                            window_animations,
                             fullscreen,
                             maximize,
                             nodes,
@@ -147,6 +147,7 @@ fn save_region_inner<D: SessionDriver>(
                             bearings,
                             focus_cycle: &session.shell.focus_cycle,
                             apogee: &session.shell.apogee,
+                            cluster_composer: &session.shell.cluster_composer,
                             apogee_config: session.settings.apogee,
                             overlays,
                             overlay_config,
@@ -344,7 +345,7 @@ where
     let blur = session.settings.effects.blur;
     let shadows = session.settings.effects.shadows;
     let cameras = &session.cameras;
-    let window_open_animations = &session.window_open_animations;
+    let window_animations = &session.window_animations;
     let fullscreen = &session.fullscreen;
     let maximize = &session.maximize;
     let nodes = &session.nodes;
@@ -373,7 +374,7 @@ where
                     space: &wayland.space,
                     focused: wayland.focused_window.as_ref(),
                     cameras,
-                    window_open_animations,
+                    window_animations,
                     fullscreen,
                     maximize,
                     nodes,
@@ -396,6 +397,7 @@ where
                     bearings,
                     focus_cycle: &session.shell.focus_cycle,
                     apogee: &session.shell.apogee,
+                    cluster_composer: &session.shell.cluster_composer,
                     apogee_config: session.settings.apogee,
                     overlays,
                     overlay_config,

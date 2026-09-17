@@ -110,7 +110,11 @@ timing. Closing snapshots preserve the window's current opening opacity and
 track camera motion while they finish. Layer-shell surfaces and X11
 override-redirect popups are not window-close animation targets.
 
-Node collapse uses a short ease-out scale transition. Restoration and optional
+An optional `custom-shader` path on `window-open` or `window-close` replaces
+the type's scale and fade with a user fragment shader. Launch and retract
+still travel. This is an advanced feature; see `docs/window-shaders.md`.
+
+Node marker appearance uses a short ease-out scale transition. Restoration and optional
 camera centering start together; it never centers first and waits for a second
 action to restore the window.
 
@@ -123,14 +127,22 @@ configured as `fade`; ordinary closes continue to use the selected close type.
 animations:
   node:
     enabled true
-    duration-ms 280
+    duration-ms 280 # Node marker appearance.
+    collapse-duration-ms 280 # Window snapshot shrinking/traveling into the node.
   end
 end
 ```
 
-`animations.enabled` and `animations.node.enabled` both gate this transition.
-Setting either to `false`, or setting `duration-ms` to `0`, makes node markers
-appear immediately. Window restoration still uses the configured window-open
+`duration-ms` controls node marker appearance; `collapse-duration-ms` controls
+only the window snapshot shrinking and traveling into its node, for both manual
+collapse (`Mod+N`) and automatic decay. Each defaults to 280 ms and is independent
+of `window-close.duration-ms` and close custom shaders. Collapse uses the CPU
+shrink path; ordinary close shader timing remains unchanged.
+
+`animations.enabled` and `animations.node.enabled` gate both node transitions.
+Setting either to `false` makes both immediate. Setting either duration to `0`
+skips only its own transition: a zero marker duration does not skip the window
+collapse, and a zero collapse duration does not skip marker appearance. Window restoration still uses the configured window-open
 animation. Landmark collision relocation uses the old 520ms damped slide;
 labels independently use the old back-loaded hover slide/grow/fade and request
 frames until settled.
@@ -157,3 +169,24 @@ velocity instead of restarting it.
 Disabling it keeps the maximize state and camera ownership but applies the
 endpoints immediately. A zero easing duration also snaps directly to the
 endpoint.
+
+Field arrangement has its own slightly slower default so a group of windows
+moves as one readable gesture:
+
+```rune
+animations:
+  arrange:
+    enabled true
+    motion "easing"
+    duration-ms 360
+    curve "ease-in-out-cubic"
+  end
+end
+```
+
+`animations.enabled` and `animations.arrange.enabled` both gate the visual
+motion. Disabling either keeps `Mod+A` toggle semantics but applies arrange and
+restore geometry immediately. Arrangement accepts the same easing and spring
+motion knobs as maximize/fullscreen. Window contents, decorations, and input hit
+regions share the interpolated rectangle; a rapid toggle starts the return from
+the current intermediate presentation rather than snapping to either endpoint.

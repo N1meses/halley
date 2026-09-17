@@ -100,9 +100,16 @@ pub enum Action {
     FocusDirection(Direction),
     /// Move the focused or most-recent Field node by one placement step.
     MoveNode(Direction),
+    TransferWindow(Direction),
+    PanField(Direction),
     /// Resize the focused Field window by one placement step. Left and up
     /// shrink; right and down grow.
     ResizeWindow(Direction),
+    /// Arrange eligible windows visible on the active Field output into a
+    /// balanced, non-persistent mosaic.
+    ArrangeVisible,
+    /// Restore the one-shot geometry snapshot captured by the last arrange.
+    UndoArrange,
     /// Begin an interactive compositor move for the window under the pointer,
     /// falling back to Field panning when the grab starts on empty background.
     PointerMoveWindow,
@@ -110,6 +117,9 @@ pub enum Action {
     PointerResizeWindow,
     /// Pan the Field from an empty-background pointer drag.
     PointerPanField,
+    /// Keep a grabbed window on its output and pan that Field after dwelling
+    /// against an edge.
+    PointerDragPan,
     CenterLastFocused,
     ClusterMode,
     ClusterLayoutCycle,
@@ -140,6 +150,7 @@ impl Action {
                 | Self::Trail(_)
                 | Self::FocusDirection(_)
                 | Self::MoveNode(_)
+                | Self::PanField(_)
                 | Self::ResizeWindow(_)
                 | Self::ClusterTileFocus(_)
                 | Self::ClusterTileSwap(_)
@@ -151,10 +162,14 @@ impl Action {
 
     pub fn default_scope(&self) -> BindingScope {
         match self {
-            Self::MoveNode(_) | Self::ResizeWindow(_) | Self::ToggleFocusedPin => {
-                BindingScope::Field
-            }
-            Self::PointerPanField => BindingScope::Field,
+            Self::MoveNode(_)
+            | Self::TransferWindow(_)
+            | Self::PanField(_)
+            | Self::ResizeWindow(_)
+            | Self::ToggleFocusedPin
+            | Self::ArrangeVisible
+            | Self::UndoArrange => BindingScope::Field,
+            Self::PointerPanField | Self::PointerDragPan => BindingScope::Field,
             Self::ClusterLayoutCycle | Self::ClusterToggleFloat => BindingScope::Cluster,
             Self::ClusterTileFocus(_) | Self::ClusterTileSwap(_) => BindingScope::Tile,
             _ => BindingScope::Global,
@@ -197,10 +212,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn navigation_actions_have_distinct_repeat_and_default_policies() {
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            let pan = Action::PanField(direction);
+            let transfer = Action::TransferWindow(direction);
+            assert!(pan.repeats_by_default());
+            assert!(!transfer.repeats_by_default());
+            assert_eq!(pan.default_scope(), BindingScope::Field);
+            assert!(
+                Keybinds::default()
+                    .binds
+                    .iter()
+                    .any(|bind| bind.action == transfer)
+            );
+            assert!(
+                !Keybinds::default()
+                    .binds
+                    .iter()
+                    .any(|bind| bind.action == pan)
+            );
+        }
+    }
+
+    #[test]
     fn default_matches_the_shipped_keybinds() {
         let kb = Keybinds::default();
         assert_eq!(kb.modifier, ModifierKey::Super);
-        assert_eq!(kb.binds.len(), 60);
+        assert_eq!(kb.binds.len(), 66);
 
         let previous = kb
             .binds
@@ -249,6 +292,17 @@ mod tests {
         assert_eq!(reload.scope, BindingScope::Global);
         assert!(!reload.repeat);
 
+        let arrange = kb
+            .binds
+            .iter()
+            .find(|bind| bind.action == Action::ArrangeVisible)
+            .expect("arrange-visible bind present");
+        assert_eq!(arrange.scope, BindingScope::Field);
+        assert_eq!(arrange.key, "a");
+        assert!(arrange.modifiers.super_key);
+        assert!(!arrange.modifiers.shift);
+        assert!(!arrange.repeat);
+
         let move_or_pan = kb
             .binds
             .iter()
@@ -256,6 +310,15 @@ mod tests {
             .expect("contextual pointer move bind present");
         assert!(move_or_pan.modifiers.super_key);
         assert_eq!(move_or_pan.key, "click-left");
+
+        let drag_pan = kb
+            .binds
+            .iter()
+            .find(|bind| bind.action == Action::PointerDragPan)
+            .expect("grabbed-window Field pan bind present");
+        assert!(drag_pan.modifiers.super_key);
+        assert!(drag_pan.modifiers.shift);
+        assert_eq!(drag_pan.key, "click-left");
 
         let bare_pan = kb
             .binds
@@ -265,13 +328,13 @@ mod tests {
         assert_eq!(bare_pan.modifiers, Modifiers::default());
         assert_eq!(bare_pan.key, "click-left");
 
-        let lift = kb
+        let launcher = kb
             .binds
             .iter()
-            .find(|bind| bind.action == Action::Spawn("halley-lift".into()))
-            .expect("Lift launcher bind present");
-        assert!(lift.modifiers.super_key);
-        assert_eq!(lift.key, "d");
+            .find(|bind| bind.action == Action::Spawn("fuzzel".into()))
+            .expect("Fuzzel launcher bind present");
+        assert!(launcher.modifiers.super_key);
+        assert_eq!(launcher.key, "d");
 
         for direction in [
             Direction::Left,
@@ -289,7 +352,7 @@ mod tests {
             assert!(movement.repeat);
         }
 
-        assert!(!lift.repeat);
+        assert!(!launcher.repeat);
 
         let quit = kb.binds.iter().find(|b| b.action == Action::Quit).unwrap();
         assert!(quit.modifiers.super_key);
@@ -498,6 +561,8 @@ mod tests {
             Action::ToggleFullscreen,
             Action::ToggleFieldMaximize,
             Action::ToggleState,
+            Action::ArrangeVisible,
+            Action::UndoArrange,
             Action::Apogee,
             Action::BearingsShow,
             Action::BearingsToggle,

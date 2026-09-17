@@ -7,6 +7,7 @@ use smithay::input::SeatHandler;
 use smithay::input::pointer::Focus;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Rectangle, Serial};
+use smithay::wayland::input_method::InputMethodSeat;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::xdg::{PopupSurface, PositionerState};
 
@@ -20,7 +21,7 @@ pub struct UnconstrainContext<'a> {
     pub cameras: &'a OutputCameras,
     pub clusters: &'a crate::clusters::ClusterSystem,
     pub nodes: &'a crate::nodes::NodesState,
-    pub window_open_animations: &'a crate::animation::WindowOpenAnimations,
+    pub window_animations: &'a crate::animation::WindowAnimations,
     pub fullscreen: &'a crate::wayland::fullscreen::FullscreenManager,
     pub maximize: &'a crate::presentation::maximize::FieldMaximizeManager,
     pub decorations: &'a halley_config::Decorations,
@@ -131,7 +132,7 @@ fn unconstrain(wayland: &WaylandState, context: UnconstrainContext<'_>, popup: &
             context.cameras,
             Some(context.clusters),
             Some(context.nodes),
-            context.window_open_animations,
+            context.window_animations,
             context.fullscreen,
             context.maximize,
             context.decorations,
@@ -208,19 +209,27 @@ where
     }
 }
 
-pub fn install_grab<D>(data: &mut D, seat: &Seat<D>, mut grab: PopupGrab<D>, serial: Serial)
+pub fn install_grab<D>(
+    data: &mut D,
+    seat: &Seat<D>,
+    mut grab: PopupGrab<D>,
+    serial: Serial,
+) -> Option<PopupGrab<D>>
 where
     D: SeatHandler<PointerFocus = WlSurface> + 'static,
     D::KeyboardFocus: WaylandFocus + From<WlSurface> + From<PopupKind>,
     WlSurface: From<D::KeyboardFocus>,
 {
-    if let Some(keyboard) = seat.get_keyboard() {
+    let ime_keyboard_grabbed = seat.input_method().keyboard_grabbed();
+    if let Some(keyboard) = seat.get_keyboard()
+        && popup_takes_keyboard_grab(ime_keyboard_grabbed)
+    {
         if keyboard.is_grabbed()
             && !(keyboard.has_grab(serial)
                 || keyboard.has_grab(grab.previous_serial().unwrap_or(serial)))
         {
             grab.ungrab(PopupUngrabStrategy::All);
-            return;
+            return None;
         }
         keyboard.set_focus(data, grab.current_grab(), serial);
         keyboard.set_grab(data, PopupKeyboardGrab::new(&grab), serial);
@@ -232,8 +241,54 @@ where
                 || pointer.has_grab(grab.previous_serial().unwrap_or_else(|| grab.serial())))
         {
             grab.ungrab(PopupUngrabStrategy::All);
-            return;
+            return None;
         }
         pointer.set_grab(data, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+    }
+    Some(grab)
+}
+
+/// Popup parents (including another area of the same panel) are outside the
+/// menu. Descendant popup/subsurface roots remain inside the open popup tree.
+pub(crate) fn outside_popup_press<T: PartialEq>(
+    pressed: bool,
+    target: Option<&T>,
+    popups: &[T],
+) -> bool {
+    pressed && target.is_none_or(|target| !popups.contains(target))
+}
+
+/// Smithay cannot stack keyboard grabs. Keep an active IME grab instead of
+/// replacing it with a popup grab, while still taking the pointer grab.
+pub(crate) fn popup_takes_keyboard_grab(ime_keyboard_grabbed: bool) -> bool {
+    !ime_keyboard_grabbed
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    use super::{outside_popup_press, popup_takes_keyboard_grab};
+
+    #[test]
+    fn outside_press_dismisses_for_panel_other_client_and_background() {
+        let menu_tree = [2, 3]; // menu and submenu; panel root is 1
+        for target in [Some(1), Some(4), None] {
+            assert!(outside_popup_press(true, target.as_ref(), &menu_tree));
+        }
+    }
+
+    #[test]
+    fn menu_and_submenu_presses_and_outside_releases_keep_the_grab() {
+        let menu_tree = [2, 3];
+        for target in &menu_tree {
+            assert!(!outside_popup_press(true, Some(target), &menu_tree));
+        }
+        assert!(!outside_popup_press(false, None, &menu_tree));
+        assert!(!outside_popup_press(false, Some(&1), &menu_tree));
+    }
+
+    #[test]
+    fn ime_grab_keeps_keyboard_and_still_allows_pointer_grab() {
+        assert!(!popup_takes_keyboard_grab(true));
+        assert!(popup_takes_keyboard_grab(false));
     }
 }

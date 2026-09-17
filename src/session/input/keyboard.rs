@@ -5,6 +5,9 @@ enum KeyboardOutcome {
     ExitConfirm,
     ExitCancel,
     ExitIntercept,
+    ClusterDeleteConfirm,
+    ClusterDeleteCancel,
+    ClusterDeleteIntercept,
     AccessibilityIntercept,
     ApogeeCancel,
     ApogeeAccept,
@@ -24,28 +27,30 @@ enum KeyboardOutcome {
     ClusterDelete,
     ClusterMoveLeft,
     ClusterMoveRight,
+    ClusterComposerToggle,
+    ClusterComposerMove(crate::shell::cluster_composer::Direction),
     ClusterCharacter(char),
     ClusterIntercept,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CaptureKeyRouting {
+pub(super) enum ModalKeyRouting {
     Evaluate,
     RetireUnfocusedRelease,
     SuppressRelease,
 }
 
-pub(super) fn capture_key_routing(
-    capture_active: bool,
+pub(super) fn modal_key_routing(
+    modal_active: bool,
     state: KeyState,
     release_is_suppressed: bool,
-) -> CaptureKeyRouting {
+) -> ModalKeyRouting {
     if state == KeyState::Released && release_is_suppressed {
-        CaptureKeyRouting::SuppressRelease
-    } else if capture_active && state == KeyState::Released {
-        CaptureKeyRouting::RetireUnfocusedRelease
+        ModalKeyRouting::SuppressRelease
+    } else if modal_active && state == KeyState::Released {
+        ModalKeyRouting::RetireUnfocusedRelease
     } else {
-        CaptureKeyRouting::Evaluate
+        ModalKeyRouting::Evaluate
     }
 }
 
@@ -76,7 +81,7 @@ pub(super) fn handle<D, B>(
             .interactions
             .suppressed_keys
             .release_is_suppressed(keycode);
-    let accessibility = if session.shell.overlays.exit_modal_active() {
+    let accessibility = if session.shell.overlays.confirmation_modal_active() {
         crate::accessibility::KeyboardDisposition::Pass
     } else {
         crate::accessibility::process_key(
@@ -115,6 +120,24 @@ pub(super) fn handle<D, B>(
                     _ => FilterResult::Intercept(KeyboardOutcome::ExitIntercept),
                 };
             }
+            if data.shell.overlays.cluster_delete_modal_active() {
+                if state == KeyState::Released {
+                    return if release_is_suppressed {
+                        FilterResult::Intercept(KeyboardOutcome::ClusterDeleteIntercept)
+                    } else {
+                        FilterResult::Forward
+                    };
+                }
+                return match handle.raw_latin_sym_or_raw_current_sym() {
+                    Some(Keysym::Return | Keysym::KP_Enter) => {
+                        FilterResult::Intercept(KeyboardOutcome::ClusterDeleteConfirm)
+                    }
+                    Some(Keysym::Escape) => {
+                        FilterResult::Intercept(KeyboardOutcome::ClusterDeleteCancel)
+                    }
+                    _ => FilterResult::Intercept(KeyboardOutcome::ClusterDeleteIntercept),
+                };
+            }
             if data.clusters.accepts_modal_input() {
                 if state == KeyState::Released {
                     return if release_is_suppressed {
@@ -123,18 +146,49 @@ pub(super) fn handle<D, B>(
                         FilterResult::Forward
                     };
                 }
+                if data.shell.cluster_composer.is_active()
+                    && !data.shell.cluster_composer.accepts_input()
+                {
+                    return FilterResult::Intercept(KeyboardOutcome::ClusterIntercept);
+                }
                 let sym = handle.modified_sym();
-                let outcome = match sym {
-                    Keysym::Escape => KeyboardOutcome::ClusterCancel,
-                    Keysym::Return | Keysym::KP_Enter => KeyboardOutcome::ClusterAccept,
-                    Keysym::BackSpace => KeyboardOutcome::ClusterBackspace,
-                    Keysym::Delete => KeyboardOutcome::ClusterDelete,
-                    Keysym::Left => KeyboardOutcome::ClusterMoveLeft,
-                    Keysym::Right => KeyboardOutcome::ClusterMoveRight,
-                    _ => sym
-                        .key_char()
-                        .map(KeyboardOutcome::ClusterCharacter)
-                        .unwrap_or(KeyboardOutcome::ClusterIntercept),
+                let composer_selection = data.shell.cluster_composer.accepts_input()
+                    && data
+                        .clusters
+                        .creation()
+                        .is_some_and(|creation| !creation.naming);
+                let outcome = if composer_selection {
+                    match sym {
+                        Keysym::Escape => KeyboardOutcome::ClusterCancel,
+                        Keysym::Return | Keysym::KP_Enter => KeyboardOutcome::ClusterAccept,
+                        Keysym::space => KeyboardOutcome::ClusterComposerToggle,
+                        Keysym::Left => KeyboardOutcome::ClusterComposerMove(
+                            crate::shell::cluster_composer::Direction::Left,
+                        ),
+                        Keysym::Right => KeyboardOutcome::ClusterComposerMove(
+                            crate::shell::cluster_composer::Direction::Right,
+                        ),
+                        Keysym::Up => KeyboardOutcome::ClusterComposerMove(
+                            crate::shell::cluster_composer::Direction::Up,
+                        ),
+                        Keysym::Down => KeyboardOutcome::ClusterComposerMove(
+                            crate::shell::cluster_composer::Direction::Down,
+                        ),
+                        _ => KeyboardOutcome::ClusterIntercept,
+                    }
+                } else {
+                    match sym {
+                        Keysym::Escape => KeyboardOutcome::ClusterCancel,
+                        Keysym::Return | Keysym::KP_Enter => KeyboardOutcome::ClusterAccept,
+                        Keysym::BackSpace => KeyboardOutcome::ClusterBackspace,
+                        Keysym::Delete => KeyboardOutcome::ClusterDelete,
+                        Keysym::Left => KeyboardOutcome::ClusterMoveLeft,
+                        Keysym::Right => KeyboardOutcome::ClusterMoveRight,
+                        _ => sym
+                            .key_char()
+                            .map(KeyboardOutcome::ClusterCharacter)
+                            .unwrap_or(KeyboardOutcome::ClusterIntercept),
+                    }
                 };
                 return FilterResult::Intercept(outcome);
             }
@@ -144,7 +198,18 @@ pub(super) fn handle<D, B>(
             if data.shell.apogee.accepts_input() {
                 let sym = handle.raw_latin_sym_or_raw_current_sym();
                 if state == KeyState::Released {
-                    return FilterResult::Intercept(KeyboardOutcome::ApogeeIntercept);
+                    // Mod was pressed before Apogee opened and was forwarded to
+                    // the focused client. Forward its release while swallowing
+                    // releases for keys whose presses Apogee intercepted; this
+                    // prevents clients from being left in a stuck modifier or
+                    // terminal keyboard-protocol state after Mod+O closes.
+                    return match modal_key_routing(true, state, release_is_suppressed) {
+                        ModalKeyRouting::SuppressRelease => {
+                            FilterResult::Intercept(KeyboardOutcome::ApogeeIntercept)
+                        }
+                        ModalKeyRouting::RetireUnfocusedRelease => FilterResult::Forward,
+                        ModalKeyRouting::Evaluate => unreachable!("release routing was requested"),
+                    };
                 }
                 let outcome = match sym {
                     Some(Keysym::Escape) => KeyboardOutcome::ApogeeCancel,
@@ -210,17 +275,17 @@ pub(super) fn handle<D, B>(
             if accessibility == crate::accessibility::KeyboardDisposition::Intercept {
                 return FilterResult::Intercept(KeyboardOutcome::AccessibilityIntercept);
             }
-            match capture_key_routing(data.capture.is_active(), state, release_is_suppressed) {
-                CaptureKeyRouting::SuppressRelease => {
+            match modal_key_routing(data.capture.is_active(), state, release_is_suppressed) {
+                ModalKeyRouting::SuppressRelease => {
                     return FilterResult::Intercept(KeyboardOutcome::CaptureIntercept);
                 }
-                CaptureKeyRouting::RetireUnfocusedRelease => {
+                ModalKeyRouting::RetireUnfocusedRelease => {
                     // Focus is cleared for the lifetime of the overlay. Forwarding
                     // releases here reaches no client, but lets Smithay retire keys
                     // whose presses were forwarded before the modal opened.
                     return FilterResult::Forward;
                 }
-                CaptureKeyRouting::Evaluate => {}
+                ModalKeyRouting::Evaluate => {}
             }
             if data.capture.is_active() {
                 return match handle.raw_latin_sym_or_raw_current_sym() {
@@ -287,6 +352,19 @@ pub(super) fn handle<D, B>(
                 session.interactions.suppressed_keys.suppress(keycode);
             }
         }
+        Some(KeyboardOutcome::ClusterDeleteConfirm) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            session.confirm_cluster_dissolution();
+        }
+        Some(KeyboardOutcome::ClusterDeleteCancel) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            session.cancel_cluster_dissolution();
+        }
+        Some(KeyboardOutcome::ClusterDeleteIntercept) => {
+            if state == KeyState::Pressed {
+                session.interactions.suppressed_keys.suppress(keycode);
+            }
+        }
         Some(KeyboardOutcome::Action(bind)) => {
             session.interactions.suppressed_keys.suppress(keycode);
             close_blooms_for_keybind(session, pointer_output.as_deref());
@@ -313,7 +391,21 @@ pub(super) fn handle<D, B>(
         Some(KeyboardOutcome::ClusterCancel) => {
             session.interactions.suppressed_keys.suppress(keycode);
             let draft_id = session.clusters.creation_draft_id();
-            if session.clusters.back_or_cancel_creation() {
+            let naming = session
+                .clusters
+                .creation()
+                .is_some_and(|creation| creation.naming);
+            if session.shell.cluster_composer.is_active()
+                && !session.shell.cluster_composer.accepts_input()
+            {
+                // Commit, endpoint hold, and reveal are atomic modal phases.
+            } else if session.shell.cluster_composer.accepts_input() && !naming {
+                session
+                    .shell
+                    .cluster_composer
+                    .close(session.settings.apogee, crate::frame_clock::monotonic_now());
+                session.request_redraw();
+            } else if session.clusters.back_or_cancel_creation() {
                 session
                     .cursor
                     .set_override(crate::cursor::OverrideSource::Modal, None);
@@ -337,7 +429,11 @@ pub(super) fn handle<D, B>(
                 .creation()
                 .is_some_and(|creation| creation.naming)
             {
-                finish_cluster_creation(session);
+                if session.shell.cluster_composer.is_active() {
+                    begin_cluster_commit(session);
+                } else {
+                    finish_cluster_creation(session);
+                }
             } else if !session.clusters.begin_naming()
                 && let Some(output) = session
                     .clusters
@@ -378,6 +474,27 @@ pub(super) fn handle<D, B>(
                     session.settings.input.repeat_delay,
                     session.settings.input.repeat_rate,
                 );
+                session.request_redraw();
+            }
+        }
+        Some(KeyboardOutcome::ClusterComposerToggle) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            if let (Some(id), Some(output)) = (
+                session.shell.cluster_composer.focused(),
+                session
+                    .shell
+                    .cluster_composer
+                    .target_output()
+                    .map(str::to_string),
+            ) && session.clusters.toggle_creation_member(id, &output)
+            {
+                session.request_redraw();
+            }
+        }
+        Some(KeyboardOutcome::ClusterComposerMove(direction)) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            if session.shell.cluster_composer.move_focus(direction) {
+                session.cursor_policy.keyboard_navigation();
                 session.request_redraw();
             }
         }

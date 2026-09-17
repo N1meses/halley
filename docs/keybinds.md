@@ -195,12 +195,22 @@ continuous camera panning.
 
 Window movement, window resizing, and Field panning are remappable compositor
 actions. The defaults are `"$var.mod+click-left" "move-window"`,
-`"$var.mod+click-right" "resize-window"`, and
+`"$var.mod+click-right" "resize-window"`,
+`"$var.mod+shift+click-left" "drag-pan"`, and
 `"click-left" "pan-field"`. Remove a binding to disable that grab or assign
 the action to another pointer chord. `move-window` is contextual: the same
 grab pans when it starts on empty Field, so both bare left-drag and Mod+left-drag
-pan the desktop. An unbound click keeps its ordinary client, focus, decoration,
-and collapsed-node behavior. In an active tiling cluster,
+pan the desktop.
+
+`drag-pan` begins only on a fully visible Field window. It keeps the grabbed
+window assigned to its current output, clamps it at that output's edge, and
+after a short dwell pans that output's camera while carrying the window. Pulling
+the pointer back from the edge stops the pan. Fullscreen, maximized, oversized,
+and active-cluster windows do not enter this mode. The legacy action names
+`field-jump` and `field_jump` are accepted as aliases for `drag-pan`.
+
+An unbound click keeps its ordinary client, focus, decoration, and
+collapsed-node behavior. In an active tiling cluster,
 dragging a tile temporarily lifts it, reorders it live as the pointer crosses
 another tile, and smoothly returns it to the selected slot on release.
 
@@ -244,13 +254,20 @@ resolving `keycode-N`.
 The built-in action strings are `quit`, `close-focused`, `toggle-fullscreen`,
 `maximize-focused`, `toggle-state`, `apogee`, `bearings-show`,
 `bearings-toggle`, `cycle-focus`, `cycle-focus-backward`, `open-terminal`,
-`center-last-focused`, `reload`, `zoom-in`, `zoom-out`, `zoom-reset`, `screenshot`, and
-`cluster-toggle-float`. Parameterized actions also include
+`center-last-focused`, `arrange-visible`, `undo-arrange`, `reload`, `zoom-in`,
+`zoom-out`, `zoom-reset`, `screenshot`, and `cluster-toggle-float`. Parameterized actions also include
 `focus-DIRECTION`, `cluster-focus-DIRECTION`, `cluster-tile-swap-DIRECTION`,
 `node-move DIRECTION`, `resize-window-DIRECTION`, and `monitor-focus DIRECTION`, where `DIRECTION` is
-`left`, `right`, `up`, or `down`. `node-move` shifts the focused or
-most-recent Field window/collapsed node by one legal placement step; the
-default binding is `Mod+Alt+Arrow`. Field `resize-window` uses `left`/`up` to
+`left`, `right`, `up`, or `down`. The default `Mod+Arrow` `focus-DIRECTION`
+walks spatially among expanded windows, collapsed nodes, and collapsed cluster
+cores on the active output. It pans each target minimally into view without
+opening node or core handles; a collapsed node reserves its full restored
+decorated-window bounds so opening it afterward remains completely visible.
+While a `Mod+A` arrangement is active on that output, the same keybind still
+moves focus but does not pan the camera.
+`node-move` shifts the focused or most-recent Field window/collapsed node by one
+legal placement step; the default binding is
+`Mod+Alt+Arrow`. Field `resize-window` uses `left`/`up` to
 shrink and `right`/`down` to grow, sharing `Mod+Ctrl+Arrow` with scoped tile
 swapping. `monitor focus DP-1` targets an exact connector name. `Alt+Tab` and
 `Alt+Shift+Tab` open and navigate the focus carousel; releasing Alt commits,
@@ -260,6 +277,25 @@ pointer warp after its opening transition. Escape cancels without changing
 focus or pointer position. `Mod+O` opens or closes
 the multi-monitor Apogee overview. Apogee stops trapping keys as soon as its
 close transition begins.
+
+The default `Mod+A` `arrange-visible` action reorganizes ordinary Field
+windows whose centers are inside the active output's current visible work area.
+It excludes collapsed or detached windows, cluster members, pinned windows,
+fullscreen and maximized windows, and clients whose size constraints cannot fit
+the resulting mosaic. Two windows use equal halves; three use one large region
+and two smaller regions; four use a 2×2 grid; larger sets use balanced,
+near-square rows. Halley assigns windows to regions by minimum total travel, so
+their approximate spatial order is preserved.
+
+Arrangement is one-shot placement, not a layout mode: it creates no tiling tree
+or relationship, and every resulting window remains independently movable and
+resizable. While its restore transaction is active, its windows are protected
+from automatic decay. Pressing `Mod+A` again restores the exact geometry/output
+snapshot captured by that output's arrangement. The restore transaction is
+recorded before clients are configured, so an immediate or mid-animation second
+press reverses reliably without waiting for clients to commit. `undo-arrange` remains
+available as an unbound compatibility action for custom configurations.
+
 `default-terminal` (also accepted as `open-terminal`) launches the first
 available built-in terminal in this order:
 `alacritty`, `kitty`, `ghostty`, `wezterm`, `foot`, `footclient`, `rio`,
@@ -345,3 +381,42 @@ Inside an active cluster workspace, field maximize and fullscreen temporarily
 promote only the selected member above the desktop and cover every sibling,
 floating window, node, and cluster overlay behind it. On exit, the window eases
 back to its current tile and rejoins the cluster at its original stack slot.
+
+## Keyboard Field panning and monitor transfer
+
+`window-transfer left|right|up|down` sends the selected Field window to the
+adjacent physical monitor and follows it. Defaults are `Super+Alt+Shift+Arrow`.
+The destination is centered in that monitor's current Field view; window size
+and collapsed state are preserved. Both monitors must show the Field. Cluster
+members, fullscreen and maximized windows are excluded; restore those first.
+If no adjacent monitor exists, nothing moves. The selected monitor, rather
+than the pointer position, determines which Field is used.
+
+`pan-field left|right|up|down` pans the selected monitor's Field by ten percent
+of the current view width or height per activation. Right reveals space to the
+right, and down reveals space below. Held keyboard bindings repeat using the
+configured keyboard repeat settings; camera easing follows the queued target.
+Window geometry and keyboard focus do not change. Fullscreen, maximize, and
+active cluster views block Field panning.
+
+Panning actions intentionally have no default bindings and are not added by
+migration. Assign them to your preferred chords; existing default bindings are
+preserved. Bare `pan-field` remains the pointer-drag action.
+
+Scripting uses the same operations and returns an error when unavailable:
+
+```sh
+halleyctl monitor transfer right
+halleyctl pan left
+```
+
+The client API exposes `transfer_window(direction)` and `pan_field(direction)`.
+Transfer bindings are included in new configs; existing configs can receive
+unoccupied bindings through `halleyctl config migrate`.
+
+Keyboard actions and binding scopes follow the selected monitor even in hover
+focus mode. Successful window transfers move the pointer to the transferred
+window at the destination view center. Warps do not synthesize hover focus;
+physical mouse movement resumes normal hover selection. Transfers are blocked
+while a pointer grab, lock, or confinement is active. Failed transfers do not
+move the pointer. Keyboard panning alone never warps the pointer.

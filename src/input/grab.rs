@@ -25,6 +25,114 @@ pub struct ClusterWindowDrag {
     pub on_origin_output: bool,
 }
 
+pub const WINDOW_EDGE_PAN_DWELL: Duration = Duration::from_millis(450);
+pub const WINDOW_EDGE_PAN_SPEED_PXPS: f32 = 240.0;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowEdgePan {
+    pub output: String,
+    pub contact: Vec2,
+    pub contact_since: Option<Duration>,
+    pub last_tick: Duration,
+}
+
+impl WindowEdgePan {
+    pub fn new(output: String, now: Duration) -> Self {
+        Self {
+            output,
+            contact: Vec2 { x: 0.0, y: 0.0 },
+            contact_since: None,
+            last_tick: now,
+        }
+    }
+
+    pub fn update_contact(&mut self, contact: Vec2, now: Duration) {
+        if self.contact != contact {
+            self.contact = contact;
+            self.contact_since = (contact.x != 0.0 || contact.y != 0.0).then_some(now);
+        } else if contact.x == 0.0 && contact.y == 0.0 {
+            self.contact_since = None;
+        }
+    }
+
+    pub fn ready(&self, now: Duration) -> bool {
+        self.contact_since
+            .is_some_and(|started| now.saturating_sub(started) >= WINDOW_EDGE_PAN_DWELL)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowEdgePanPlacement {
+    pub location: Point<i32, Logical>,
+    pub center: Vec2,
+    pub contact: Vec2,
+}
+
+pub fn window_edge_pan_placement(
+    pointer: (f64, f64),
+    anchor: WindowGrabAnchor,
+    size: Size<i32, Logical>,
+    frame_extents: (i32, i32, i32, i32),
+    camera: &Camera,
+    output_geometry: Rectangle<i32, Logical>,
+) -> Option<WindowEdgePanPlacement> {
+    let desired = anchor.world_location(pointer, camera, output_geometry);
+    let desired_center = Vec2 {
+        x: desired.x as f32 + size.w as f32 * 0.5,
+        y: desired.y as f32 + size.h as f32 * 0.5,
+    };
+    let (left, right, top, bottom) = frame_extents;
+    let left = left.max(0) as f32;
+    let right = right.max(0) as f32;
+    let top = top.max(0) as f32;
+    let bottom = bottom.max(0) as f32;
+    let outer_width = size.w as f32 + left + right;
+    let outer_height = size.h as f32 + top + bottom;
+    if outer_width > camera.view_size.x || outer_height > camera.view_size.y {
+        return None;
+    }
+
+    let screen_center = (
+        f64::from(output_geometry.loc.x) + f64::from(output_geometry.size.w) * 0.5,
+        f64::from(output_geometry.loc.y) + f64::from(output_geometry.size.h) * 0.5,
+    );
+    let view_center = screen_to_world_on_output(screen_center, camera, output_geometry);
+    let half_w = size.w as f32 * 0.5;
+    let half_h = size.h as f32 * 0.5;
+    let min_x = view_center.x - camera.view_size.x * 0.5 + half_w + left;
+    let max_x = view_center.x + camera.view_size.x * 0.5 - half_w - right;
+    let min_y = view_center.y - camera.view_size.y * 0.5 + half_h + top;
+    let max_y = view_center.y + camera.view_size.y * 0.5 - half_h - bottom;
+    let center = Vec2 {
+        x: desired_center.x.clamp(min_x, max_x),
+        y: desired_center.y.clamp(min_y, max_y),
+    };
+    let contact = Vec2 {
+        x: if desired_center.x <= min_x + 0.01 {
+            -1.0
+        } else if desired_center.x >= max_x - 0.01 {
+            1.0
+        } else {
+            0.0
+        },
+        y: if desired_center.y <= min_y + 0.01 {
+            -1.0
+        } else if desired_center.y >= max_y - 0.01 {
+            1.0
+        } else {
+            0.0
+        },
+    };
+    Some(WindowEdgePanPlacement {
+        location: Point::from((
+            (center.x - half_w).round() as i32,
+            (center.y - half_h).round() as i32,
+        )),
+        center,
+        contact,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingWindowMove {
     pub window: Window,
@@ -91,6 +199,12 @@ pub enum Grab {
     /// or drag, so no compositor move side effects happen until motion crosses
     /// the shared drag threshold.
     PendingWindowMove(PendingWindowMove),
+    /// Explicit modifier-drag of a standalone, screen-positioned X11 pop-out.
+    MovePopup {
+        window: Window,
+        button: u32,
+        offset: Point<f64, Logical>,
+    },
     /// Cursor-to-window anchor in the coordinate space of the window's live
     /// presentation. Field windows use source coordinates; screen-sized
     /// cluster cards use output pixels.
@@ -110,6 +224,9 @@ pub enum Grab {
         /// an orphan release for a press they intercepted.
         client_owned: bool,
         anchor: WindowGrabAnchor,
+        /// `Some` for the monitor-local `drag-pan` window drag. Ordinary
+        /// `move-window` grabs leave this unset and may cross outputs.
+        edge_pan: Option<WindowEdgePan>,
         last_world: Vec2,
         last_update: Duration,
         velocity: Vec2,
@@ -189,7 +306,7 @@ pub fn belongs_to_surface(grab: &Grab, surface: &WlSurface) -> bool {
     let root = crate::wayland::compositor::root_surface(surface);
     let window = match grab {
         Grab::PendingWindowMove(pending) => Some(&pending.window),
-        Grab::MoveWindow { window, .. } => Some(window),
+        Grab::MoveWindow { window, .. } | Grab::MovePopup { window, .. } => Some(window),
         Grab::ResizeWindow(resize) => Some(&resize.window),
         Grab::None
         | Grab::Pan { .. }
@@ -762,6 +879,89 @@ mod tests {
                 y: 800.0,
             },
         )
+    }
+
+    #[test]
+    fn window_edge_pan_waits_for_dwell_and_resets_on_direction_change() {
+        let start = Duration::from_secs(5);
+        let mut pan = WindowEdgePan::new("DP-1".into(), start);
+        pan.update_contact(Vec2 { x: 1.0, y: 0.0 }, start);
+        assert!(!pan.ready(start + WINDOW_EDGE_PAN_DWELL - Duration::from_millis(1)));
+        assert!(pan.ready(start + WINDOW_EDGE_PAN_DWELL));
+
+        let changed = start + Duration::from_secs(1);
+        pan.update_contact(Vec2 { x: -1.0, y: 0.0 }, changed);
+        assert!(!pan.ready(changed));
+        assert!(pan.ready(changed + WINDOW_EDGE_PAN_DWELL));
+
+        pan.update_contact(Vec2 { x: 0.0, y: 0.0 }, changed + Duration::from_secs(1));
+        assert_eq!(pan.contact_since, None);
+        assert!(!pan.ready(changed + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn window_edge_pan_clamps_complete_frame_at_right_edge() {
+        let output = Rectangle::<i32, Logical>::new((0, 0).into(), (1280, 800).into());
+        let placement = window_edge_pan_placement(
+            (1279.0, 400.0),
+            WindowGrabAnchor::Source(Vec2 {
+                x: -100.0,
+                y: -50.0,
+            }),
+            Size::from((200, 100)),
+            (3, 3, 32, 3),
+            &camera_at_rest(),
+            output,
+        )
+        .expect("decorated window fits in the camera view");
+
+        assert_eq!(placement.location, Point::from((1077, 350)));
+        assert_eq!(
+            placement.center,
+            Vec2 {
+                x: 1177.0,
+                y: 400.0
+            }
+        );
+        assert_eq!(placement.contact, Vec2 { x: 1.0, y: 0.0 });
+    }
+
+    #[test]
+    fn window_edge_pan_keeps_titlebar_visible_at_top_edge() {
+        let output = Rectangle::<i32, Logical>::new((0, 0).into(), (1280, 800).into());
+        let placement = window_edge_pan_placement(
+            (640.0, 0.0),
+            WindowGrabAnchor::Source(Vec2 {
+                x: -100.0,
+                y: -50.0,
+            }),
+            Size::from((200, 100)),
+            (3, 3, 32, 3),
+            &camera_at_rest(),
+            output,
+        )
+        .expect("decorated window fits in the camera view");
+
+        assert_eq!(placement.location, Point::from((540, 32)));
+        assert_eq!(placement.center, Vec2 { x: 640.0, y: 82.0 });
+        assert_eq!(placement.contact, Vec2 { x: 0.0, y: -1.0 });
+        assert_eq!(placement.location.y - 32, output.loc.y);
+    }
+
+    #[test]
+    fn window_edge_pan_rejects_frame_larger_than_view() {
+        let output = Rectangle::<i32, Logical>::new((0, 0).into(), (1280, 800).into());
+        assert!(
+            window_edge_pan_placement(
+                (640.0, 400.0),
+                WindowGrabAnchor::Source(Vec2 { x: 0.0, y: 0.0 }),
+                Size::from((1276, 100)),
+                (3, 3, 32, 3),
+                &camera_at_rest(),
+                output,
+            )
+            .is_none()
+        );
     }
 
     #[test]

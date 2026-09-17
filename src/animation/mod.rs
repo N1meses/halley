@@ -22,6 +22,8 @@ struct WindowOpenTimeline {
     animation_type: WindowOpenAnimationType,
     launch_origin: Option<Point<f64, Physical>>,
     geometry: Option<RectTransition>,
+    shader_pixels: bool,
+    random_seed: f32,
 }
 
 impl WindowOpenTimeline {
@@ -29,25 +31,40 @@ impl WindowOpenTimeline {
         let sample = self.motion.sample_at(now);
         let raw_progress = sample.value;
         let progress = raw_progress.clamp(0.0, 1.0);
-        let (scale, alpha) = match self.animation_type {
-            WindowOpenAnimationType::CenterOut => {
-                (raw_progress.clamp(0.0, MAX_OVERSHOOT_SCALE), 1.0)
+        let shader_pixels = self.shader_pixels;
+        let (scale, alpha) = if shader_pixels {
+            (1.0, 1.0)
+        } else {
+            match self.animation_type {
+                WindowOpenAnimationType::CenterOut => {
+                    (raw_progress.clamp(0.0, MAX_OVERSHOOT_SCALE), 1.0)
+                }
+                WindowOpenAnimationType::Fade => (1.0, progress.clamp(0.0, 1.0) as f32),
+                WindowOpenAnimationType::Launch => (1.0, launch::alpha(sample.linear_progress)),
             }
-            WindowOpenAnimationType::Fade => (1.0, progress.clamp(0.0, 1.0) as f32),
-            WindowOpenAnimationType::Launch => (1.0, launch::alpha(sample.linear_progress)),
         };
         let destination = self
             .geometry
             .map(|geometry| geometry.rect_at(now).round())
             .or_else(|| {
-                (self.animation_type == WindowOpenAnimationType::Launch
-                    && !self.motion.is_finished_at(now))
-                .then(|| launch::rect(bounds, self.launch_origin, sample).round())
+                let traveling = self.animation_type == WindowOpenAnimationType::Launch
+                    && !self.motion.is_finished_at(now);
+                traveling.then(|| {
+                    if shader_pixels {
+                        launch::path_rect(bounds, self.launch_origin, sample).round()
+                    } else {
+                        launch::rect(bounds, self.launch_origin, sample).round()
+                    }
+                })
             });
         WindowOpenVisual {
             scale,
             alpha,
             destination,
+            progress: raw_progress,
+            clamped_progress: progress,
+            random_seed: self.random_seed,
+            shader_pixels,
         }
     }
 
@@ -67,11 +84,19 @@ impl WindowOpenTimeline {
         let (current, velocity) = match self.geometry {
             Some(geometry) => (geometry.rect_at(now), geometry.velocity_at(now)),
             None if self.animation_type == WindowOpenAnimationType::Launch => {
-                launch::rect_and_velocity(
-                    current_bounds,
-                    self.launch_origin,
-                    self.motion.sample_at(now),
-                )
+                if self.shader_pixels {
+                    launch::path_rect_and_velocity(
+                        current_bounds,
+                        self.launch_origin,
+                        self.motion.sample_at(now),
+                    )
+                } else {
+                    launch::rect_and_velocity(
+                        current_bounds,
+                        self.launch_origin,
+                        self.motion.sample_at(now),
+                    )
+                }
             }
             None => {
                 let scale = self.scale_at(now);
@@ -92,6 +117,9 @@ impl WindowOpenTimeline {
     }
 
     fn scale_at(self, now: Duration) -> f64 {
+        if self.shader_pixels {
+            return 1.0;
+        }
         let motion = self.motion.value_at(now).clamp(0.0, MAX_OVERSHOOT_SCALE);
         match self.animation_type {
             WindowOpenAnimationType::CenterOut => motion,
@@ -101,6 +129,9 @@ impl WindowOpenTimeline {
     }
 
     fn scale_velocity_at(self, now: Duration) -> f64 {
+        if self.shader_pixels {
+            return 0.0;
+        }
         let progress = self.motion.value_at(now);
         if !(0.0..MAX_OVERSHOOT_SCALE).contains(&progress) {
             return 0.0;
@@ -218,6 +249,13 @@ impl RectTransition {
         }
     }
 
+    fn linear_completion_at(self, now: Duration) -> f64 {
+        [self.x, self.y, self.width, self.height]
+            .into_iter()
+            .map(|timeline| timeline.linear_progress_at(now))
+            .fold(1.0, f64::min)
+    }
+
     fn is_finished_at(self, now: Duration) -> bool {
         self.x.is_finished_at(now)
             && self.y.is_finished_at(now)
@@ -231,6 +269,10 @@ pub struct WindowOpenVisual {
     scale: f64,
     alpha: f32,
     destination: Option<Rectangle<i32, Physical>>,
+    progress: f64,
+    clamped_progress: f64,
+    random_seed: f32,
+    shader_pixels: bool,
 }
 
 impl Default for WindowOpenVisual {
@@ -239,6 +281,10 @@ impl Default for WindowOpenVisual {
             scale: 1.0,
             alpha: 1.0,
             destination: None,
+            progress: 1.0,
+            clamped_progress: 1.0,
+            random_seed: 0.0,
+            shader_pixels: false,
         }
     }
 }
@@ -257,18 +303,77 @@ impl WindowOpenVisual {
     pub fn alpha(self) -> f32 {
         self.alpha
     }
+
+    pub fn progress(self) -> f64 {
+        self.progress
+    }
+
+    pub fn clamped_progress(self) -> f64 {
+        self.clamped_progress
+    }
+
+    pub fn random_seed(self) -> f32 {
+        self.random_seed
+    }
+
+    pub fn shader_pixels(self) -> bool {
+        self.shader_pixels
+    }
 }
 
-pub struct WindowOpenAnimations {
+#[derive(Clone, Copy, Debug)]
+struct ArrangeTimeline {
+    geometry: RectTransition,
+}
+
+impl ArrangeTimeline {
+    fn between(
+        motion: AnimationMotion,
+        now: Duration,
+        start: Rectangle<i32, Physical>,
+        target: Rectangle<i32, Physical>,
+        velocity: VisualRect,
+    ) -> Self {
+        Self {
+            geometry: RectTransition::between(
+                motion,
+                now,
+                VisualRect::from(start),
+                VisualRect::from(target),
+                velocity,
+            ),
+        }
+    }
+
+    fn rect_at(self, now: Duration) -> Rectangle<i32, Physical> {
+        self.geometry.rect_at(now).round()
+    }
+
+    fn velocity_at(self, now: Duration) -> VisualRect {
+        self.geometry.velocity_at(now)
+    }
+
+    fn completion_at(self, now: Duration) -> f64 {
+        self.geometry.linear_completion_at(now)
+    }
+
+    fn is_finished_at(self, now: Duration) -> bool {
+        self.geometry.is_finished_at(now)
+    }
+}
+
+pub struct WindowAnimations {
     config: Animations,
-    active: HashMap<WlSurface, WindowOpenTimeline>,
+    opening: HashMap<WlSurface, WindowOpenTimeline>,
+    arranging: HashMap<WlSurface, ArrangeTimeline>,
 }
 
-impl WindowOpenAnimations {
+impl WindowAnimations {
     pub fn new(config: Animations) -> Self {
         Self {
             config,
-            active: HashMap::new(),
+            opening: HashMap::new(),
+            arranging: HashMap::new(),
         }
     }
 
@@ -282,12 +387,12 @@ impl WindowOpenAnimations {
         now: Duration,
         launch_origin: Option<Point<f64, Physical>>,
     ) -> bool {
-        let config = self.config.window_open;
+        let config = &self.config.window_open;
         if !self.config.enabled || !config.enabled {
             return false;
         }
 
-        let std::collections::hash_map::Entry::Vacant(entry) = self.active.entry(surface) else {
+        let std::collections::hash_map::Entry::Vacant(entry) = self.opening.entry(surface) else {
             return false;
         };
         entry.insert(WindowOpenTimeline {
@@ -296,6 +401,8 @@ impl WindowOpenAnimations {
             animation_type: config.animation_type,
             launch_origin,
             geometry: None,
+            shader_pixels: config.custom_shader.is_some(),
+            random_seed: animation_seed(),
         });
         true
     }
@@ -307,11 +414,73 @@ impl WindowOpenAnimations {
         current_bounds: Rectangle<i32, Physical>,
         target_bounds: Rectangle<i32, Physical>,
     ) -> bool {
-        let Some(timeline) = self.active.get_mut(surface) else {
+        let Some(timeline) = self.opening.get_mut(surface) else {
             return false;
         };
         timeline.retarget(now, current_bounds, target_bounds);
         true
+    }
+
+    /// Starts or reverses one compositor-owned Field arrangement.
+    ///
+    /// An in-flight transition contributes its current velocity so rapid
+    /// toggle reversals remain continuous instead of restarting from rest.
+    pub fn arrange(
+        &mut self,
+        surface: WlSurface,
+        now: Duration,
+        current_bounds: Rectangle<i32, Physical>,
+        target_bounds: Rectangle<i32, Physical>,
+    ) -> bool {
+        let config = self.config.arrange;
+        if !self.config.enabled || !config.enabled || current_bounds == target_bounds {
+            self.arranging.remove(&surface);
+            return false;
+        }
+        let velocity = self
+            .arranging
+            .get(&surface)
+            .filter(|timeline| !timeline.is_finished_at(now))
+            .map_or(
+                VisualRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                },
+                |timeline| timeline.velocity_at(now),
+            );
+        self.arranging.insert(
+            surface,
+            ArrangeTimeline::between(config.motion, now, current_bounds, target_bounds, velocity),
+        );
+        true
+    }
+
+    pub fn arrange_visual(
+        &self,
+        surface: &WlSurface,
+        now: Duration,
+    ) -> Option<Rectangle<i32, Physical>> {
+        self.arranging
+            .get(surface)
+            .map(|timeline| timeline.rect_at(now))
+    }
+
+    pub fn arrange_completion(&self, surface: &WlSurface, now: Duration) -> Option<f64> {
+        self.arranging
+            .get(surface)
+            .map(|timeline| timeline.completion_at(now))
+    }
+
+    pub fn is_arranging(&self, surface: &WlSurface, now: Duration) -> bool {
+        self.arranging
+            .get(surface)
+            .is_some_and(|timeline| !timeline.is_finished_at(now))
+    }
+
+    pub fn has_arrange_timeline(&self, surface: &WlSurface) -> bool {
+        self.arranging.contains_key(surface)
     }
 
     /// Updates policy for future windows without disturbing animations
@@ -326,25 +495,49 @@ impl WindowOpenAnimations {
         now: Duration,
         bounds: Rectangle<i32, Physical>,
     ) -> Option<WindowOpenVisual> {
-        self.active
+        self.opening
             .get(surface)
             .map(|timeline| timeline.visual_at(now, bounds))
     }
 
     pub fn is_animating(&self, surface: &WlSurface, now: Duration) -> bool {
-        self.active
+        self.opening
             .get(surface)
             .is_some_and(|timeline| !timeline.is_finished_at(now))
+            || self
+                .arranging
+                .get(surface)
+                .is_some_and(|timeline| !timeline.is_finished_at(now))
     }
 
     pub fn remove(&mut self, surface: &WlSurface) {
-        self.active.remove(surface);
+        self.opening.remove(surface);
+        self.arranging.remove(surface);
     }
 
-    pub fn cleanup(&mut self, now: Duration) {
-        self.active
+    /// Retires finished timelines and reports whether an arrangement was
+    /// removed. Arrangement snapshots are rendered through the endpoint frame;
+    /// callers need this signal to schedule one more frame from the live client
+    /// geometry after that presentation state is dropped.
+    pub fn cleanup(&mut self, now: Duration) -> bool {
+        self.opening
             .retain(|_, timeline| !timeline.is_finished_at(now));
+        let arranging_before = self.arranging.len();
+        self.arranging
+            .retain(|_, timeline| !timeline.is_finished_at(now));
+        self.arranging.len() != arranging_before
     }
+}
+
+pub(crate) fn animation_seed() -> f32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    (hasher.finish() >> 11) as f32 / ((1_u64 << 53) as f32)
 }
 
 pub(crate) fn scale_rect_from_center(
@@ -418,6 +611,8 @@ mod tests {
             animation_type,
             launch_origin: None,
             geometry: None,
+            shader_pixels: false,
+            random_seed: 0.0,
         }
     }
 
@@ -744,6 +939,63 @@ mod tests {
     }
 
     #[test]
+    fn arrange_timeline_interpolates_position_and_size() {
+        let motion = AnimationMotion::Easing(EasingMotion {
+            duration_ms: 300,
+            curve: AnimationCurve::Linear,
+        });
+        let start = Rectangle::new((100, 50).into(), (800, 600).into());
+        let target = Rectangle::new((0, 0).into(), (1200, 900).into());
+        let zero = VisualRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        let timeline = ArrangeTimeline::between(motion, Duration::ZERO, start, target, zero);
+
+        assert_eq!(timeline.rect_at(Duration::ZERO), start);
+        assert_eq!(
+            timeline.rect_at(Duration::from_millis(150)),
+            Rectangle::new((50, 25).into(), (1000, 750).into())
+        );
+        assert_eq!(timeline.rect_at(Duration::from_millis(300)), target);
+        assert!(timeline.is_finished_at(Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn arrange_reversal_starts_at_the_live_intermediate_rect() {
+        let motion = AnimationMotion::Easing(EasingMotion {
+            duration_ms: 300,
+            curve: AnimationCurve::EaseInOutCubic,
+        });
+        let start = Rectangle::new((100, 50).into(), (800, 600).into());
+        let target = Rectangle::new((0, 0).into(), (1200, 900).into());
+        let zero = VisualRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        let forward = ArrangeTimeline::between(motion, Duration::ZERO, start, target, zero);
+        let reversed_at = Duration::from_millis(120);
+        let current = forward.rect_at(reversed_at);
+        let reversed = ArrangeTimeline::between(
+            motion,
+            reversed_at,
+            current,
+            start,
+            forward.velocity_at(reversed_at),
+        );
+
+        assert_eq!(reversed.rect_at(reversed_at), current);
+        assert_eq!(
+            reversed.rect_at(reversed_at + Duration::from_millis(300)),
+            start
+        );
+    }
+
+    #[test]
     fn geometry_retarget_keeps_the_opening_motion_and_alpha() {
         let windowed = rect(800, 600);
         let fullscreen = rect(1920, 1080);
@@ -765,6 +1017,36 @@ mod tests {
                 .visual_at(started + Duration::from_millis(300), fullscreen)
                 .transform_rect(fullscreen, fullscreen),
             fullscreen
+        );
+    }
+
+    #[test]
+    fn shader_pixels_keep_in_place_geometry_and_full_opacity() {
+        let bounds = Rectangle::new((100, 50).into(), (800, 600).into());
+        let mut animation = timeline(WindowOpenAnimationType::CenterOut, AnimationCurve::Linear);
+        animation.shader_pixels = true;
+        let middle = animation.visual_at(Duration::from_millis(1150), bounds);
+
+        assert!(middle.shader_pixels());
+        assert_eq!(middle.scale, 1.0);
+        assert_eq!(middle.alpha(), 1.0);
+        assert_eq!(middle.transform_rect(bounds, bounds), bounds);
+        assert_eq!(middle.clamped_progress(), 0.5);
+    }
+
+    #[test]
+    fn shader_pixels_launch_travels_at_native_size() {
+        let bounds = Rectangle::new((100, 50).into(), (800, 600).into());
+        let mut animation = launch_timeline(Point::from((200.0, 350.0)));
+        animation.shader_pixels = true;
+        let start = animation.visual_at(Duration::from_secs(1), bounds);
+        let destination = start.transform_rect(bounds, bounds);
+
+        assert_eq!(destination.size, bounds.size);
+        assert_eq!(start.alpha(), 1.0);
+        assert_eq!(
+            launch::rect_center(destination),
+            Point::from((200.0, 350.0))
         );
     }
 }

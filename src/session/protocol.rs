@@ -64,9 +64,11 @@ use smithay::{
     delegate_fractional_scale,
     delegate_idle_inhibit,
     delegate_idle_notify,
+    delegate_input_method_manager,
     delegate_keyboard_shortcuts_inhibit, delegate_layer_shell, delegate_output,
     delegate_pointer_constraints, delegate_primary_selection, delegate_relative_pointer,
     delegate_pointer_gestures, delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_text_input_manager,
     delegate_virtual_keyboard_manager,
     delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
 };
@@ -274,8 +276,35 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
                 font: &self.settings.font,
             },
         );
+        wayland::text_input::handle_popup_commit(self, surface);
         match toplevel_commit.clone() {
             wayland::xdg_shell::ToplevelCommit::Mapped(mapped) => {
+                let startup_cluster = self.startup_cluster_for_wayland_surface(&mapped);
+                let startup_target = startup_cluster.and_then(|cluster| {
+                    let output_name = self.clusters.metadata(cluster)?.output.clone();
+                    let output = self
+                        .wayland
+                        .space
+                        .outputs()
+                        .find(|candidate| candidate.name() == output_name)?
+                        .clone();
+                    let window = self
+                        .wayland
+                        .space
+                        .elements()
+                        .find(|window| {
+                            window
+                                .wl_surface()
+                                .is_some_and(|surface| surface.as_ref() == &mapped)
+                        })?
+                        .clone();
+                    let location = self.wayland.space.output_geometry(&output)?.loc;
+                    Some((output, window, location))
+                });
+                if let Some((output, window, location)) = startup_target {
+                    crate::wayland::set_window_output(&window, &output);
+                    self.wayland.space.relocate_element(&window, location);
+                }
                 self.nodes.register_mapped(
                     &self.wayland.space,
                     &mapped,
@@ -298,20 +327,41 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
                         smithay::desktop::layer_map_for_output(&output_handle).non_exclusive_zone();
                     Some((id, output, work_area))
                 });
-                if !admitted_to_draft
-                    && let Some((id, output, work_area)) = cluster_admission
-                    && self.clusters.admit_mapped_window(
-                        &mut self.nodes.field,
-                        &output,
-                        id,
-                        rule.cluster_participation,
-                        work_area,
-                        now,
-                    )
-                {
+                let admitted_to_startup = !admitted_to_draft
+                    && startup_cluster.is_some_and(|cluster| {
+                        cluster_admission
+                            .as_ref()
+                            .is_some_and(|(id, _, work_area)| {
+                                self.clusters.admit_attributed_window(
+                                    &mut self.nodes.field,
+                                    cluster,
+                                    *id,
+                                    *work_area,
+                                    now,
+                                )
+                            })
+                    });
+                let admitted_to_active = !admitted_to_draft
+                    && !admitted_to_startup
+                    && cluster_admission
+                        .as_ref()
+                        .is_some_and(|(id, output, work_area)| {
+                            self.clusters.admit_mapped_window(
+                                &mut self.nodes.field,
+                                output,
+                                *id,
+                                rule.cluster_participation,
+                                *work_area,
+                                now,
+                            )
+                        });
+                if admitted_to_startup || admitted_to_active {
                     self.request_redraw();
                 }
-                if !admitted_to_draft && let Some(id) = self.nodes.id_for_surface(&mapped) {
+                if !admitted_to_draft
+                    && !admitted_to_startup
+                    && let Some(id) = self.nodes.id_for_surface(&mapped)
+                {
                     crate::nodes::displace_landmarks_for_new_window(self, id);
                 }
                 let remains_collapsed = self
@@ -334,7 +384,7 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
                     .flatten();
                 if admitted_to_draft {
                     self.opening_origins.forget(&mapped);
-                    self.window_open_animations.remove(&mapped);
+                    self.window_animations.remove(&mapped);
                     super::closing::mapped(self, &mapped);
                 } else if let Some(window) = remapped_window {
                     self.wayland.space.unmap_elem(&window);
@@ -358,7 +408,7 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
                             crate::frame_clock::monotonic_now(),
                         );
                     } else {
-                        self.window_open_animations
+                        self.window_animations
                             .start(mapped, crate::frame_clock::monotonic_now());
                     }
                 }
@@ -402,6 +452,29 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
         crate::wayland::session_lock::surface_committed(self, surface);
         crate::xwayland::handle_commit(self, &root);
         let fullscreen_commit_now = crate::frame_clock::monotonic_now();
+        let arrange_target = self
+            .window_animations
+            .arrange_completion(&root, fullscreen_commit_now)
+            .zip(
+                self.wayland
+                    .space
+                    .elements()
+                    .find(|window| {
+                        window
+                            .wl_surface()
+                            .is_some_and(|candidate| candidate.as_ref() == &root)
+                    })
+                    .cloned(),
+            );
+        if let Some((completion, window)) = arrange_target {
+            let textures = &mut self.render.arrange_textures;
+            let capture = self
+                .driver
+                .with_renderer(|renderer| textures.capture_target(renderer, &window, completion));
+            if let Err(err) = capture {
+                eventline::warn!("field arrange: failed to capture target texture: {err}");
+            }
+        }
         let external_surface_size =
             smithay::backend::renderer::utils::with_renderer_surface_state(&root, |state| {
                 state.surface_size()
@@ -519,10 +592,33 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
         let apogee_preview_commit = self.settings.apogee.live_previews
             && self.shell.apogee.accepts_live_previews()
             && preview_node.is_some_and(|id| self.shell.apogee.contains(id));
+        let focus_cycle_preview_commit = self.shell.focus_cycle.accepts_live_previews()
+            && preview_node.is_some_and(|id| self.shell.focus_cycle.contains_preview(id));
         if dnd_icon_commit {
             self.request_redraw();
+        } else if focus_cycle_preview_commit {
+            // Focus-cycle cards are mirrored on every output. A commit from
+            // any visible card therefore damages every copy, not just the
+            // window's home output.
+            self.request_redraw();
         } else if apogee_preview_commit {
-            self.shell.apogee.mark_preview_dirty();
+            // Apogee cards only exist on their home output. Queue that output
+            // and let its native vblank cadence coalesce client commits.
+            let preview_output = preview_node
+                .and_then(|id| self.nodes.record(id))
+                .map(|record| record.output.clone())
+                .and_then(|name| {
+                    self.wayland
+                        .space
+                        .outputs()
+                        .find(|output| output.name() == name)
+                        .cloned()
+                });
+            if let Some(output) = preview_output {
+                self.request_output_redraw(&output);
+            } else {
+                self.request_redraw();
+            }
         } else {
             self.request_redraw();
         }
@@ -741,6 +837,17 @@ impl<D: SessionDriver> XdgShellHandler for Session<D> {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        // Fullscreen temporarily retires field maximize so the two camera
+        // owners cannot fight. If this client fullscreen replaced a maximized
+        // presentation, hand it directly back to maximize instead of restoring
+        // the older floating geometry.
+        if self
+            .fullscreen
+            .client_unfullscreen_restores_maximize(surface.wl_surface())
+            && super::set_surface_field_maximized(self, surface.wl_surface(), true)
+        {
+            return;
+        }
         let capture_outgoing = self
             .fullscreen
             .client_request_changes_visual(surface.wl_surface(), false);
@@ -842,6 +949,17 @@ impl<D: SessionDriver> XdgShellHandler for Session<D> {
         {
             crate::nodes::restore(self, id, SERIAL_COUNTER.next_serial());
         }
+        if self
+            .fullscreen
+            .suppresses_client_maximize(surface.wl_surface())
+        {
+            // Firefox and similar clients echo set_maximized after we take
+            // Mod+F over a maximized window. Honoring it tears down pending
+            // compositor fullscreen and leaves the window at its windowed
+            // restore size. xdg-shell still requires a configure.
+            surface.send_configure();
+            return;
+        }
         super::cancel_grab_for_surface(self, surface.wl_surface());
         super::set_surface_field_maximized(self, surface.wl_surface(), true);
     }
@@ -890,7 +1008,7 @@ impl<D: SessionDriver> XdgShellHandler for Session<D> {
         let grab =
             wayland::popup::begin_grab(&mut self.wayland.popup_manager, &seat, surface, serial);
         if let Some(grab) = grab {
-            wayland::popup::install_grab(self, &seat, grab, serial);
+            self.popup_grab = wayland::popup::install_grab(self, &seat, grab, serial);
         }
     }
 }
@@ -936,8 +1054,21 @@ impl<D: SessionDriver> XdgActivationHandler for Session<D> {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        if activation_token_is_fresh(token_data.timestamp, Instant::now()) {
-            let root = wayland::compositor::root_surface(&surface);
+        let root = wayland::compositor::root_surface(&surface);
+        let startup_attributed = token_data
+            .user_data
+            .get::<super::startup_clusters::ActivationAttribution>()
+            .and_then(|attribution| {
+                let client_id = root.client().map(|client| client.id());
+                self.startup_clusters.remember_activation(
+                    root.clone(),
+                    client_id,
+                    &attribution.launch_id,
+                    crate::frame_clock::monotonic_now(),
+                )
+            })
+            .is_some();
+        if !startup_attributed && activation_token_is_fresh(token_data.timestamp, Instant::now()) {
             if let Some(id) = self.nodes.id_for_surface(&root)
                 && self.nodes.record(id).is_some_and(|record| record.collapsed)
             {
@@ -1127,6 +1258,29 @@ impl<D: SessionDriver> KeyboardShortcutsInhibitHandler for Session<D> {
 
 impl<D: SessionDriver> SelectionHandler for Session<D> {
     type SelectionUserData = ();
+
+    #[cfg(feature = "xwayland")]
+    fn new_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        self.xwayland
+            .update_selection(target, source.map(|source| source.mime_types()));
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn send_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        self.xwayland.request_selection(target, mime_type, fd);
+    }
 }
 
 impl<D: SessionDriver> DataDeviceHandler for Session<D> {
@@ -1221,6 +1375,8 @@ delegate_relative_pointer!(@<D: SessionDriver> Session<D>);
 delegate_pointer_constraints!(@<D: SessionDriver> Session<D>);
 delegate_pointer_gestures!(@<D: SessionDriver> Session<D>);
 delegate_virtual_keyboard_manager!(@<D: SessionDriver> Session<D>);
+delegate_text_input_manager!(@<D: SessionDriver> Session<D>);
+delegate_input_method_manager!(@<D: SessionDriver> Session<D>);
 delegate_keyboard_shortcuts_inhibit!(@<D: SessionDriver> Session<D>);
 delegate_data_device!(@<D: SessionDriver> Session<D>);
 delegate_primary_selection!(@<D: SessionDriver> Session<D>);

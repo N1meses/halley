@@ -18,15 +18,40 @@ fn example_config_parses_end_to_end() {
     let keybinds = parse_keybinds(&config).expect("example keybinds section parses");
 
     assert_eq!(keybinds.modifier, ModifierKey::Super);
-    assert_eq!(keybinds.binds.len(), 60);
+    assert_eq!(keybinds.binds.len(), 66);
 
-    let lift = keybinds
+    let arrange = keybinds
         .binds
         .iter()
-        .find(|bind| bind.action == Action::Spawn("halley-lift".into()))
-        .expect("Lift launcher bind present");
-    assert_eq!(lift.key, "d");
-    assert!(lift.modifiers.super_key);
+        .find(|bind| bind.action == Action::ArrangeVisible)
+        .expect("arrange-visible bind present");
+    assert_eq!(arrange.key, "a");
+    assert!(arrange.modifiers.super_key);
+    assert!(!arrange.modifiers.shift);
+
+    let drag_pan = keybinds
+        .binds
+        .iter()
+        .find(|bind| bind.action == Action::PointerDragPan)
+        .expect("grabbed-window Field pan bind present");
+    assert_eq!(drag_pan.key, "click-left");
+    assert!(drag_pan.modifiers.super_key);
+    assert!(drag_pan.modifiers.shift);
+
+    let launcher = keybinds
+        .binds
+        .iter()
+        .find(|bind| bind.action == Action::Spawn("fuzzel".into()))
+        .expect("Fuzzel launcher bind present");
+    assert_eq!(launcher.key, "d");
+    assert!(launcher.modifiers.super_key);
+    assert!(
+        keybinds
+            .binds
+            .iter()
+            .all(|bind| bind.action != Action::Spawn("halley-lift".into())),
+        "the commented Halley Lift alternative must not become active"
+    );
 
     let quit = keybinds
         .binds
@@ -214,6 +239,35 @@ fn split_example_config_parses_end_to_end() {
         .expect("split example and its gathered files parse");
 
     assert_eq!(runtime.keybinds.modifier, ModifierKey::Super);
+    assert!(
+        runtime
+            .keybinds
+            .binds
+            .iter()
+            .any(|bind| bind.action == Action::PointerDragPan),
+        "split example includes grabbed-window Field panning"
+    );
+    assert_default_startup_workspaces(&runtime.autostart);
+    assert_eq!(
+        runtime.decorations.titlebars.button_position,
+        halley_config::TitlebarButtonPosition::Right
+    );
+    assert_eq!(
+        runtime.decorations.border_color_focused,
+        halley_config::BorderColor {
+            r: 0xf4 as f32 / 255.0,
+            g: 0xf5 as f32 / 255.0,
+            b: 0xf7 as f32 / 255.0,
+        }
+    );
+    assert_eq!(
+        runtime.decorations.titlebars.color_focused,
+        halley_config::BorderColor {
+            r: 0xd6 as f32 / 255.0,
+            g: 0x5d as f32 / 255.0,
+            b: 0x26 as f32 / 255.0,
+        }
+    );
     assert_eq!(runtime.cursor.theme, "Adwaita");
     assert!(runtime.cursor.hide_on_keyboard_nav);
     assert_eq!(
@@ -271,6 +325,26 @@ fn example_config_cluster_sections_parse() {
         runtime.decorations.titlebars.title_position,
         halley_config::TitlebarContentPosition::Center
     );
+    assert_eq!(
+        runtime.decorations.titlebars.button_position,
+        halley_config::TitlebarButtonPosition::Right
+    );
+    assert_eq!(
+        runtime.decorations.border_color_focused,
+        halley_config::BorderColor {
+            r: 0xf4 as f32 / 255.0,
+            g: 0xf5 as f32 / 255.0,
+            b: 0xf7 as f32 / 255.0,
+        }
+    );
+    assert_eq!(
+        runtime.decorations.titlebars.color_focused,
+        halley_config::BorderColor {
+            r: 0xd6 as f32 / 255.0,
+            g: 0x5d as f32 / 255.0,
+            b: 0x26 as f32 / 255.0,
+        }
+    );
     assert!(runtime.decorations.resize_using_border);
     assert_eq!(runtime.animations.cluster.tiling.open_duration_ms, 300);
     assert_eq!(runtime.animations.cluster.stacking.cycle_duration_ms, 220);
@@ -291,14 +365,30 @@ fn example_config_keeps_fps_overlay_disabled() {
     assert!(!runtime.debug.overlay_fps);
 }
 
+fn assert_default_startup_workspaces(autostart: &halley_config::Autostart) {
+    assert!(autostart.once.is_empty());
+    assert!(autostart.on_reload.is_empty());
+    assert_eq!(autostart.clusters.len(), 12);
+
+    for (index, cluster) in autostart.clusters.iter().enumerate() {
+        let number = index + 1;
+        assert_eq!(cluster.name, number.to_string());
+        assert!(cluster.members.is_empty());
+        assert_eq!(cluster.layout, None);
+        assert_eq!(
+            cluster.output.as_deref(),
+            Some(if number <= 6 { "DP-1" } else { "DP-2" })
+        );
+    }
+}
+
 #[test]
-fn example_config_keeps_environment_and_autostart_inactive() {
+fn example_config_keeps_environment_and_application_autostart_inactive() {
     let config = RuneConfig::from_file(EXAMPLE_PATH).expect("example config parses");
     let runtime = halley_config::parse_runtime_config(&config).expect("runtime config parses");
 
     assert!(runtime.env.is_empty());
-    assert!(runtime.autostart.once.is_empty());
-    assert!(runtime.autostart.on_reload.is_empty());
+    assert_default_startup_workspaces(&runtime.autostart);
 }
 
 #[test]
@@ -349,6 +439,7 @@ fn example_config_overlay_section_is_the_bootstrap_style() {
 
     assert_eq!(overlays.radius_px, 8);
     assert!(overlays.borders);
+    assert_eq!(overlays.border_size_px, 3);
     assert_eq!(
         overlays.notifications.position,
         halley_config::NotificationPosition::TopCenter
@@ -468,6 +559,21 @@ fn example_config_maximize_animation_parses() {
     );
 }
 
+#[test]
+fn example_config_arrange_animation_parses() {
+    let config = RuneConfig::from_file(EXAMPLE_PATH).expect("example config parses");
+    let arrange = halley_config::parse_animations(&config).arrange;
+
+    assert!(arrange.enabled);
+    assert_eq!(
+        arrange.motion,
+        halley_config::AnimationMotion::Easing(halley_config::EasingMotion {
+            duration_ms: 360,
+            curve: halley_config::AnimationCurve::EaseInOutCubic,
+        })
+    );
+}
+
 /// The shipped example uses ring-only view entries by default. A connector
 /// name matching real hardware must not be enough to create modeset work.
 #[test]
@@ -476,4 +582,28 @@ fn example_config_view_has_no_hardware_overrides_by_default() {
     let view = halley_config::parse_view_checked(&config).expect("example view parses");
     assert_eq!(view.outputs, Vec::new());
     assert_eq!(view.focus_rings.by_output.len(), 2);
+}
+
+#[test]
+fn all_templates_ship_explicit_node_collapse_duration() {
+    for path in [EXAMPLE_PATH, SPLIT_EXAMPLE_PATH] {
+        let config = RuneConfig::from_file(path).unwrap();
+        assert_eq!(
+            config
+                .get_optional::<u32>("animations.node.collapse-duration-ms")
+                .unwrap(),
+            Some(280)
+        );
+        assert_eq!(
+            halley_config::parse_animations(&config).node.duration_ms,
+            280
+        );
+    }
+    let config = RuneConfig::from_str(halley_config::DEFAULT_CONFIG).unwrap();
+    assert_eq!(
+        config
+            .get_optional::<u32>("animations.node.collapse-duration-ms")
+            .unwrap(),
+        Some(280)
+    );
 }

@@ -21,11 +21,57 @@ mod transition;
 
 pub use bloom::{DETACH_HOLD_DURATION, TokenLayout};
 pub(crate) use creation::DraftBuild;
-pub use creation::{CreationState, NameInput};
+pub use creation::{CreationState, NameInput, PreparedCreation};
 pub use ipc::handle_request;
 pub use overflow::REVEAL_EDGE_PX;
 
 pub const CORE_DIAMETER_PX: f32 = 68.0;
+pub const ACTION_BUTTON_DIAMETER_PX: i32 = 26;
+const ACTION_BUTTON_CORE_GAP_PX: i32 = 6;
+const ACTION_BUTTON_STACK_GAP_PX: i32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClusterActionControl {
+    Close,
+    Edit,
+}
+
+pub(crate) fn action_button_rects(
+    core_center: Point<i32, Logical>,
+    output_geometry: Rectangle<i32, Logical>,
+) -> [(ClusterActionControl, Rectangle<i32, Logical>); 2] {
+    let radius = ACTION_BUTTON_DIAMETER_PX / 2;
+    let offset = (CORE_DIAMETER_PX.round() as i32) / 2 + ACTION_BUTTON_CORE_GAP_PX + radius;
+    let right = core_center.x + offset;
+    let left = core_center.x - offset;
+    let center_x = if right + radius <= output_geometry.loc.x + output_geometry.size.w {
+        right
+    } else {
+        left
+    };
+    let stack_offset = (ACTION_BUTTON_DIAMETER_PX + ACTION_BUTTON_STACK_GAP_PX) / 2;
+    let min_center_y = output_geometry.loc.y + radius + stack_offset;
+    let max_center_y = output_geometry.loc.y + output_geometry.size.h - radius - stack_offset;
+    let stack_center_y = core_center
+        .y
+        .clamp(min_center_y, max_center_y.max(min_center_y));
+    let rect = |center_y| {
+        Rectangle::new(
+            (center_x - radius, center_y - radius).into(),
+            (ACTION_BUTTON_DIAMETER_PX, ACTION_BUTTON_DIAMETER_PX).into(),
+        )
+    };
+    [
+        (
+            ClusterActionControl::Close,
+            rect(stack_center_y - stack_offset),
+        ),
+        (
+            ClusterActionControl::Edit,
+            rect(stack_center_y + stack_offset),
+        ),
+    ]
+}
 
 #[derive(Clone, Debug)]
 pub struct ClusterMetadata {
@@ -93,6 +139,13 @@ pub enum StackCycleOutcome {
 pub struct ClusterDragMember {
     pub cluster_id: ClusterId,
     pub node_id: NodeId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClusterDissolution {
+    pub(crate) output: String,
+    pub(crate) members: Vec<NodeId>,
+    pub(crate) surface_restores: Vec<(NodeId, Rectangle<i32, Logical>)>,
 }
 
 /// Owns every cluster-specific state transition. Field and Nodes remain
@@ -732,6 +785,46 @@ impl ClusterSystem {
         }
     }
 
+    pub fn admit_attributed_window(
+        &mut self,
+        field: &mut Field,
+        cluster: ClusterId,
+        member: NodeId,
+        work_area: Rectangle<i32, Logical>,
+        now: Duration,
+    ) -> bool {
+        if self.registry.is_cluster_member(member) {
+            return false;
+        }
+        let Some(metadata) = self.metadata(cluster).cloned() else {
+            return false;
+        };
+        if self.active_on(&metadata.output) == Some(cluster) {
+            return self.admit_mapped_window(
+                field,
+                &metadata.output,
+                member,
+                halley_config::WindowClusterParticipation::Layout,
+                work_area,
+                now,
+            );
+        }
+        if self
+            .registry
+            .add_member_to_cluster(field, cluster, member)
+            .is_err()
+        {
+            return false;
+        }
+        let _ = field.set_state(member, halley_core::field::NodeState::Node);
+        if let Some(node) = field.node_mut(member) {
+            node.visibility
+                .set(halley_core::field::Visibility::HIDDEN_BY_CLUSTER, true);
+            node.pos = metadata.core_position;
+        }
+        true
+    }
+
     pub fn window_presentation(
         &self,
         id: NodeId,
@@ -1350,6 +1443,55 @@ impl ClusterSystem {
         self.registry.cluster(id)?.members().first().copied()
     }
 
+    /// Permanently removes a runtime workspace without destroying any of its
+    /// member windows. This is the authoritative cluster deletion boundary:
+    /// registry membership and every Halley-owned presentation lease retire
+    /// together, while remembered client geometries are handed back to the
+    /// session for protocol-level restoration.
+    pub(crate) fn dissolve_cluster(
+        &mut self,
+        field: &mut Field,
+        cluster_id: ClusterId,
+    ) -> Option<ClusterDissolution> {
+        let output = self.metadata(cluster_id)?.output.clone();
+        let members = self.member_ids(cluster_id);
+        if !self.registry.dissolve_cluster(field, cluster_id) {
+            return None;
+        }
+
+        let surface_restores = members
+            .iter()
+            .filter_map(|member| {
+                self.member_floats.remove(*member);
+                self.overlay_label_hover.borrow_mut().remove(member);
+                self.surfaces
+                    .take_restore(*member)
+                    .map(|geometry| (*member, geometry))
+            })
+            .collect();
+        if self
+            .dragged_window
+            .as_ref()
+            .is_some_and(|drag| members.contains(&drag.member))
+        {
+            self.dragged_window = None;
+        }
+        if self
+            .overlay_hovered
+            .as_ref()
+            .is_some_and(|(_, member)| members.contains(member))
+        {
+            self.overlay_hovered = None;
+        }
+        self.remove_cluster_metadata(cluster_id);
+
+        Some(ClusterDissolution {
+            output,
+            members,
+            surface_restores,
+        })
+    }
+
     pub fn detach_member(
         &mut self,
         field: &mut Field,
@@ -1419,6 +1561,7 @@ impl ClusterSystem {
             self.member_floats.remove(member);
             if let Some(creation) = self.creation.as_mut() {
                 creation.selected.remove(&member);
+                creation.prepared = None;
             }
             return false;
         };
@@ -1439,6 +1582,7 @@ impl ClusterSystem {
         self.member_floats.remove(member);
         if let Some(creation) = self.creation.as_mut() {
             creation.selected.remove(&member);
+            creation.prepared = None;
         }
         true
     }
@@ -1510,6 +1654,7 @@ impl ClusterSystem {
         self.label_hover.borrow_mut().remove(&id);
         self.bloom.remove_cluster(id);
         self.overflow.remove_cluster(id);
+        self.remove_cluster_transitions(id);
         if self
             .join_candidate
             .as_ref()
@@ -1527,6 +1672,7 @@ impl ClusterSystem {
             }
             if self.active.get(&output) == Some(&id) {
                 self.active.remove(&output);
+                self.overflow.hide(&output);
             }
         }
     }
@@ -1560,6 +1706,24 @@ fn member_at_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_buttons_are_compact_stacked_and_flip_inside_the_output_edge() {
+        let output = Rectangle::new((0, 0).into(), (1_000, 700).into());
+        let [(close, upper), (edit, lower)] = action_button_rects((100, 100).into(), output);
+        assert_eq!(close, ClusterActionControl::Close);
+        assert_eq!(edit, ClusterActionControl::Edit);
+        assert_eq!(upper.size, (26, 26).into());
+        assert_eq!(lower.size, (26, 26).into());
+        assert!(upper.loc.x > 100);
+        assert!(upper.loc.y < lower.loc.y);
+        assert!(!upper.overlaps(lower));
+
+        let [(_, upper), (_, lower)] = action_button_rects((980, 100).into(), output);
+        assert!(upper.loc.x < 980);
+        assert!(output.contains_rect(upper));
+        assert!(output.contains_rect(lower));
+    }
 
     fn test_placement_rect(
         placement: halley_core::cluster::layout::ClusterWorkspacePlacement,
@@ -1608,6 +1772,58 @@ mod tests {
         system.metadata.get_mut(&cluster).unwrap().layout = layout;
         assert!(system.activate_slot("DP-1", 1, Duration::ZERO));
         (field, system, cluster, members)
+    }
+
+    #[test]
+    fn dissolution_preserves_members_and_clears_cluster_owned_state() {
+        let (mut field, mut system, cluster, members) =
+            active_test_cluster(2, ClusterWorkspaceLayoutKind::Tiling);
+        let core = system.core_node(cluster).expect("synthetic core");
+        let first_restore = Rectangle::new((80, 60).into(), (640, 480).into());
+        let second_restore = Rectangle::new((760, 90).into(), (700, 520).into());
+        assert!(system.prepare_surface_target(
+            members[0],
+            first_restore,
+            Rectangle::new((0, 0).into(), (900, 700).into()),
+        ));
+        assert!(system.prepare_surface_target(
+            members[1],
+            second_restore,
+            Rectangle::new((900, 0).into(), (700, 700).into()),
+        ));
+        assert_eq!(
+            system.toggle_member_floating(
+                "DP-1",
+                members[0],
+                Rectangle::new((0, 0).into(), (1_600, 900).into()),
+                Rectangle::new((120, 100).into(), (600, 450).into()),
+                Duration::from_secs(1),
+            ),
+            Some(true),
+        );
+
+        let outcome = system
+            .dissolve_cluster(&mut field, cluster)
+            .expect("dissolution");
+
+        assert_eq!(outcome.output, "DP-1");
+        assert_eq!(outcome.members, members);
+        assert_eq!(
+            outcome.surface_restores,
+            vec![(members[0], first_restore), (members[1], second_restore)]
+        );
+        assert!(system.registry.cluster(cluster).is_none());
+        assert!(system.metadata(cluster).is_none());
+        assert!(system.clusters_for_output("DP-1").next().is_none());
+        assert_eq!(system.active_on("DP-1"), None);
+        assert!(!system.overflow.is_revealed("DP-1"));
+        assert!(!system.is_animating_on_output("DP-1", Duration::ZERO));
+        assert!(field.node(core).is_none());
+        for member in outcome.members {
+            assert!(!system.is_member(member));
+            assert!(!system.member_floats.is_floating(member));
+            assert!(field.is_visible(member));
+        }
     }
 
     #[test]
@@ -1919,7 +2135,7 @@ mod tests {
     }
 
     #[test]
-    fn destroyed_members_reflow_then_retire_cluster_metadata() {
+    fn destroyed_members_reflow_then_leave_a_reusable_empty_cluster() {
         let mut field = Field::new();
         let a = field.spawn_surface("A", Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 100.0, y: 80.0 });
         let b = field.spawn_surface("B", Vec2 { x: 200.0, y: 0.0 }, Vec2 { x: 100.0, y: 80.0 });
@@ -1970,10 +2186,21 @@ mod tests {
         assert_eq!(system.close_targets_for_node(core), vec![b]);
 
         assert!(system.forget_destroyed_member(&mut field, b));
-        assert!(system.registry().cluster(id).is_none());
-        assert!(system.metadata(id).is_none());
-        assert!(system.clusters_for_output("DP-1").next().is_none());
+        assert!(system.registry().cluster(id).unwrap().members().is_empty());
+        assert!(system.metadata(id).is_some());
+        assert_eq!(
+            system
+                .clusters_for_output("DP-1")
+                .map(|(_, cluster, _)| cluster)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert_eq!(system.active_on("DP-1"), Some(id));
+        assert_eq!(system.close_targets_for_node(core), Vec::<NodeId>::new());
+
+        assert!(system.activate("DP-1", id, Duration::from_secs(3)));
         assert!(system.active_on("DP-1").is_none());
+        assert_eq!(system.core_node(id), Some(core));
     }
 
     #[test]
@@ -2059,6 +2286,51 @@ mod tests {
         ));
         assert_eq!(system.first_member(cluster), Some(front));
         assert_eq!(system.member_ids(cluster), members);
+    }
+
+    #[test]
+    fn restored_collapsed_node_joins_an_open_workspace_in_both_layouts() {
+        for layout in [
+            ClusterWorkspaceLayoutKind::Tiling,
+            ClusterWorkspaceLayoutKind::Stacking,
+        ] {
+            let (mut field, mut system, cluster, _) = active_test_cluster(2, layout);
+            let work_area = Rectangle::new((0, 0).into(), (1_000, 700).into());
+            let joining = field.spawn_surface(
+                "joining",
+                Vec2 { x: 500.0, y: 350.0 },
+                Vec2 { x: 400.0, y: 300.0 },
+            );
+            assert!(field.set_state(joining, halley_core::field::NodeState::Node));
+
+            // Session restores the real surface before active-workspace admission.
+            assert!(field.touch(joining, 2_000));
+            assert!(system.join_active_member_front(
+                &mut field,
+                "DP-1",
+                joining,
+                work_area,
+                Rectangle::new((300, 200).into(), (400, 300).into()),
+                Duration::from_secs(2),
+            ));
+
+            assert_eq!(
+                field.node(joining).unwrap().state,
+                halley_core::field::NodeState::Active
+            );
+            assert_eq!(system.cluster_for_member(joining), Some(cluster));
+            assert_eq!(system.first_member(cluster), Some(joining));
+            assert!(matches!(
+                system.window_presentation(
+                    joining,
+                    "DP-1",
+                    work_area,
+                    None,
+                    Duration::from_secs(2)
+                ),
+                WindowPresentation::Workspace { .. }
+            ));
+        }
     }
 
     #[test]
@@ -2515,7 +2787,10 @@ mod tests {
             ),
             Some(ids[0])
         );
-        assert_eq!(system.registry().cluster(cluster).unwrap().master(), ids[1]);
+        assert_eq!(
+            system.registry().cluster(cluster).unwrap().master(),
+            Some(ids[1])
+        );
         let before_join = system.workspace_layout(cluster, work_area).unwrap();
 
         let joined = field.spawn_surface(

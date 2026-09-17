@@ -11,13 +11,14 @@ use smithay::wayland::seat::WaylandFocus;
 
 use crate::wayland;
 
+mod arrange;
 mod autostart;
 pub(crate) mod closing;
 mod cursor;
 mod focus;
 pub(crate) mod gesture;
 pub(crate) mod input;
-pub(crate) use input::{cluster_owns_focus, sync_cluster_activation_focus};
+pub(crate) use input::{cluster_owns_focus, show_cluster_indicator, sync_cluster_activation_focus};
 mod interaction;
 mod lifecycle;
 mod navigation;
@@ -27,6 +28,7 @@ pub(crate) mod pointer;
 mod protocol;
 mod settings;
 mod spawn;
+mod startup_clusters;
 mod state;
 pub(crate) mod touch;
 #[cfg(feature = "xwayland")]
@@ -42,6 +44,7 @@ pub mod winit;
 
 pub(crate) use focus::{focus_window, focus_window_after_close};
 pub use interaction::InteractionState;
+pub(crate) use navigation::center_pointer_on_output;
 pub use settings::RuntimeSettings;
 pub use state::{OutputDriver, RenderDriver, Session, SessionDriver};
 
@@ -53,7 +56,7 @@ macro_rules! popup_unconstrain_context {
             cameras: &$session.cameras,
             clusters: &$session.clusters,
             nodes: &$session.nodes,
-            window_open_animations: &$session.window_open_animations,
+            window_animations: &$session.window_animations,
             fullscreen: &$session.fullscreen,
             maximize: &$session.maximize,
             decorations: &$session.settings.decorations,
@@ -80,7 +83,11 @@ enum SessionControl {
     Trail(halley_config::TrailDirection),
     FocusDirection(halley_config::Direction),
     MoveNode(halley_config::Direction),
+    TransferWindow(halley_config::Direction),
+    PanField(halley_config::Direction),
     ResizeWindow(halley_config::Direction),
+    ArrangeVisible,
+    UndoArrange,
     CenterLastFocused,
     BearingsShow,
     BearingsToggle,
@@ -123,9 +130,16 @@ fn dispatch_action(
         Action::FocusCycle(direction) => return SessionControl::FocusCycle(direction),
         Action::Trail(direction) => return SessionControl::Trail(direction),
         Action::FocusDirection(direction) => return SessionControl::FocusDirection(direction),
+        Action::TransferWindow(direction) => return SessionControl::TransferWindow(direction),
+        Action::PanField(direction) => return SessionControl::PanField(direction),
         Action::MoveNode(direction) => return SessionControl::MoveNode(direction),
         Action::ResizeWindow(direction) => return SessionControl::ResizeWindow(direction),
-        Action::PointerMoveWindow | Action::PointerResizeWindow | Action::PointerPanField => {
+        Action::ArrangeVisible => return SessionControl::ArrangeVisible,
+        Action::UndoArrange => return SessionControl::UndoArrange,
+        Action::PointerMoveWindow
+        | Action::PointerResizeWindow
+        | Action::PointerPanField
+        | Action::PointerDragPan => {
             eventline::warn!("keybinds: pointer grab action used outside a pointer-button binding")
         }
         Action::CenterLastFocused => return SessionControl::CenterLastFocused,
@@ -191,6 +205,7 @@ pub(crate) fn cancel_grab_for_surface<D: SessionDriver>(
 /// destruction all use this path so a held workspace window cannot remain
 /// floating or assigned to the wrong output.
 pub(crate) fn cancel_compositor_grab<D: SessionDriver>(session: &mut Session<D>) {
+    session.interactions.steam_close_pressed = None;
     let provisional_cluster = match &session.interactions.grab {
         crate::input::grab::Grab::MoveWindow {
             id: Some(id),
@@ -379,26 +394,6 @@ fn install_node_decay_timer<D: SessionDriver>(
             |_, _, session| {
                 crate::nodes::tick_decay(session);
                 TimeoutAction::ToDuration(Duration::from_secs(1))
-            },
-        )
-        .map(|_| ())
-        .map_err(Into::into)
-}
-
-fn install_apogee_preview_timer<D: SessionDriver>(
-    handle: &LoopHandle<'_, Session<D>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    handle
-        .insert_source(
-            Timer::from_duration(Duration::from_millis(8)),
-            |_, _, session| {
-                if session.shell.apogee.take_live_redraw_due(
-                    crate::frame_clock::monotonic_now(),
-                    session.settings.apogee.preview_max_fps,
-                ) {
-                    session.request_redraw();
-                }
-                TimeoutAction::ToDuration(Duration::from_millis(8))
             },
         )
         .map(|_| ())
@@ -623,6 +618,114 @@ pub(crate) fn reconcile_cluster_surfaces<D: SessionDriver>(
     }
 }
 
+/// Removes one runtime workspace, restores member client geometry, and keeps
+/// the member applications alive as ordinary Field windows.
+pub(crate) fn dissolve_cluster<D: SessionDriver>(
+    session: &mut Session<D>,
+    cluster_id: halley_core::cluster::ClusterId,
+) -> bool {
+    let focused_core = session
+        .clusters
+        .core_node(cluster_id)
+        .filter(|core| session.nodes.focused() == Some(*core));
+    let Some(dissolution) = session
+        .clusters
+        .dissolve_cluster(&mut session.nodes.field, cluster_id)
+    else {
+        return false;
+    };
+
+    for (member, geometry) in &dissolution.surface_restores {
+        let Some((window, surface)) = session
+            .nodes
+            .record(*member)
+            .map(|record| (record.window.clone(), record.surface.clone()))
+        else {
+            continue;
+        };
+        if session.fullscreen.is_fullscreen_or_pending(&surface)
+            || session.maximize.is_maximized_or_pending(&surface)
+        {
+            continue;
+        }
+        let center = geometry.loc
+            + smithay::utils::Point::<i32, smithay::utils::Logical>::from((
+                geometry.size.w / 2,
+                geometry.size.h / 2,
+            ));
+        let output = session
+            .wayland
+            .space
+            .outputs()
+            .find(|output| {
+                session
+                    .wayland
+                    .space
+                    .output_geometry(output)
+                    .is_some_and(|output_geometry| output_geometry.contains(center))
+            })
+            .cloned()
+            .or_else(|| {
+                session
+                    .wayland
+                    .space
+                    .outputs()
+                    .find(|output| output.name() == dissolution.output)
+                    .cloned()
+            });
+        let restored_output = output.as_ref().map(smithay::output::Output::name);
+        if let Some(output) = output.as_ref() {
+            crate::wayland::set_window_output(&window, output);
+        }
+        session
+            .wayland
+            .space
+            .relocate_element(&window, geometry.loc);
+        if let Some(record) = session.nodes.record_mut(*member) {
+            record.geometry = *geometry;
+            if let Some(output) = restored_output.as_ref() {
+                record.output.clone_from(output);
+            }
+        }
+        if let Some(toplevel) = window.toplevel() {
+            let bounds = output.as_ref().map(|output| {
+                smithay::desktop::layer_map_for_output(output)
+                    .non_exclusive_zone()
+                    .size
+            });
+            toplevel.with_pending_state(|pending| {
+                pending.size = Some(geometry.size);
+                pending.bounds = bounds;
+                crate::wayland::decoration::clear_tiled_hint(pending);
+            });
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_configure();
+            }
+        } else {
+            crate::xwayland::configure_window(session, &window, *geometry);
+        }
+    }
+
+    if focused_core.is_some() {
+        let successor = dissolution.members.first().copied();
+        session
+            .nodes
+            .focus(successor, session.start_time.elapsed().as_millis() as u64);
+        if let Some(successor) = successor {
+            session.record_trail_focus(successor);
+        }
+        sync_keyboard_focus(session, smithay::utils::SERIAL_COUNTER.next_serial());
+        reconcile_pointer_constraints(session);
+    }
+    sync_cluster_camera(
+        session,
+        &dissolution.output,
+        crate::frame_clock::monotonic_now(),
+    );
+    session.request_redraw();
+    true
+}
+
 /// Copies an acknowledged interactive-resize result back into the
 /// cluster-local floating layer. Clients may quantize the requested size, so
 /// the committed Space geometry is authoritative rather than the last pointer
@@ -791,50 +894,6 @@ pub(crate) fn activate_titlebar_control<D: SessionDriver>(
     }
 }
 
-pub(crate) fn warp_pointer_to_window_center<D: SessionDriver>(
-    session: &mut Session<D>,
-    window: &smithay::desktop::Window,
-) -> bool {
-    let Some(output) = session
-        .wayland
-        .space
-        .outputs()
-        .find(|output| {
-            crate::wayland::window_is_on_output(window, output, session.driver.primary_output())
-        })
-        .cloned()
-    else {
-        return false;
-    };
-    let Some(presentation) = crate::presentation::window::WindowPresentation::for_window(
-        &session.wayland.space,
-        &session.cameras,
-        Some(&session.clusters),
-        Some(&session.nodes),
-        &session.window_open_animations,
-        &session.fullscreen,
-        &session.maximize,
-        &session.settings.decorations,
-        &session.settings.font,
-        window,
-        &output,
-        crate::frame_clock::monotonic_now(),
-    ) else {
-        return false;
-    };
-    let geometry = presentation.visual_geometry();
-    let center = (
-        f64::from(geometry.loc.x) + f64::from(geometry.size.w) * 0.5,
-        f64::from(geometry.loc.y) + f64::from(geometry.size.h) * 0.5,
-    );
-    pointer::release_for_compositor_warp(session);
-    session.pointer.set_position(center);
-    session.cursor_policy.pointer_activity();
-    pointer::update_client_state(session, session.start_time.elapsed().as_millis() as u32);
-    session.request_output_redraw(&output);
-    true
-}
-
 fn toggle_focused_fullscreen<D: SessionDriver>(session: &mut Session<D>, output: Option<&str>) {
     let Some(record) = focused_window_record(session, output) else {
         return;
@@ -899,14 +958,33 @@ fn toggle_focused_fullscreen<D: SessionDriver>(session: &mut Session<D>, output:
             }
         }
         if entering {
-            session
-                .fullscreen
-                .request_compositor(&mut session.wayland, toplevel);
+            session.fullscreen.request_compositor(
+                &mut session.wayland,
+                toplevel,
+                field_handoff.is_some(),
+            );
+        } else if session
+            .fullscreen
+            .compositor_unfullscreen_restores_maximize(&focused)
+            && set_surface_field_maximized(session, &focused, true)
+        {
+            pointer::reconcile_state(session);
+            session.request_redraw();
+            return;
         } else {
             session
                 .fullscreen
                 .unrequest_compositor(&session.wayland, toplevel);
         }
+    } else if !entering
+        && session
+            .fullscreen
+            .compositor_unfullscreen_restores_maximize(&focused)
+        && set_surface_field_maximized(session, &focused, true)
+    {
+        pointer::reconcile_state(session);
+        session.request_redraw();
+        return;
     } else {
         crate::xwayland::set_window_fullscreen(session, &window, entering);
     }
@@ -932,8 +1010,9 @@ fn toggle_focused_fullscreen<D: SessionDriver>(session: &mut Session<D>, output:
 
 pub(crate) struct FieldMaximizeFullscreenHandoff {
     restore: crate::presentation::maximize::FieldRestore,
+    restore_output_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
     geometry: Rectangle<i32, Logical>,
-    output_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    field_output_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
 }
 
 pub(crate) fn presentation_workspace_for_surface<D: SessionDriver>(
@@ -953,8 +1032,9 @@ impl FieldMaximizeFullscreenHandoff {
             surface,
             self.restore.geometry,
             self.restore.output,
+            self.restore_output_rect,
             self.geometry,
-            self.output_rect,
+            self.field_output_rect,
         );
     }
 }
@@ -975,7 +1055,7 @@ pub(crate) fn prepare_field_maximize_fullscreen_handoff<D: SessionDriver>(
 ) -> Option<FieldMaximizeFullscreenHandoff> {
     let workspace = presentation_workspace_for_surface(session, surface);
     let same_surface = session.maximize.contains(surface);
-    let output_rect = (same_surface && maximize_output == fullscreen_output)
+    let field_output_rect = (same_surface && maximize_output == fullscreen_output)
         .then(|| {
             session
                 .wayland
@@ -986,6 +1066,7 @@ pub(crate) fn prepare_field_maximize_fullscreen_handoff<D: SessionDriver>(
                 .and_then(|output| presented_window_rect(session, window, &output, now))
         })
         .flatten();
+    let restore_output_rect = session.maximize.restore_presentation_output(surface);
     let restore = session
         .maximize
         .take_scope_restore(maximize_output, workspace)?;
@@ -1002,19 +1083,15 @@ pub(crate) fn prepare_field_maximize_fullscreen_handoff<D: SessionDriver>(
     if !camera_handoff {
         let _ = session.cameras.apply_field_maximize(maximize_output, None);
     }
-    if restore.surface == *surface {
-        session
-            .wayland
-            .space
-            .relocate_element(window, restore.geometry.loc);
-    } else {
+    if restore.surface != *surface {
         configure_field_geometry(session, &restore);
     }
 
     geometry.map(|geometry| FieldMaximizeFullscreenHandoff {
         restore,
+        restore_output_rect,
         geometry,
-        output_rect,
+        field_output_rect,
     })
 }
 
@@ -1257,9 +1334,6 @@ fn toggle_field_maximize<D: SessionDriver>(
     session: &mut Session<D>,
     record: crate::nodes::NodeRecord,
 ) -> bool {
-    if node_user_pinned(session, record.id) {
-        return false;
-    }
     let output_name =
         crate::wayland::window_output_name(&record.window).unwrap_or_else(|| record.output.clone());
     let Some(target_output) = session
@@ -1302,6 +1376,9 @@ fn toggle_field_maximize<D: SessionDriver>(
     let tracked_restore = session.maximize.restore(&record.surface);
     let cluster_restore = cluster_presentation_restore(session, &record.surface, now, entering);
     let inherited_restore = session.fullscreen.restore_placement(&record.surface);
+    let inherited_restore_output_rect = session
+        .fullscreen
+        .restore_presentation_output(&record.surface);
     let Some(restore_geometry) = tracked_restore
         .as_ref()
         .map(|restore| restore.geometry)
@@ -1330,6 +1407,7 @@ fn toggle_field_maximize<D: SessionDriver>(
     let presentation_output = cluster_restore
         .as_ref()
         .and_then(|restore| restore.presentation_output)
+        .or(inherited_restore_output_rect)
         .or_else(|| {
             entering
                 .then(|| presented_window_rect(session, &record.window, &target_output, now))
@@ -1409,6 +1487,14 @@ fn toggle_field_maximize<D: SessionDriver>(
             .fullscreen_textures
             .remove(&displaced.surface);
         configure_field_geometry(session, displaced);
+    }
+    if entering {
+        // Maximize takes the top stack slot once, matching fullscreen entry.
+        // This keeps windows that were already in front from riding over the
+        // maximize transition, without creating an always-on-top layer: any
+        // later explicit raise can still move another window above it.
+        crate::window::raise_managed(&mut session.wayland, &record.window);
+        session.xwayland.raise_window(&record.window);
     }
     configure_field_geometry(
         session,
@@ -1499,7 +1585,7 @@ pub(crate) fn presented_window_rect<D: SessionDriver>(
         Some(&session.nodes),
         window,
         output,
-        &session.window_open_animations,
+        &session.window_animations,
         &session.fullscreen,
         &session.maximize,
         &session.settings.decorations,
@@ -1571,9 +1657,12 @@ pub(crate) fn sync_keyboard_focus<D: SessionDriver>(
             .seat
             .get_keyboard()
             .expect("keyboard capability added at seat setup");
+        let has_keyboard_focus = focused.is_some();
         pointer::prepare_keyboard_focus_change(session, None);
         keyboard.set_focus(session, focused, serial);
-        session.xwayland.sync_active_window(None);
+        session
+            .xwayland
+            .sync_active_window(None, has_keyboard_focus);
         return;
     }
     wayland::focus::refresh_selected_layer(&mut session.wayland);
@@ -1623,12 +1712,27 @@ pub(crate) fn sync_keyboard_focus<D: SessionDriver>(
     let active_x11_window = focused
         .as_ref()
         .and_then(crate::xwayland::KeyboardFocusTarget::x11_window_id);
+    let globally_active_x11_window = focused
+        .as_ref()
+        .and_then(crate::xwayland::KeyboardFocusTarget::globally_active_x11_window_id);
+    let has_keyboard_focus = focused.is_some();
     if let Some(focused) = focused.as_ref() {
         focused.acknowledge_attention();
     }
-    pointer::prepare_keyboard_focus_change(session, next_constraint_root.as_ref());
+    // Commit keyboard/X focus before retiring the old pointer constraint.
+    // Xwayland releases a locked X pointer when it receives `unlocked`; doing
+    // that while the old game still owns core X focus lets its final cursor
+    // re-anchor affect the camera. The seat update is synchronous from the
+    // compositor's perspective, so no input can reach the new target between
+    // these two operations.
     keyboard.set_focus(session, focused, serial);
-    session.xwayland.sync_active_window(active_x11_window);
+    session
+        .xwayland
+        .sync_active_window(active_x11_window, has_keyboard_focus);
+    session
+        .xwayland
+        .focus_globally_active_window(globally_active_x11_window);
+    pointer::prepare_keyboard_focus_change(session, next_constraint_root.as_ref());
     // Map, unmap, destroy and raise all funnel through here, so this is the one
     // place the X server's stack can drift from the compositor's.
     session.xwayland.sync_stacking_order(&session.wayland.space);
@@ -1829,7 +1933,16 @@ pub(crate) fn begin_pointer_move<D: SessionDriver>(
     serial: smithay::utils::Serial,
     button: u32,
 ) -> bool {
-    begin_pointer_move_active(session, window, serial, button, false, None)
+    begin_pointer_move_active(session, window, serial, button, false, None, false)
+}
+
+pub(crate) fn begin_pointer_edge_pan<D: SessionDriver>(
+    session: &mut Session<D>,
+    window: &smithay::desktop::Window,
+    serial: smithay::utils::Serial,
+    button: u32,
+) -> bool {
+    begin_pointer_move_active(session, window, serial, button, false, None, true)
 }
 
 pub(crate) fn activate_client_pointer_move<D: SessionDriver>(
@@ -1844,6 +1957,7 @@ pub(crate) fn activate_client_pointer_move<D: SessionDriver>(
         pending.button,
         pending.client_owned,
         Some(pending),
+        false,
     )
 }
 
@@ -1854,6 +1968,7 @@ fn begin_pointer_move_active<D: SessionDriver>(
     button: u32,
     client_owned: bool,
     pending: Option<crate::input::grab::PendingWindowMove>,
+    edge_pan_requested: bool,
 ) -> bool {
     if !crate::window::accepts_compositor_grab(window)
         || window
@@ -1920,6 +2035,9 @@ fn begin_pointer_move_active<D: SessionDriver>(
     let Some(camera) = session.cameras.get(&output_name) else {
         return false;
     };
+    if edge_pan_requested && was_maximized {
+        return false;
+    }
     let pointer_position = session.pointer.position();
     let pointer_world =
         crate::input::grab::screen_to_world_on_output(pointer_position, camera, output_geometry);
@@ -1975,6 +2093,23 @@ fn begin_pointer_move_active<D: SessionDriver>(
         ) && id != session.clusters.first_member(drag.cluster_id)
     }) {
         return false;
+    }
+    if edge_pan_requested {
+        let output_right = output_geometry.loc.x + output_geometry.size.w;
+        let output_bottom = output_geometry.loc.y + output_geometry.size.h;
+        let visual_right = visual_geometry.loc.x + visual_geometry.size.w;
+        let visual_bottom = visual_geometry.loc.y + visual_geometry.size.h;
+        let fully_visible = visual_geometry.loc.x >= output_geometry.loc.x
+            && visual_geometry.loc.y >= output_geometry.loc.y
+            && visual_right <= output_right
+            && visual_bottom <= output_bottom;
+        if id.is_none()
+            || cluster_drag.is_some()
+            || !fully_visible
+            || session.clusters.active_on(&output_name).is_some()
+        {
+            return false;
+        }
     }
     focus::focus_window_from_pointer(session, window, serial);
 
@@ -2096,6 +2231,12 @@ fn begin_pointer_move_active<D: SessionDriver>(
         button,
         client_owned,
         anchor,
+        edge_pan: edge_pan_requested.then(|| {
+            crate::input::grab::WindowEdgePan::new(
+                output_name.clone(),
+                crate::frame_clock::monotonic_now(),
+            )
+        }),
         last_world: center,
         last_update: crate::frame_clock::monotonic_now(),
         velocity: halley_core::field::Vec2 { x: 0.0, y: 0.0 },

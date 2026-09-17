@@ -224,8 +224,11 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     let xwayland = crate::xwayland::State::<WinitDriver>::new(&dh, event_loop.handle());
     let mut applied_input = runtime_config.input.clone();
     applied_input.keyboard = applied_keyboard;
+    let startup_cluster_declarations = runtime_config.autostart.clusters.clone();
+    let startup_cluster_default_layout = runtime_config.clusters.default_layout;
     let launch_environment = super::environment::LaunchEnvironment::new(&runtime_config.env);
     let launch_path = launch_environment.path();
+    let system_color_scheme = crate::appearance::current_color_scheme();
     let mut app = App {
         driver,
         keyboard: Keyboard::from_config(
@@ -236,6 +239,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         key_repeat: super::input::repeat::Policy::new(event_loop.handle()),
         launch_environment,
         autostart: super::autostart::Autostart::disabled(),
+        startup_clusters: super::startup_clusters::StartupClusters::default(),
         pointer: Pointer::new((100.0, 100.0)),
         cursor: CursorManager::new(&runtime_config.cursor),
         cursor_policy: super::cursor::Policy::new(&runtime_config.cursor, event_loop.handle()),
@@ -243,6 +247,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         wayland,
         seat_state,
         seat,
+        popup_grab: None,
         idle_notifier_state,
         presentation_state,
         drm_syncobj_state: None,
@@ -253,15 +258,21 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         config_watcher: None,
         startup_config_diagnostic: initial.diagnostic,
         shell: crate::shell::state::ShellState::new(&runtime_config),
-        settings: super::RuntimeSettings::new(&runtime_config, applied_input),
-        nodes: crate::nodes::NodesState::new(&runtime_config),
+        settings: super::RuntimeSettings::new_with_color_scheme(
+            &runtime_config,
+            applied_input,
+            system_color_scheme,
+        ),
+        nodes: crate::nodes::NodesState::new_with_color_scheme(
+            &runtime_config,
+            system_color_scheme,
+        ),
         trail: crate::trail::TrailState::new(runtime_config.trail),
         clusters: crate::clusters::ClusterSystem::new(
             runtime_config.clusters,
             runtime_config.animations.cluster,
         ),
         api_subscriptions: crate::ipc::ApiSubscriptions::default(),
-        pending_pointer_warp: None,
         window_rules: crate::window::rules::WindowRulesState::new(
             runtime_config.window_rules.clone(),
         ),
@@ -278,23 +289,30 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         window_trace: super::trace::WindowTrace::from_env(),
         keyboard_monitor: None,
         opening_origins: super::opening::OpeningOrigins::default(),
-        window_open_animations: crate::animation::WindowOpenAnimations::new(
-            runtime_config.animations,
+        window_animations: crate::animation::WindowAnimations::new(
+            runtime_config.animations.clone(),
         ),
         render: crate::render::resources::RenderState::new(
-            runtime_config.animations,
+            runtime_config.animations.clone(),
             &runtime_config.font,
         ),
-        fullscreen: crate::wayland::fullscreen::FullscreenManager::new(runtime_config.animations),
+        fullscreen: crate::wayland::fullscreen::FullscreenManager::new(
+            runtime_config.animations.clone(),
+        ),
         maximize: crate::presentation::maximize::FieldMaximizeManager::new(
             runtime_config.field,
-            runtime_config.animations,
+            runtime_config.animations.clone(),
         ),
         xwayland,
     };
     app.wayland
         .space
         .map_output(app.driver.backend.output(), (0, 0));
+    app.initialize_startup_clusters(
+        &startup_cluster_declarations,
+        startup_cluster_default_layout,
+        false,
+    );
     app.initialize_config_notification();
 
     let socket_name = super::protocol::init_wayland_listener(display, &mut event_loop);
@@ -325,11 +343,13 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
             Err(err) => eventline::warn!("config: failed to start watcher: {err}"),
         }
     }
+    if let Err(err) = crate::appearance::watch(&event_loop.handle(), |app: &mut App, scheme| {
+        app.apply_system_color_scheme(scheme);
+    }) {
+        eventline::warn!("appearance: failed to start system colour watcher: {err}");
+    }
     if let Err(err) = super::install_node_decay_timer(&event_loop.handle()) {
         eventline::warn!("nodes: failed to start decay timer: {err}");
-    }
-    if let Err(err) = super::install_apogee_preview_timer(&event_loop.handle()) {
-        eventline::warn!("apogee: failed to start preview timer: {err}");
     }
     if let Err(err) = super::install_overlay_timer(&event_loop.handle()) {
         eventline::warn!("overlays: failed to start lifecycle timer: {err}");
@@ -347,6 +367,8 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
             WinitEvent::Redraw => {
                 let now = Instant::now();
                 let target_presentation_time = crate::frame_clock::monotonic_now();
+                let edge_pan_output =
+                    super::input::tick_grabbed_window_edge_pan(app, target_presentation_time);
                 let physics_animating = crate::nodes::tick_physics(app, target_presentation_time);
                 let dt = now
                     .duration_since(app.driver.last_camera_tick)
@@ -354,6 +376,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 app.driver.last_camera_tick = now;
                 let output = app.driver.backend.output().clone();
                 let output_name = output.name();
+                let edge_pan_animating = edge_pan_output.as_deref() == Some(output_name.as_str());
                 super::reconcile_cluster_surfaces(app, &output_name);
                 let view_before = app.cameras.view(&output_name);
                 let cluster_camera_changed =
@@ -376,6 +399,9 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 if let (Some(before), Some(after)) = (zoom_scale_before, zoom_scale_after)
                     && before != after
                 {
+                    if after < before && app.clusters.active_on(&output_name).is_none() {
+                        crate::nodes::reconcile_landmarks_for_zoom(app, &output_name, after);
+                    }
                     app.shell.overlays.show_zoom_indicator(
                         &output_name,
                         after,
@@ -392,11 +418,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
 
                 let window_animating = app.wayland.space.elements().any(|window| {
                     window.wl_surface().is_some_and(|surface| {
-                        app.window_open_animations
+                        app.window_animations
                             .is_animating(surface.as_ref(), target_presentation_time)
                     })
                 });
-                let _ = crate::shell::focus_cycle::finish_pending_pointer_warp(app);
+                let arrange_animating = app.wayland.space.elements().any(|window| {
+                    window.wl_surface().is_some_and(|surface| {
+                        app.window_animations
+                            .is_arranging(surface.as_ref(), target_presentation_time)
+                    })
+                });
                 let presentation_workspace = crate::presentation::active_workspace_on_output(
                     &app.clusters,
                     &output.name(),
@@ -425,11 +456,23 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 let node_animating = app
                     .nodes
                     .is_animating_on_output(&output.name(), target_presentation_time);
-                let bearings_animating = app
-                    .shell
-                    .bearings
-                    .tick(&output.name(), target_presentation_time);
+                let bearings_animating = app.shell.bearings.tick(
+                    &output.name(),
+                    target_presentation_time,
+                    !app.fullscreen
+                        .presents_immersive_on_output_matching(&output, |surface| {
+                            crate::presentation::surface_workspace_is_active(
+                                &app.clusters,
+                                &app.nodes,
+                                surface,
+                                &output.name(),
+                                target_presentation_time,
+                            )
+                        }),
+                );
                 let focus_cycle_animating = app.shell.focus_cycle.tick(target_presentation_time);
+                let composer_animating =
+                    crate::shell::cluster_composer::tick_session(app, target_presentation_time);
                 let apogee_animating = crate::shell::apogee::tick(app, target_presentation_time);
                 let background_animating =
                     app.background_animates_on_output(&output, target_presentation_time);
@@ -443,7 +486,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                         .clusters
                         .labels_animating_on_output(&output.name(), app.nodes.config.show_labels);
                 let pointer_time = app.start_time.elapsed().as_millis() as u32;
-                if fullscreen_animating || maximize_animating {
+                if fullscreen_animating || maximize_animating || arrange_animating {
                     super::pointer::update_client_state(app, pointer_time);
                 } else if cluster_animating {
                     super::pointer::refresh_client_focus(app, pointer_time);
@@ -483,7 +526,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                             space: &app.wayland.space,
                             focused: app.wayland.focused_window.as_ref(),
                             cameras: &app.cameras,
-                            window_open_animations: &app.window_open_animations,
+                            window_animations: &app.window_animations,
                             fullscreen: &app.fullscreen,
                             maximize: &app.maximize,
                             nodes: &app.nodes,
@@ -506,6 +549,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                             bearings: &app.shell.bearings,
                             focus_cycle: &app.shell.focus_cycle,
                             apogee: &app.shell.apogee,
+                            cluster_composer: &app.shell.cluster_composer,
                             apogee_config: app.settings.apogee,
                             overlays: &app.shell.overlays,
                             overlay_config: &app.settings.overlays,
@@ -564,20 +608,35 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                             frame_callback_sequence,
                         );
                     }
+                } else if app
+                    .shell
+                    .cluster_composer
+                    .target_output()
+                    .is_some_and(|name| name == output.name())
+                {
+                    crate::shell::cluster_composer::send_preview_frames(
+                        &app.shell.cluster_composer,
+                        &app.nodes,
+                        &output,
+                        elapsed,
+                        frame_callback_sequence,
+                    );
                 } else if app.shell.apogee.is_active() {
-                    if app.shell.apogee.take_callback_due(
-                        &output.name(),
-                        target_presentation_time,
-                        app.settings.apogee.preview_max_fps,
-                    ) {
-                        crate::shell::apogee::send_preview_frames(
-                            &app.shell.apogee,
-                            &app.nodes,
-                            &output,
-                            elapsed,
-                            frame_callback_sequence,
-                        );
-                    }
+                    crate::shell::apogee::send_preview_frames(
+                        &app.shell.apogee,
+                        &app.nodes,
+                        &output,
+                        elapsed,
+                        frame_callback_sequence,
+                    );
+                } else if app.shell.focus_cycle.is_active() {
+                    crate::shell::focus_cycle::send_preview_frames(
+                        &app.shell.focus_cycle,
+                        &app.nodes,
+                        &output,
+                        elapsed,
+                        frame_callback_sequence,
+                    );
                 } else {
                     let cluster_exclusive_member =
                         crate::wayland::frame_callbacks::cluster_exclusive_callback_member(
@@ -597,6 +656,10 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                             app.render
                                 .fullscreen_textures
                                 .awaiting_target(surface.as_ref())
+                                || app
+                                    .render
+                                    .arrange_textures
+                                    .awaiting_target(surface.as_ref())
                         });
                         let require_visible =
                             crate::wayland::frame_callbacks::requires_render_visibility(
@@ -651,7 +714,21 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 }
                 crate::xwayland::sync_stacking_order(app);
                 wayland::layer_shell::cleanup(&mut app.wayland);
-                app.window_open_animations.cleanup(target_presentation_time);
+                let arrange_cleanup = app.window_animations.cleanup(target_presentation_time);
+                app.render
+                    .arrange_textures
+                    .retain_surfaces(|surface| app.window_animations.has_arrange_timeline(surface));
+                if arrange_cleanup {
+                    // This frame was composed with the arrangement endpoint.
+                    // The client may still have its pre-configure size, which
+                    // that endpoint scales into the target rectangle. Render
+                    // once more after retiring the timeline so stale geometry
+                    // cannot remain latched until unrelated damage arrives.
+                    super::pointer::update_client_state(
+                        app,
+                        app.start_time.elapsed().as_millis() as u32,
+                    );
+                }
                 app.render
                     .window_close_animations
                     .cleanup(target_presentation_time);
@@ -671,12 +748,14 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
 
                 let overlay_animating = app.shell.overlays.animating(target_presentation_time);
                 if camera_animating
+                    || edge_pan_animating
                     || fullscreen_camera_changed
                     || window_animating
                     || closing_animating
                     || node_animating
                     || bearings_animating
                     || focus_cycle_animating
+                    || composer_animating
                     || apogee_animating
                     || background_animating
                     || overlay_animating
@@ -687,6 +766,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                     || app.render.node_renderer.has_pending_icons()
                     || app.settings.debug.overlay_fps && !app.session_lock.active()
                     || fullscreen_cleanup
+                    || arrange_cleanup
                 {
                     app.request_redraw();
                 }

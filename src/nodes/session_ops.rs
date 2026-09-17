@@ -4,21 +4,12 @@ pub fn reconcile_landmarks<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     only_output: Option<&str>,
 ) {
-    reconcile_landmarks_inner(session, only_output, None);
-}
-
-pub fn reconcile_landmarks_at_scale<D: crate::session::SessionDriver>(
-    session: &mut crate::session::Session<D>,
-    output: &str,
-    scale: f32,
-) {
-    reconcile_landmarks_inner(session, Some(output), Some(scale));
+    reconcile_landmarks_inner(session, only_output);
 }
 
 fn reconcile_landmarks_inner<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     only_output: Option<&str>,
-    scale_override: Option<f32>,
 ) {
     session.nodes.sync_from_space(&session.wayland.space);
     let candidates = session
@@ -39,13 +30,11 @@ fn reconcile_landmarks_inner<D: crate::session::SessionDriver>(
         .collect::<Vec<_>>();
     let now = crate::frame_clock::monotonic_now();
     for (id, output, current) in candidates {
-        let scale = scale_override.unwrap_or_else(|| {
-            session
-                .cameras
-                .get(&output)
-                .map(crate::presentation::camera::scale)
-                .unwrap_or(1.0)
-        });
+        let scale = session
+            .cameras
+            .get(&output)
+            .map(crate::presentation::camera::scale)
+            .unwrap_or(1.0);
         let occupied_cores = session
             .clusters
             .collapsed_core_landmarks()
@@ -79,6 +68,13 @@ fn reconcile_landmarks_inner<D: crate::session::SessionDriver>(
 fn dynamics_bodies<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
 ) -> Vec<dynamics::Body> {
+    dynamics_bodies_at_scale(session, None)
+}
+
+fn dynamics_bodies_at_scale<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    scale_override: Option<(&str, f32)>,
+) -> Vec<dynamics::Body> {
     session.nodes.sync_from_space(&session.wayland.space);
     let mut bodies = session
         .nodes
@@ -92,10 +88,15 @@ fn dynamics_bodies<D: crate::session::SessionDriver>(
         })
         .filter_map(|record| {
             let node = session.nodes.field.node(record.id)?;
-            let scale = session
-                .cameras
-                .get(&record.output)
-                .map(crate::presentation::camera::scale)
+            let scale = scale_override
+                .filter(|(output, _)| *output == record.output)
+                .map(|(_, scale)| scale)
+                .or_else(|| {
+                    session
+                        .cameras
+                        .get(&record.output)
+                        .map(crate::presentation::camera::scale)
+                })
                 .unwrap_or(1.0)
                 .max(0.05);
             let (kind, extents) = if record.collapsed {
@@ -138,10 +139,15 @@ fn dynamics_bodies<D: crate::session::SessionDriver>(
         .collect::<Vec<_>>();
     bodies.extend(session.clusters.collapsed_core_landmarks().into_iter().map(
         |(_, id, output, pos, pinned)| {
-            let scale = session
-                .cameras
-                .get(&output)
-                .map(crate::presentation::camera::scale)
+            let scale = scale_override
+                .filter(|(override_output, _)| *override_output == output)
+                .map(|(_, scale)| scale)
+                .or_else(|| {
+                    session
+                        .cameras
+                        .get(&output)
+                        .map(crate::presentation::camera::scale)
+                })
                 .unwrap_or(1.0)
                 .max(0.05);
             dynamics::Body {
@@ -161,7 +167,92 @@ fn dynamics_bodies<D: crate::session::SessionDriver>(
     bodies
 }
 
-fn apply_dynamics_positions<D: crate::session::SessionDriver>(
+/// Reconcile the fixed-pixel footprint of collapsed landmarks at a newly
+/// presented zoom scale. This runs only while zooming out: active windows are
+/// stationary blockers, while ordinary nodes and collapsed cluster cores move
+/// together under the same collision policy.
+pub(crate) fn reconcile_landmarks_for_zoom<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    output: &str,
+    scale: f32,
+) -> bool {
+    let bodies = dynamics_bodies_at_scale(session, Some((output, scale)))
+        .into_iter()
+        .filter(|body| body.output == output)
+        .collect::<Vec<_>>();
+    let positions = dynamics::solve_zoom_reflow(&bodies);
+    let now = crate::frame_clock::monotonic_now();
+    let mut changed = false;
+
+    for (id, destination) in positions {
+        if let Some(cluster) = session.clusters.cluster_for_core(id) {
+            let Some((current, core_output)) = session
+                .clusters
+                .metadata(cluster)
+                .map(|metadata| (metadata.core_position, metadata.output.clone()))
+            else {
+                continue;
+            };
+            if (destination.x - current.x).abs() <= 0.001
+                && (destination.y - current.y).abs() <= 0.001
+            {
+                continue;
+            }
+            let from = session.nodes.landmark_position(id, current, now);
+            if !session
+                .clusters
+                .move_core(cluster, &core_output, destination)
+            {
+                continue;
+            }
+            if let Some(node) = session.nodes.field.node_mut(id) {
+                node.pos = destination;
+            }
+            session.nodes.physics_velocity.remove(&id);
+            session
+                .nodes
+                .start_landmark_slide(id, from, destination, now);
+            changed = true;
+            continue;
+        }
+
+        let Some((current, collapsed, attached, node_output)) =
+            session.nodes.record(id).and_then(|record| {
+                session.nodes.field.node(id).map(|node| {
+                    (
+                        node.pos,
+                        record.collapsed,
+                        record.attached,
+                        record.output.clone(),
+                    )
+                })
+            })
+        else {
+            continue;
+        };
+        if !collapsed
+            || !attached
+            || node_output != output
+            || ((destination.x - current.x).abs() <= 0.001
+                && (destination.y - current.y).abs() <= 0.001)
+        {
+            continue;
+        }
+        let from = session.nodes.landmark_position(id, current, now);
+        if let Some(node) = session.nodes.field.node_mut(id) {
+            node.pos = destination;
+        }
+        session.nodes.physics_velocity.remove(&id);
+        session
+            .nodes
+            .start_landmark_slide(id, from, destination, now);
+        changed = true;
+    }
+
+    changed
+}
+
+pub(super) fn apply_dynamics_positions<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     positions: HashMap<NodeId, Vec2>,
     authority: Option<NodeId>,
@@ -549,6 +640,23 @@ pub fn collapse<D: crate::session::SessionDriver>(
     id: NodeId,
     serial: smithay::utils::Serial,
 ) -> bool {
+    collapse_inner(session, id, serial, false)
+}
+
+fn collapse_for_decay<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+) -> bool {
+    collapse_inner(session, id, serial, true)
+}
+
+fn collapse_inner<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+    decay: bool,
+) -> bool {
     // Cluster workspaces own member visibility as a unit.  Collapsing one
     // member would tear it out of the workspace without updating cluster
     // membership, so minimize requests (server-titlebar, xdg-shell, or X11)
@@ -585,7 +693,7 @@ pub fn collapse<D: crate::session::SessionDriver>(
     let logical_focus =
         logical_focus_after_collapse(session.nodes.focused(), id, client_was_focused);
 
-    let _ = crate::session::closing::capture_window(session, &record.window);
+    let _ = crate::session::closing::capture_window_for_node(session, &record.window, decay);
     if let Some(restore) = session.maximize.take_restore(&record.surface) {
         session.render.fullscreen_textures.remove(&restore.surface);
         crate::session::configure_field_geometry(session, &restore);
@@ -681,6 +789,22 @@ pub fn restore<D: crate::session::SessionDriver>(
 }
 
 pub fn restore_for_close<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+) -> bool {
+    restore_without_centering(session, id, serial)
+}
+
+pub(crate) fn restore_for_cluster_join<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+) -> bool {
+    restore_without_centering(session, id, serial)
+}
+
+fn restore_without_centering<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     id: NodeId,
     serial: smithay::utils::Serial,
@@ -840,13 +964,80 @@ pub fn pan_after_close_restore<D: crate::session::SessionDriver>(
     }
 }
 
+/// Focus and raise a presentation-navigation target, then smoothly place its
+/// center at the output center. Apogee and Alt+Tab are explicit spatial jumps:
+/// they should land on the chosen window rather than merely reveal an edge.
+pub fn focus_and_center_node<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+) -> bool {
+    let Some(record) = session.nodes.record(id).cloned() else {
+        return false;
+    };
+    let Some(node) = session.nodes.field.node(id).cloned() else {
+        return false;
+    };
+    let selected_output = session
+        .wayland
+        .space
+        .outputs()
+        .find(|output| output.name() == record.output)
+        .cloned();
+    if session
+        .fullscreen
+        .pause_presentation_on_output_except(&record.output, &record.surface)
+        && let Some(output) = selected_output.as_ref()
+    {
+        session.sync_fullscreen_camera(output, crate::frame_clock::monotonic_now());
+    }
+    let activated = if record.collapsed {
+        restore_with_centering(
+            session,
+            id,
+            serial,
+            Some(halley_config::RestoreCentering::Always),
+        )
+    } else if record.attached {
+        crate::session::focus_window(session, &record.window, serial);
+        true
+    } else {
+        false
+    };
+    if !activated {
+        return false;
+    }
+
+    // Presentation owners already place their window at the output center.
+    // Rewriting the parked Field camera underneath them would make their later
+    // restore jump to an unrelated Apogee selection.
+    if !session.fullscreen.is_fullscreen_or_pending(&record.surface)
+        && !session.maximize.contains(&record.surface)
+        && let Some(output) = selected_output
+        && let Some(output_geometry) = session.wayland.space.output_geometry(&output)
+    {
+        let _ = session.cameras.center_field_on(
+            &record.output,
+            Vec2 {
+                x: node.pos.x - output_geometry.loc.x as f32,
+                y: node.pos.y - output_geometry.loc.y as f32,
+            },
+        );
+    }
+    let _ = crate::session::center_pointer_on_output(session, &record.output);
+    session.request_redraw();
+    true
+}
+
 /// Activate a node and make it visible in one operation. Collapsed nodes
 /// follow the configured restore-centering policy; live windows are focused
-/// immediately and the camera only moves far enough to reveal their bounds.
+/// immediately. When `pan` is true, the camera only moves far enough to
+/// reveal their bounds.
 pub fn focus_or_reveal_node<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     id: NodeId,
     serial: smithay::utils::Serial,
+    pan: bool,
 ) -> bool {
     let Some(record) = session.nodes.record(id).cloned() else {
         return false;
@@ -882,30 +1073,84 @@ pub fn focus_or_reveal_node<D: crate::session::SessionDriver>(
         .space
         .element_geometry(&record.window)
         .unwrap_or(record.geometry);
-    let delta = minimal_reveal_delta(
-        crate::presentation::camera::world_viewport(view, output_geometry),
-        geometry,
-        24,
-    );
-    if (delta.x != 0.0 || delta.y != 0.0)
-        && let Some(camera) = session.cameras.get_mut(&record.output)
-    {
-        camera.pan_vel = Vec2 { x: 0.0, y: 0.0 };
-        camera.target_center = Vec2 {
-            x: camera.center.x + delta.x,
-            y: camera.center.y + delta.y,
-        };
+    if pan {
+        let delta = minimal_reveal_delta(
+            crate::presentation::camera::world_viewport(view, output_geometry),
+            geometry,
+            24,
+        );
+        apply_camera_reveal_delta(session, &record.output, delta);
     }
     session.request_redraw();
     true
 }
 
-/// Select a collapsed cluster's logical core and pan only far enough to make
-/// that core visible. This intentionally does not activate the workspace.
+/// Select a collapsed Field node. When `pan` is true, the camera moves only
+/// far enough to fit its restored decorated-window bounds. This intentionally
+/// leaves the node collapsed.
+pub fn reveal_collapsed_node<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    serial: smithay::utils::Serial,
+    pan: bool,
+) -> bool {
+    let Some(record) = session.nodes.record(id).cloned() else {
+        return false;
+    };
+    if !record.attached || !record.collapsed {
+        return false;
+    }
+    let Some(node_position) = session.nodes.field.node(id).map(|node| node.pos) else {
+        return false;
+    };
+    let Some(output) = session
+        .wayland
+        .space
+        .outputs()
+        .find(|output| output.name() == record.output)
+        .cloned()
+    else {
+        return false;
+    };
+    crate::wayland::focus::select_output(&mut session.wayland, &output);
+    crate::window::clear_focus(&mut session.wayland);
+    session
+        .nodes
+        .focus(Some(id), session.start_time.elapsed().as_millis() as u64);
+    crate::session::sync_keyboard_focus(session, serial);
+
+    if let (Some(output_geometry), Some(view)) = (
+        session.wayland.space.output_geometry(&output),
+        session.cameras.view(&record.output),
+    ) {
+        let restored_client = centered_rect(node_position, record.geometry.size);
+        let restored_outer = crate::titlebar::outer_rect_for_client(
+            &record.window,
+            restored_client,
+            &session.settings.decorations,
+            &session.settings.font,
+        );
+        if pan {
+            let delta = minimal_reveal_delta(
+                crate::presentation::camera::world_viewport(view, output_geometry),
+                restored_outer,
+                24,
+            );
+            apply_camera_reveal_delta(session, &record.output, delta);
+        }
+    }
+    session.request_output_redraw(&output);
+    true
+}
+
+/// Select a collapsed cluster's logical core. When `pan` is true, the camera
+/// moves only far enough to make that core visible. This intentionally does
+/// not activate the workspace.
 pub fn reveal_cluster_core<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     core: NodeId,
     serial: smithay::utils::Serial,
+    pan: bool,
 ) -> bool {
     let Some(cluster) = session.clusters.cluster_for_core(core) else {
         return false;
@@ -931,86 +1176,66 @@ pub fn reveal_cluster_core<D: crate::session::SessionDriver>(
     if let (Some(output_geometry), Some(view)) = (
         session.wayland.space.output_geometry(&output),
         session.cameras.view(&metadata.output),
-    ) {
-        let scale = view.scale.max(0.05);
-        let side = (crate::clusters::CORE_DIAMETER_PX / scale).round().max(1.0) as i32;
-        let core_rect = Rectangle::<i32, Logical>::new(
-            (
-                (metadata.core_position.x - side as f32 * 0.5).round() as i32,
-                (metadata.core_position.y - side as f32 * 0.5).round() as i32,
-            )
-                .into(),
-            (side, side).into(),
-        );
-        let delta = minimal_reveal_delta(
+    ) && pan
+    {
+        let delta = landmark_reveal_delta(
             crate::presentation::camera::world_viewport(view, output_geometry),
-            core_rect,
-            (24.0 / scale).round() as i32,
+            metadata.core_position,
+            crate::clusters::CORE_DIAMETER_PX,
+            view.scale,
         );
-        if (delta.x != 0.0 || delta.y != 0.0)
-            && let Some(camera) = session.cameras.get_mut(&metadata.output)
-        {
-            camera.pan_vel = Vec2 { x: 0.0, y: 0.0 };
-            camera.target_center = Vec2 {
-                x: camera.center.x + delta.x,
-                y: camera.center.y + delta.y,
-            };
-        }
+        apply_camera_reveal_delta(session, &metadata.output, delta);
     }
     session.request_redraw();
     true
 }
 
-/// Makes an Alt+Tab target visible without adding a second animation track.
-/// The camera snaps only by the minimum reveal delta; the focus-cycle overlay
-/// already owns the visible close transition.
-pub fn reveal_for_focus_cycle<D: crate::session::SessionDriver>(
-    session: &mut crate::session::Session<D>,
-    id: NodeId,
-) {
-    let Some(record) = session.nodes.record(id).cloned() else {
-        return;
-    };
-    if session.fullscreen.is_fullscreen_or_pending(&record.surface)
-        || session.maximize.contains(&record.surface)
-    {
-        return;
-    }
-    let Some(output) = session
-        .wayland
-        .space
-        .outputs()
-        .find(|output| output.name() == record.output)
-        .cloned()
-    else {
-        return;
-    };
-    let Some(output_geometry) = session.wayland.space.output_geometry(&output) else {
-        return;
-    };
-    let Some(view) = session.cameras.view(&record.output) else {
-        return;
-    };
-    let geometry = session
-        .wayland
-        .space
-        .element_geometry(&record.window)
-        .unwrap_or(record.geometry);
-    let delta = minimal_reveal_delta(
-        crate::presentation::camera::world_viewport(view, output_geometry),
-        geometry,
-        24,
+pub(super) fn centered_rect(
+    position: Vec2,
+    size: smithay::utils::Size<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (
+            (position.x - size.w as f32 * 0.5).round() as i32,
+            (position.y - size.h as f32 * 0.5).round() as i32,
+        )
+            .into(),
+        size,
+    )
+}
+
+pub(super) fn landmark_reveal_delta(
+    viewport: Rectangle<i32, Logical>,
+    position: Vec2,
+    diameter_px: f32,
+    scale: f32,
+) -> Vec2 {
+    let scale = scale.max(0.05);
+    let side = (diameter_px / scale).round().max(1.0) as i32;
+    let landmark = Rectangle::<i32, Logical>::new(
+        (
+            (position.x - side as f32 * 0.5).round() as i32,
+            (position.y - side as f32 * 0.5).round() as i32,
+        )
+            .into(),
+        (side, side).into(),
     );
-    if delta.x == 0.0 && delta.y == 0.0 {
-        return;
-    }
-    if let Some(camera) = session.cameras.get_mut(&record.output) {
-        camera.center = Vec2 {
+    minimal_reveal_delta(viewport, landmark, (24.0 / scale).round() as i32)
+}
+
+fn apply_camera_reveal_delta<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    output: &str,
+    delta: Vec2,
+) {
+    if (delta.x != 0.0 || delta.y != 0.0)
+        && let Some(camera) = session.cameras.get_mut(output)
+    {
+        camera.pan_vel = Vec2 { x: 0.0, y: 0.0 };
+        camera.target_center = Vec2 {
             x: camera.center.x + delta.x,
             y: camera.center.y + delta.y,
         };
-        camera.target_center = camera.center;
-        camera.pan_vel = Vec2 { x: 0.0, y: 0.0 };
     }
 }
 
@@ -1060,6 +1285,15 @@ pub(super) fn minimal_reveal_delta(
     }
 }
 
+fn hard_protected_from_decay(
+    fullscreen: bool,
+    maximized: bool,
+    grabbed: bool,
+    arranged: bool,
+) -> bool {
+    fullscreen || maximized || grabbed || arranged
+}
+
 pub fn tick_decay<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
 ) -> bool {
@@ -1103,12 +1337,15 @@ pub fn tick_decay<D: crate::session::SessionDriver>(
         .nodes
         .records()
         .filter(|record| {
-            session.fullscreen.is_fullscreen_or_pending(&record.surface)
-                || session.maximize.contains(&record.surface)
-                || crate::input::grab::belongs_to_surface(
-                    &session.interactions.grab,
-                    &record.surface,
-                )
+            hard_protected_from_decay(
+                session.fullscreen.is_fullscreen_or_pending(&record.surface),
+                session.maximize.contains(&record.surface),
+                crate::input::grab::belongs_to_surface(&session.interactions.grab, &record.surface),
+                session
+                    .interactions
+                    .field_arrange
+                    .contains_surface(&record.surface),
+            )
         })
         .map(|record| record.surface.clone())
         .collect::<Vec<_>>();
@@ -1121,16 +1358,25 @@ pub fn tick_decay<D: crate::session::SessionDriver>(
         now_ms,
     );
     let mut changed = false;
-    for id in ready {
-        changed |= collapse(session, id, smithay::utils::SERIAL_COUNTER.next_serial());
+    // Snapshotting and collapsing several full-size windows in one calloop
+    // callback blocks keyboard dispatch across all outputs. Deadlines are
+    // already checked once per second, so drain overdue nodes incrementally.
+    for id in ready.into_iter().take(1) {
+        changed |= collapse_for_decay(session, id, smithay::utils::SERIAL_COUNTER.next_serial());
     }
     changed
 }
 
 #[cfg(test)]
 mod close_tests {
-    use super::{collapse_allowed, preferred_close_candidate};
+    use super::{collapse_allowed, hard_protected_from_decay, preferred_close_candidate};
     use halley_core::field::NodeId;
+
+    #[test]
+    fn arranged_windows_are_hard_protected_from_decay() {
+        assert!(hard_protected_from_decay(false, false, false, true));
+        assert!(!hard_protected_from_decay(false, false, false, false));
+    }
 
     #[test]
     fn live_client_focus_wins_over_stale_logical_focus_for_cluster_members() {

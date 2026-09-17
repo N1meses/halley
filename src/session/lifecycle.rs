@@ -282,10 +282,7 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
         .presentation_close_size_recovery
         .forget_surface(&surface);
     session.opening_origins.forget(&surface);
-    if session.pending_pointer_warp.as_ref() == Some(&surface) {
-        session.pending_pointer_warp = None;
-    }
-    session.window_open_animations.remove(&surface);
+    session.window_animations.remove(&surface);
     session.fullscreen.remove(&surface);
     if session.maximize.remove(&surface)
         && let Some(output) = focus.as_ref().and_then(|focus| focus.output.as_deref())
@@ -293,6 +290,7 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
         let _ = session.cameras.apply_field_maximize(output, None);
     }
     session.render.fullscreen_textures.remove(&surface);
+    session.render.arrange_textures.remove(&surface);
     super::cancel_grab_for_surface(session, &surface);
     crate::input::grab::forget_resize_anchor(&mut session.interactions.resize_anchor, &surface);
     if close_handoff_needs_fallback(session.render.window_close_animations.is_active(&surface)) {

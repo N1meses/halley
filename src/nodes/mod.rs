@@ -16,22 +16,27 @@ use smithay::wayland::shell::xdg::dialog::ToplevelDialogHint;
 
 mod dynamics;
 pub(crate) mod ipc;
+mod keyboard_navigation;
 mod session_ops;
+pub(crate) use keyboard_navigation::{pan_field, transfer_window};
 
 pub use ipc::handle_request;
 pub(crate) use ipc::move_selected_direction;
 pub(crate) use ipc::resize_selected_direction;
+#[cfg(test)]
+use session_ops::{
+    centered_rect, landmark_reveal_delta, minimal_reveal_delta, physics_frame_delta,
+};
 pub use session_ops::{
-    close, close_focused_on_output, collapse, focus_or_reveal_node, pan_after_close_restore,
-    reconcile_landmarks, reconcile_landmarks_at_scale, restore, restore_for_close,
-    reveal_cluster_core, reveal_for_focus_cycle, tick_decay, toggle_focused_on_output,
+    close, close_focused_on_output, collapse, focus_and_center_node, focus_or_reveal_node,
+    pan_after_close_restore, reconcile_landmarks, restore, restore_for_close, reveal_cluster_core,
+    reveal_collapsed_node, tick_decay, toggle_focused_on_output,
 };
 pub(crate) use session_ops::{
     displace_landmarks_for_new_window, move_cluster_core_rigid, move_grabbed_body_rigid,
-    resolve_new_cluster_core, set_collapsed_output, tick_physics,
+    reconcile_landmarks_for_zoom, resolve_new_cluster_core, restore_for_cluster_join,
+    set_collapsed_output, tick_physics,
 };
-#[cfg(test)]
-use session_ops::{minimal_reveal_delta, physics_frame_delta};
 
 const OUTSIDE_THRESHOLD: f32 = 0.90;
 pub const NODE_DIAMETER_PX: f32 = 51.0;
@@ -130,6 +135,8 @@ pub struct NodesState {
     by_surface: HashMap<WlSurface, NodeId>,
     decay: DecayTracker,
     pub config: halley_config::Nodes,
+    configured_nodes: halley_config::Nodes,
+    system_color_scheme: halley_config::SystemColorScheme,
     pub decay_config: halley_config::Decay,
     pub focus_rings: halley_config::FocusRings,
     pub landmarks: halley_config::LandmarkPlacement,
@@ -151,12 +158,21 @@ pub struct NodesState {
 
 impl NodesState {
     pub fn new(config: &halley_config::RuntimeConfig) -> Self {
+        Self::new_with_color_scheme(config, halley_config::SystemColorScheme::NoPreference)
+    }
+
+    pub fn new_with_color_scheme(
+        config: &halley_config::RuntimeConfig,
+        system_color_scheme: halley_config::SystemColorScheme,
+    ) -> Self {
         Self {
             field: Field::new(),
             records: HashMap::new(),
             by_surface: HashMap::new(),
             decay: DecayTracker::default(),
-            config: config.nodes,
+            config: config.nodes.resolved_for_system(system_color_scheme),
+            configured_nodes: config.nodes,
+            system_color_scheme,
             decay_config: config.decay,
             focus_rings: config.focus_rings.clone(),
             landmarks: halley_config::LandmarkPlacement {
@@ -194,8 +210,10 @@ impl NodesState {
                 self.focus_rings.for_output(output) != config.focus_rings.for_output(output)
             })
             .collect::<HashSet<_>>();
+        let resolved_nodes = config.nodes.resolved_for_system(self.system_color_scheme);
         let redraw = ring_changed
-            || self.config != config.nodes
+            || self.config != resolved_nodes
+            || self.configured_nodes != config.nodes
             || self.animation != config.animations.node
             || self.animations_enabled != config.animations.enabled;
         if ring_changed {
@@ -227,7 +245,8 @@ impl NodesState {
                 self.decay.remove(id);
             }
         }
-        self.config = config.nodes;
+        self.config = resolved_nodes;
+        self.configured_nodes = config.nodes;
         self.decay_config = config.decay;
         self.focus_rings = config.focus_rings.clone();
         self.landmarks = next_landmarks;
@@ -235,6 +254,17 @@ impl NodesState {
         self.animation = config.animations.node;
         self.animations_enabled = config.animations.enabled;
         redraw || landmarks_changed || physics_changed
+    }
+
+    pub fn set_system_color_scheme(&mut self, scheme: halley_config::SystemColorScheme) -> bool {
+        if self.system_color_scheme == scheme {
+            return false;
+        }
+        self.system_color_scheme = scheme;
+        let nodes = self.configured_nodes.resolved_for_system(scheme);
+        let changed = self.config != nodes;
+        self.config = nodes;
+        changed
     }
 
     pub fn focus_ring_for_output(&self, output: &str) -> halley_config::FocusRing {
@@ -1039,10 +1069,10 @@ fn vec_size(rect: Rectangle<i32, Logical>) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::{
-        HoverPreviewState, advance_hover_preview, hover_preview_ready,
-        logical_focus_after_collapse, minimal_reveal_delta, nearest_free_landmark,
-        nearest_free_window_rect, participates_in_decay, physics_frame_delta,
-        release_lock_deadline, release_lock_is_active,
+        HoverPreviewState, advance_hover_preview, centered_rect, hover_preview_ready,
+        landmark_reveal_delta, logical_focus_after_collapse, minimal_reveal_delta,
+        nearest_free_landmark, nearest_free_window_rect, participates_in_decay,
+        physics_frame_delta, release_lock_deadline, release_lock_is_active,
     };
     use halley_core::field::{NodeId, NodeState, Vec2};
     use smithay::utils::{Logical, Rectangle};
@@ -1182,6 +1212,44 @@ mod tests {
             "DP-1",
             started + Duration::from_millis(super::LANDMARK_SLIDE_MS),
         ));
+    }
+
+    #[test]
+    fn collapsed_node_reveal_uses_its_full_restored_window_bounds() {
+        let viewport = Rectangle::<i32, Logical>::new((0, 0).into(), (1_000, 700).into());
+        let restored = centered_rect(
+            Vec2 {
+                x: 1_100.0,
+                y: 350.0,
+            },
+            (400, 300).into(),
+        );
+
+        assert_eq!(
+            restored,
+            Rectangle::new((900, 200).into(), (400, 300).into())
+        );
+        assert_eq!(
+            minimal_reveal_delta(viewport, restored, 24),
+            Vec2 { x: 324.0, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn offscreen_cluster_core_gets_a_minimal_zoom_aware_reveal() {
+        let viewport = Rectangle::<i32, Logical>::new((0, 0).into(), (1_000, 700).into());
+        assert_eq!(
+            landmark_reveal_delta(
+                viewport,
+                Vec2 {
+                    x: 1_100.0,
+                    y: 350.0,
+                },
+                super::NODE_DIAMETER_PX,
+                0.5,
+            ),
+            Vec2 { x: 199.0, y: 0.0 }
+        );
     }
 
     #[test]

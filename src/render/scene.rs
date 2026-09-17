@@ -19,6 +19,7 @@ use crate::presentation::window::{
 };
 mod apogee_clusters;
 mod capture_ui;
+mod cluster_composer;
 mod clusters;
 mod effects;
 pub(crate) mod nodes;
@@ -26,6 +27,7 @@ mod overview;
 mod windows;
 
 use capture_ui::capture_overlay_elements;
+use cluster_composer::cluster_composer_elements;
 use clusters::{ClusterElementContext, cluster_elements};
 use effects::{
     OverlayEffectStyle, append_compositor_overlay_blur, append_overlay_shadows,
@@ -64,6 +66,7 @@ render_elements! {
     Cropped=CropRenderElement<super::rescale::RescaledElement>,
     RoundedCropped=CropRenderElement<super::window_decoration::RoundedSurfaceElement>,
     WindowResize=super::resize::ResizeRenderElement,
+    WindowShader=super::window_shader::WindowShaderRenderElement,
     WindowBorder=super::window_decoration::RoundedBorderElement,
     RoundedTexture=super::window_decoration::RoundedTextureElement,
     ClusterCore=crate::clusters::render::ClusterCoreElement,
@@ -93,6 +96,10 @@ pub fn build(
     request: RenderRequest<'_>,
 ) -> Result<Vec<SceneElement>, Box<dyn Error>> {
     request.resources.node_renderer.poll_icons(renderer);
+    request
+        .resources
+        .window_shaders
+        .ensure(renderer, request.visuals.background_base);
     request
         .resources
         .backdrop_blur_renderer
@@ -175,6 +182,160 @@ pub fn build(
         request.frame.target_presentation_time,
     );
 
+    // Cluster Composer owns only its initiating output. It replaces that
+    // output's desktop with a stable mosaic while other outputs keep their
+    // ordinary Field scene and frame-callback policy.
+    if request
+        .overlays
+        .cluster_composer
+        .replacement_output()
+        .is_some_and(|name| name == output.name())
+    {
+        let mut elements = cluster_composer_elements(
+            renderer,
+            output,
+            output_geometry,
+            request.overlays.cluster_composer,
+            request.desktop.clusters,
+            request.overlays.apogee_config,
+            request.overlays.overlay_config,
+            request.visuals.decorations,
+            request.visuals.font,
+            request.desktop.space,
+            request.desktop.cameras,
+            request.desktop.nodes,
+            request.resources.node_renderer,
+            request.resources.cluster_renderer,
+            request.resources.titlebar_renderer,
+            request.resources.window_decoration_renderer,
+            request.resources.ui_text,
+            request.desktop.window_animations,
+            request.desktop.fullscreen,
+            request.desktop.maximize,
+            request.resources.overlay_previews,
+            request.frame.target_presentation_time,
+        )?;
+        append_overlay_shadows(
+            renderer,
+            output,
+            "cluster-composer",
+            request.visuals.shadows.overlay,
+            request.resources.shadow_renderer,
+            &mut elements,
+        )?;
+        elements.extend(
+            super::layer_surface_elements(renderer, output, Layer::Background)
+                .into_iter()
+                .map(SceneElement::Layer),
+        );
+        append_background(
+            renderer,
+            request.resources.background_renderer,
+            BackgroundSceneRequest {
+                output,
+                output_geometry,
+                cameras: request.desktop.cameras,
+                config: request.visuals.background,
+                config_dir: request.visuals.background_base,
+                now: request.frame.target_presentation_time,
+            },
+            &mut elements,
+        );
+
+        let mut naming = super::overlays::cluster_creation::elements(
+            renderer,
+            request.resources.cluster_creation_overlay,
+            output,
+            output_geometry,
+            request.desktop.clusters.creation(),
+            request.cursor.cursor_position,
+            request
+                .overlays
+                .cluster_composer
+                .session()
+                .map_or(1.0, |session| {
+                    session.naming_alpha(request.frame.target_presentation_time)
+                }),
+            request.overlays.overlay_config,
+            request.visuals.decorations,
+            request.resources.node_renderer,
+            request.resources.ui_text,
+        )?;
+        append_compositor_overlay_blur(
+            renderer,
+            output,
+            OverlayEffectStyle {
+                output_size: output_geometry.size,
+                identity: "cluster-creation",
+                blur: request.visuals.blur,
+                shadow: request.visuals.shadows.overlay,
+            },
+            request.resources.backdrop_blur_renderer,
+            request.resources.shadow_renderer,
+            &mut naming,
+        )?;
+        elements.splice(0..0, naming);
+
+        let mut overlay_elements = super::overlays::shell::elements(
+            renderer,
+            output_geometry,
+            overlay_snapshot,
+            request.overlays.overlay_config,
+            request.resources.node_renderer,
+            request.resources.ui_text,
+        )?;
+        append_compositor_overlay_blur(
+            renderer,
+            output,
+            OverlayEffectStyle {
+                output_size: output_geometry.size,
+                identity: "shell-overlay",
+                blur: request.visuals.blur,
+                shadow: request.visuals.shadows.overlay,
+            },
+            request.resources.backdrop_blur_renderer,
+            request.resources.shadow_renderer,
+            &mut overlay_elements,
+        )?;
+        elements.splice(0..0, overlay_elements);
+        if request.visuals.debug.overlay_fps {
+            let mut fps_elements = super::overlays::fps::elements(
+                renderer,
+                &output.name(),
+                request.frame.target_presentation_time,
+                request.resources.debug_fps_overlay,
+                request.overlays.overlay_config,
+                request.visuals.decorations,
+                request.resources.node_renderer,
+                request.resources.ui_text,
+            )?;
+            append_compositor_overlay_blur(
+                renderer,
+                output,
+                OverlayEffectStyle {
+                    output_size: output_geometry.size,
+                    identity: "debug-fps",
+                    blur: request.visuals.blur,
+                    shadow: request.visuals.shadows.overlay,
+                },
+                request.resources.backdrop_blur_renderer,
+                request.resources.shadow_renderer,
+                &mut fps_elements,
+            )?;
+            elements.splice(0..0, fps_elements);
+        }
+        prepend_pointer_elements(
+            renderer,
+            output,
+            output_geometry,
+            &request.cursor,
+            request.frame.target_presentation_time,
+            true,
+            &mut elements,
+        )?;
+        return Ok(elements);
+    }
+
     // Apogee is a replacement scene, not a translucent layer over the live
     // desktop. Keep only its tiles and the wallpaper layer behind them; normal
     // windows, nodes, panels, and desktop overlays must not bleed through.
@@ -197,7 +358,7 @@ pub fn build(
             request.resources.titlebar_renderer,
             request.resources.window_decoration_renderer,
             request.resources.ui_text,
-            request.desktop.window_open_animations,
+            request.desktop.window_animations,
             request.desktop.fullscreen,
             request.desktop.maximize,
             request.resources.overlay_previews,
@@ -234,7 +395,6 @@ pub fn build(
             output_geometry,
             overlay_snapshot,
             request.overlays.overlay_config,
-            request.visuals.decorations,
             request.resources.node_renderer,
             request.resources.ui_text,
         )?;
@@ -306,6 +466,7 @@ pub fn build(
         request.overlays.bearings,
         request.desktop.nodes,
         request.desktop.clusters,
+        request.desktop.fullscreen,
         request.desktop.cameras,
         request.visuals.blur,
         request.resources.backdrop_blur_renderer,
@@ -332,9 +493,8 @@ pub fn build(
         output,
         output_geometry,
         request.desktop.clusters.creation(),
-        request.desktop.nodes,
-        request.desktop.cameras,
         request.cursor.cursor_position,
+        1.0,
         request.overlays.overlay_config,
         request.visuals.decorations,
         request.resources.node_renderer,
@@ -491,6 +651,7 @@ pub fn build(
         .window_close_animations
         .renders_for_output(
             renderer,
+            request.resources.window_shaders,
             output,
             output_geometry,
             request.desktop.cameras,
@@ -499,9 +660,12 @@ pub fn build(
         .into_iter()
         .map(|closing| -> Result<StackGroup, Box<dyn Error>> {
             let mut elements = Vec::new();
+            let shader = closing.shader;
+            let shader_active = shader.is_some();
             let shadow_alpha = closing.texture.alpha();
             let border_width = closing.border.map(|border| border.width).unwrap_or(0);
-            let rounded = closing.content_radius > 0.0
+            let rounded = shader.is_none()
+                && closing.content_radius > 0.0
                 && request
                     .resources
                     .window_decoration_renderer
@@ -533,7 +697,9 @@ pub fn build(
                     );
                 }
             }
-            if rounded {
+            if let Some(shader) = shader {
+                elements.push(SceneElement::WindowShader(shader));
+            } else if rounded {
                 let texture = request
                     .resources
                     .window_decoration_renderer
@@ -561,18 +727,23 @@ pub fn build(
                 )
                     .into(),
             );
-            if let Some(shadow) = request.resources.shadow_renderer.element(
-                renderer,
-                format!("{}:closing:{}", output.name(), closing.order),
-                caster,
-                if rounded {
-                    closing.content_radius + border_width as f32
-                } else {
-                    0.0
-                },
-                shadow_alpha,
-                request.visuals.shadows.window,
-            )? {
+            // The rectangular caster cannot follow an arbitrary shader's
+            // fragment silhouette. Let the shader own the complete close
+            // visual instead of leaving a detached shadow on the trajectory.
+            if !shader_active
+                && let Some(shadow) = request.resources.shadow_renderer.element(
+                    renderer,
+                    format!("{}:closing:{}", output.name(), closing.order),
+                    caster,
+                    if rounded {
+                        closing.content_radius + border_width as f32
+                    } else {
+                        0.0
+                    },
+                    shadow_alpha,
+                    request.visuals.shadows.window,
+                )?
+            {
                 elements.push(SceneElement::Shadow(shadow));
             }
             Ok(StackGroup {
@@ -588,11 +759,17 @@ pub fn build(
         request.resources.cluster_renderer,
         ClusterElementContext {
             output,
+            primary_output,
             output_geometry,
+            space: request.desktop.space,
             clusters: request.desktop.clusters,
             nodes: request.desktop.nodes,
             cameras: request.desktop.cameras,
+            window_animations: request.desktop.window_animations,
+            fullscreen: request.desktop.fullscreen,
+            maximize: request.desktop.maximize,
             decorations: request.visuals.decorations,
+            font: request.visuals.font,
             pins: request.visuals.pins,
             overlays: request.overlays.overlay_config,
             pin_renderer: request.resources.pin_renderer,
@@ -612,7 +789,6 @@ pub fn build(
             clusters: request.desktop.clusters,
             nodes: request.desktop.nodes,
             cameras: request.desktop.cameras,
-            decorations: request.visuals.decorations,
             now: request.frame.target_presentation_time,
             cluster_renderer: request.resources.cluster_renderer,
             node_renderer: request.resources.node_renderer,
@@ -627,7 +803,6 @@ pub fn build(
             clusters: request.desktop.clusters,
             nodes: request.desktop.nodes,
             config: request.overlays.overlay_config,
-            decorations: request.visuals.decorations,
             now: request.frame.target_presentation_time,
             node_renderer: request.resources.node_renderer,
             ui_text: request.resources.ui_text,
@@ -650,7 +825,7 @@ pub fn build(
         font: request.visuals.font,
         blur: request.visuals.blur,
         shadow_config: request.visuals.shadows.window,
-        window_open_animations: request.desktop.window_open_animations,
+        window_animations: request.desktop.window_animations,
         fullscreen: request.desktop.fullscreen,
         maximize: request.desktop.maximize,
         window_rules: request.desktop.window_rules,
@@ -676,6 +851,7 @@ pub fn build(
             window,
             context,
             LiveWindowRenderers {
+                arrange_textures: request.resources.arrange_textures,
                 fullscreen_textures: request.resources.fullscreen_textures,
                 backdrop_blur: request.resources.backdrop_blur_renderer,
                 shadow: request.resources.shadow_renderer,
@@ -684,6 +860,7 @@ pub fn build(
                 node: request.resources.node_renderer,
                 text: request.resources.ui_text,
                 pin: request.resources.pin_renderer,
+                window_shaders: request.resources.window_shaders,
             },
         )?;
         if window_scene.cluster_exclusive {
@@ -711,6 +888,7 @@ pub fn build(
                     ..context
                 },
                 LiveWindowRenderers {
+                    arrange_textures: request.resources.arrange_textures,
                     fullscreen_textures: request.resources.fullscreen_textures,
                     backdrop_blur: request.resources.backdrop_blur_renderer,
                     shadow: request.resources.shadow_renderer,
@@ -719,6 +897,7 @@ pub fn build(
                     node: request.resources.node_renderer,
                     text: request.resources.ui_text,
                     pin: request.resources.pin_renderer,
+                    window_shaders: request.resources.window_shaders,
                 },
             )?;
             if !extra_scene.elements.is_empty() || !extra_scene.popup_elements.is_empty() {
@@ -866,7 +1045,6 @@ pub fn build(
         output_geometry,
         overlay_snapshot,
         request.overlays.overlay_config,
-        request.visuals.decorations,
         request.resources.node_renderer,
         request.resources.ui_text,
     )?;
@@ -910,6 +1088,43 @@ pub fn build(
             &mut fps_elements,
         )?;
         elements.splice(0..0, fps_elements);
+    }
+
+    if request.overlays.cluster_composer.reveal_on(&output.name())
+        && let Some(session) = request.overlays.cluster_composer.session()
+    {
+        let alpha = session.reveal_alpha(request.frame.target_presentation_time);
+        let veil = SceneElement::Border(crate::render::solid_color_element(
+            request
+                .resources
+                .node_renderer
+                .active_slot_id(crate::render::node::NodeSlot::ClusterComposerBackdrop),
+            Rectangle::<i32, Physical>::from_size(output_geometry.size.to_physical(1)),
+            smithay::backend::renderer::Color32F::new(
+                0.01,
+                0.018,
+                0.03,
+                request.overlays.apogee_config.background_dim * alpha,
+            ),
+        ));
+        elements.insert(0, veil);
+        if let Some(prepared) = session.prepared() {
+            let core = cluster_composer::prepared_core_elements(
+                renderer,
+                request.resources.cluster_renderer,
+                prepared,
+                output,
+                output_geometry,
+                request.desktop.cameras,
+                request.desktop.clusters.config(),
+                request.desktop.nodes.config,
+                1.0,
+            )?;
+            // The veil reveals the restored Field, but the endpoint core is
+            // continuous UI and must remain fully legible above it. The real
+            // committed core already occupies the same geometry underneath.
+            elements.splice(0..0, core);
+        }
     }
 
     prepend_pointer_elements(
@@ -1060,14 +1275,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_rounding_uses_the_exact_configured_window_border_radius() {
-        let mut decorations = halley_config::Decorations {
-            border_radius_px: 7,
-            ..halley_config::Decorations::default()
-        };
-        assert_eq!(preview_content_radius(&decorations), 7.0);
-        decorations.border_radius_px = 0;
-        assert_eq!(preview_content_radius(&decorations), 0.0);
+    fn preview_rounding_uses_the_overlay_radius_in_output_pixels() {
+        assert_eq!(preview_content_radius(14.0), 14.0);
+        assert_eq!(preview_content_radius(0.0), 0.0);
+        assert_eq!(preview_content_radius(-4.0), 0.0);
     }
 
     #[test]

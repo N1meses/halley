@@ -131,11 +131,15 @@ impl WindowOpenAnimationType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowOpenAnimation {
     pub enabled: bool,
     pub animation_type: WindowOpenAnimationType,
     pub motion: AnimationMotion,
+    /// Optional fragment-shader path. Relative paths resolve from the
+    /// directory that contains `halley.rune`. Empty or omitted means the
+    /// configured `type` draws the pixels.
+    pub custom_shader: Option<String>,
 }
 
 impl Default for WindowOpenAnimation {
@@ -147,6 +151,7 @@ impl Default for WindowOpenAnimation {
                 duration_ms: 300,
                 curve: AnimationCurve::Linear,
             }),
+            custom_shader: None,
         }
     }
 }
@@ -170,11 +175,15 @@ impl WindowCloseAnimationType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowCloseAnimation {
     pub enabled: bool,
     pub animation_type: WindowCloseAnimationType,
     pub duration_ms: u32,
+    /// Optional fragment-shader path. Relative paths resolve from the
+    /// directory that contains `halley.rune`. Empty or omitted means the
+    /// configured `type` draws the pixels.
+    pub custom_shader: Option<String>,
 }
 
 impl Default for WindowCloseAnimation {
@@ -183,6 +192,7 @@ impl Default for WindowCloseAnimation {
             enabled: true,
             animation_type: WindowCloseAnimationType::default(),
             duration_ms: 270,
+            custom_shader: None,
         }
     }
 }
@@ -197,6 +207,7 @@ pub struct FullscreenAnimation {
 pub struct NodeAnimation {
     pub enabled: bool,
     pub duration_ms: u32,
+    pub collapse_duration_ms: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,11 +296,30 @@ impl Default for MaximizeAnimation {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArrangeAnimation {
+    pub enabled: bool,
+    pub motion: AnimationMotion,
+}
+
+impl Default for ArrangeAnimation {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            motion: AnimationMotion::Easing(EasingMotion {
+                duration_ms: 360,
+                curve: AnimationCurve::EaseInOutCubic,
+            }),
+        }
+    }
+}
+
 impl Default for NodeAnimation {
     fn default() -> Self {
         Self {
             enabled: true,
             duration_ms: 280,
+            collapse_duration_ms: 280,
         }
     }
 }
@@ -303,13 +333,14 @@ impl Default for FullscreenAnimation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Animations {
     pub enabled: bool,
     pub window_open: WindowOpenAnimation,
     pub window_close: WindowCloseAnimation,
     pub fullscreen: FullscreenAnimation,
     pub maximize: MaximizeAnimation,
+    pub arrange: ArrangeAnimation,
     pub smooth_resize: SmoothResizeAnimation,
     pub node: NodeAnimation,
     pub cluster: ClusterAnimation,
@@ -323,6 +354,7 @@ impl Default for Animations {
             window_close: WindowCloseAnimation::default(),
             fullscreen: FullscreenAnimation::default(),
             maximize: MaximizeAnimation::default(),
+            arrange: ArrangeAnimation::default(),
             smooth_resize: SmoothResizeAnimation::default(),
             node: NodeAnimation::default(),
             cluster: ClusterAnimation::default(),
@@ -367,6 +399,7 @@ pub fn parse_animations(config: &RuneConfig) -> Animations {
             ),
             animation_type,
             motion: window_open_motion,
+            custom_shader: optional_shader_path(config, "animations.window-open.custom-shader"),
         },
         window_close: WindowCloseAnimation {
             enabled: config.get_or(
@@ -383,6 +416,7 @@ pub fn parse_animations(config: &RuneConfig) -> Animations {
                 "animations.window-close.duration-ms",
                 defaults.window_close.duration_ms,
             ),
+            custom_shader: optional_shader_path(config, "animations.window-close.custom-shader"),
         },
         fullscreen: FullscreenAnimation {
             enabled: config.get_or("animations.fullscreen.enabled", defaults.fullscreen.enabled),
@@ -414,6 +448,26 @@ pub fn parse_animations(config: &RuneConfig) -> Animations {
                 motion: AnimationMotion::parse(config, "animations.maximize", configured_easing),
             }
         },
+        arrange: {
+            let default_easing = match defaults.arrange.motion {
+                AnimationMotion::Easing(easing) => easing,
+                AnimationMotion::Spring(_) => unreachable!("arrange defaults use easing motion"),
+            };
+            let configured_easing = AnimationMotion::Easing(EasingMotion {
+                duration_ms: config
+                    .get_or("animations.arrange.duration-ms", default_easing.duration_ms),
+                curve: config
+                    .get_optional::<String>("animations.arrange.curve")
+                    .ok()
+                    .flatten()
+                    .and_then(|curve| AnimationCurve::parse(&curve))
+                    .unwrap_or(default_easing.curve),
+            });
+            ArrangeAnimation {
+                enabled: config.get_or("animations.arrange.enabled", defaults.arrange.enabled),
+                motion: AnimationMotion::parse(config, "animations.arrange", configured_easing),
+            }
+        },
         smooth_resize: SmoothResizeAnimation {
             enabled: config.get_or(
                 "animations.smooth-resize.enabled",
@@ -429,6 +483,10 @@ pub fn parse_animations(config: &RuneConfig) -> Animations {
         node: NodeAnimation {
             enabled: config.get_or("animations.node.enabled", defaults.node.enabled),
             duration_ms: config.get_or("animations.node.duration-ms", defaults.node.duration_ms),
+            collapse_duration_ms: config.get_or(
+                "animations.node.collapse-duration-ms",
+                defaults.node.collapse_duration_ms,
+            ),
         },
         cluster: ClusterAnimation {
             enabled: config.get_or("animations.cluster.enabled", defaults.cluster.enabled),
@@ -468,6 +526,15 @@ pub fn parse_animations(config: &RuneConfig) -> Animations {
     }
 }
 
+fn optional_shader_path(config: &RuneConfig, path: &str) -> Option<String> {
+    config
+        .get_optional::<String>(path)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 pub fn load_animations() -> Animations {
     let Some(path) = crate::config_path() else {
         eprintln!("animations: no config path resolvable, using defaults");
@@ -490,6 +557,26 @@ pub fn load_animations() -> Animations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_collapse_defaults_independently_of_existing_durations() {
+        let config = RuneConfig::from_str("animations:\n  node:\n    duration-ms 910\n  end\n  window-close:\n    duration-ms 1800\n  end\nend\n").unwrap();
+        let animations = parse_animations(&config);
+        assert_eq!(animations.node.duration_ms, 910);
+        assert_eq!(animations.node.collapse_duration_ms, 280);
+        assert_eq!(animations.window_close.duration_ms, 1800);
+        assert_eq!(Animations::default().node.collapse_duration_ms, 280);
+    }
+
+    #[test]
+    fn parses_independent_node_collapse_duration_including_zero() {
+        for duration in [0, 470] {
+            let config = RuneConfig::from_str(&format!("animations:\n  node:\n    duration-ms 910\n    collapse-duration-ms {duration}\n  end\nend\n")).unwrap();
+            let animations = parse_animations(&config);
+            assert_eq!(animations.node.duration_ms, 910);
+            assert_eq!(animations.node.collapse_duration_ms, duration);
+        }
+    }
 
     #[test]
     fn parses_window_open_animation() {
@@ -519,10 +606,12 @@ end
                         duration_ms: 450,
                         curve: AnimationCurve::Elastic,
                     }),
+                    custom_shader: None,
                 },
                 window_close: WindowCloseAnimation::default(),
                 fullscreen: FullscreenAnimation::default(),
                 maximize: MaximizeAnimation::default(),
+                arrange: ArrangeAnimation::default(),
                 smooth_resize: SmoothResizeAnimation::default(),
                 node: NodeAnimation::default(),
                 cluster: ClusterAnimation::default(),
@@ -551,6 +640,7 @@ end
                 enabled: false,
                 animation_type: WindowCloseAnimationType::Fade,
                 duration_ms: 410,
+                custom_shader: None,
             }
         );
     }
@@ -611,6 +701,7 @@ end
                 enabled: true,
                 animation_type: WindowCloseAnimationType::Shrink,
                 duration_ms: 270,
+                custom_shader: None,
             }
         );
         assert_eq!(
@@ -792,6 +883,52 @@ end
     }
 
     #[test]
+    fn arrange_supports_smooth_easing_and_spring_motion() {
+        let easing = RuneConfig::from_str(
+            r#"
+animations:
+  arrange:
+    enabled false
+    duration-ms 420
+    curve "ease-out-cubic"
+  end
+end
+"#,
+        )
+        .expect("valid rune-cfg source");
+        assert_eq!(
+            parse_animations(&easing).arrange,
+            ArrangeAnimation {
+                enabled: false,
+                motion: AnimationMotion::Easing(EasingMotion {
+                    duration_ms: 420,
+                    curve: AnimationCurve::EaseOutCubic,
+                }),
+            }
+        );
+
+        let spring = RuneConfig::from_str(
+            r#"
+animations:
+  arrange:
+    motion "spring"
+    damping-ratio 0.9
+    stiffness 500.0
+  end
+end
+"#,
+        )
+        .expect("valid rune-cfg source");
+        assert_eq!(
+            parse_animations(&spring).arrange.motion,
+            AnimationMotion::Spring(SpringMotion {
+                damping_ratio: 0.9,
+                stiffness: 500.0,
+            })
+        );
+    }
+
+    #[test]
     fn maximize_supports_fullscreen_motion_knobs() {
         let spring = RuneConfig::from_str(
             r#"
@@ -856,5 +993,48 @@ end
                 stiffness: 100_000.0,
             })
         );
+    }
+
+    #[test]
+    fn parses_custom_shader_paths_and_treats_blank_as_unset() {
+        let config = RuneConfig::from_str(
+            r#"
+animations:
+  window-open:
+    custom-shader "shaders/open.frag"
+  end
+  window-close:
+    custom-shader "  shaders/close.frag  "
+  end
+end
+"#,
+        )
+        .expect("valid rune-cfg source");
+        let animations = parse_animations(&config);
+        assert_eq!(
+            animations.window_open.custom_shader.as_deref(),
+            Some("shaders/open.frag")
+        );
+        assert_eq!(
+            animations.window_close.custom_shader.as_deref(),
+            Some("shaders/close.frag")
+        );
+
+        let blank = RuneConfig::from_str(
+            r#"
+animations:
+  window-open:
+    custom-shader "   "
+  end
+  window-close:
+    custom-shader ""
+  end
+end
+"#,
+        )
+        .expect("valid rune-cfg source");
+        let animations = parse_animations(&blank);
+        assert_eq!(animations.window_open.custom_shader, None);
+        assert_eq!(animations.window_close.custom_shader, None);
     }
 }

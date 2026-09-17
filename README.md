@@ -74,8 +74,9 @@ maximize state, and focus-ring policy.
   forced through a global no-overlap solver.
 - **Decay and landmarks** — inactive windows can collapse into durable nodes;
   pinned nodes stay fixed until explicitly moved.
-- **Cross-output movement** — drag a window through monitor boundaries without
-  a separate Field Jump mode.
+- **Move or carry** — Mod+drag crosses monitor boundaries, while
+  Mod+Shift+drag dwells at an edge to carry the window through its current
+  output's Field.
 - **Trail navigation** — walk backward and forward through each monitor's
   recent Field focus history.
 - **Directional focus** — the same action vocabulary adapts to the Field,
@@ -92,10 +93,14 @@ because an arbitrary global window count was exceeded.
 
 Clusters are deliberate workspaces assembled from ordinary windows.
 
-Enter cluster mode, select the windows you want, and confirm the draft. The
-result becomes a core on the Field. Hovering a core can bloom member previews
-around it; opening it enters a monitor-local workspace while leaving the Field
-geometry intact behind it.
+Enter cluster mode to open the Cluster Composer on the selected monitor.
+Eligible windows and collapsed nodes animate into a stable, non-overlapping
+mosaic. Use the arrow keys or pointer to focus a card, `Space` or left click to
+toggle membership, `Enter` to name the draft, and `Escape` to step back or
+cancel. Selected cards keep a persistent tint and checkmark distinct from the
+focus frame. Confirming creates a core on the Field; hovering a core can bloom
+member previews around it, and opening it enters a monitor-local workspace
+while leaving the Field geometry intact behind it.
 
 Two layouts are available:
 
@@ -229,13 +234,14 @@ swipe, and hold actions.
 | Monitor | `Super+Shift+Arrow` | Focus an adjacent monitor |
 | Move | `Super+Alt+Arrow` | Move the focused Field node |
 | Resize/Tile | `Super+Ctrl+Arrow` | Resize in the Field or swap in a tiling cluster |
+| Arrange | `Super+A` | Toggle visible Field windows between a mosaic and their saved geometry |
 | Clusters | `Super+Shift+C` | Enter cluster creation mode |
 | Clusters | `Super+L` | Cycle cluster layout |
 | Clusters | `Super+V` | Toggle the focused cluster member floating |
 | Clusters | `Super+0..9` | Open a per-monitor cluster slot |
 | Bearings | `Super+Z` / `Super+Shift+Z` | Hold or toggle Bearings |
 | Launch | `Super+T` | Open the first supported terminal |
-| Launch | `Super+D` | Toggle Halley Lift |
+| Launch | `Super+D` | Open Fuzzel (Halley Lift is a commented alternative) |
 | Reload | `Super+Shift+R` | Reload the selected configuration |
 | Zoom | `Super+-` / `Super+=` / `Super+Shift+0` | Zoom out, in, or reset |
 | Pointer | `Super+Left Mouse` | Move a window |
@@ -255,18 +261,24 @@ bindings rather than hardcoded mouse policy.
 On first launch Halley creates
 `$XDG_CONFIG_HOME/halley/halley.rune`, falling back to
 `~/.config/halley/halley.rune`, from the canonical
-[`examples/halley.rune`](examples/halley.rune) template. A pre-0.6 file is
-backed up beside the original and replaced with that template; later 0.6
-compatibility changes use guarded, versioned backfill instead of rewriting
-the whole file. Backfill adds a finite set of missing bindings, skips
-conflicting custom chords, validates the complete candidate, writes
-atomically, and retains a timestamped backup. Split 0.6 configs using
-`gather` are not backfilled automatically.
+[`examples/halley.rune`](examples/halley.rune) template. Startup never modifies
+an existing config, and configs need no version marker. Optional compatibility
+updates are explicit and structurally detected: use `halleyctl config migrate
+--dry-run` to inspect them before running `halleyctl config migrate`. Migration
+adds only a finite set of known missing bindings or sections, skips conflicting
+custom chords, validates the complete candidate, writes atomically, and retains
+a timestamped backup. A gathered root reports that the file owning the affected
+section must be migrated directly rather than guessing where to write.
 
 Pass `-c PATH` or `--config PATH` to select another file. Valid edits reload as
 one atomic snapshot; invalid edits leave the last valid runtime state active.
 Nested Rune `gather` dependencies are watched recursively, including missing
 dependencies that are created after startup.
+
+The `autostart` section can also declare persistent named clusters using compact
+command arrays, including empty `members []` declarations. See
+[startup clusters](docs/clusters.md#startup-clusters) for syntax, launch
+attribution, output placement, and restart behavior.
 
 Useful controls:
 
@@ -302,7 +314,7 @@ Halley's Discord is for practical support, config help, bug triage, packaging,
 release updates, and focused contributor coordination. Halley remains
 maintainer-directed; Discord is not a roadmap vote.
 
-Join the Discord: https://discord.gg/cjutpDv6q
+Join the Discord: https://discord.gg/J2ec3nbHYs
 
 ---
 

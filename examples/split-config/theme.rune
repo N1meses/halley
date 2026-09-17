@@ -22,7 +22,7 @@ decorations:
   border:
     size 3
     radius 8
-    colour-focused "#d65d26"
+    colour-focused "#f4f5f7"
     colour-unfocused "#3c3836"
   end
 
@@ -30,11 +30,13 @@ decorations:
 
   titlebars:
     enabled true
-    button-position "left"
+    button-position "right"
     title-position "center"
     show-buttons true
     show-icons false
     show-title true
+    # Optional title-only font size; omit to inherit global font.size.
+    # text-size 11
     radius 8
     height 32
     colour-focused "#d65d26"
@@ -94,6 +96,8 @@ node:
   icon-size 0.72
   opacity 1.0
   background-colour "auto"
+  border-colour "#474d59"
+  border-colour-highlighted "#d65d26"
   click-collapsed-pan "never"
 end
 
@@ -101,8 +105,10 @@ overlays:
   background-colour "auto"
   text-colour "auto"
   error-colour "#fb4934"
+  border-colour "#d65d26"
   radius 8
   borders true
+  border-size 3
 
   notifications:
     position "top-center"
@@ -123,6 +129,7 @@ overlays:
     # text-size 18
     # text-colour "auto"
     # background-colour "auto"
+    # border-colour "#d65d26"
     # borders true
     # radius 8
   end
@@ -165,7 +172,8 @@ animations:
 
   node:
     enabled true
-    duration-ms 280
+    duration-ms 280 # Node marker appearance.
+    collapse-duration-ms 280 # Window snapshot shrinking/traveling into the node.
   end
 
   cluster:

@@ -136,7 +136,8 @@ mod tests {
     #[test]
     fn template_contains_overview_and_old_halley_controls() {
         for expected in [
-            "A pre-0.6 file is",
+            "\"$var.mod+d\" \"fuzzel\"",
+            "# \"$var.mod+d\" \"halley-lift\"",
             "\"$var.mod+n\" \"toggle-state\"",
             "\"$var.mod+o\" \"apogee\"",
             "\"alt+tab\" \"cycle-focus\"",
@@ -145,9 +146,13 @@ mod tests {
             "\"$var.mod+left\" \"focus-left\"",
             "\"$var.mod+ctrl+right\" \"cluster-tile-swap-right\"",
             "\"$var.mod+shift+up\" \"monitor-focus up\"",
+            "\"$var.mod+a\" \"arrange-visible\"",
+            "\"$var.mod+shift+click-left\" \"drag-pan\"",
             "live-previews true",
             "max-rows 3",
             "overlays:",
+            "border-size 3",
+            "border-colour \"#d65d26\"",
             "notifications:",
             "success-duration-ms 4000",
             "zoom-indicator:",
@@ -158,6 +163,7 @@ mod tests {
             "# text-size 18",
             "# text-colour \"auto\"",
             "# background-colour \"auto\"",
+            "# border-colour \"#d65d26\"",
             "# borders true",
             "# radius 8",
             "\"retract\" - reverse \"launch\"",
@@ -165,9 +171,12 @@ mod tests {
             "maximize:",
             "motion \"easing\"",
             "duration-ms 240",
+            "collapse-duration-ms 280",
             "damping-ratio 1.0",
             "stiffness 800.0",
             "bloom-direction \"clockwise\"",
+            "border-colour \"#474d59\"",
+            "border-colour-highlighted \"#d65d26\"",
             "resize-using-border true",
             "hide-on-keyboard-nav true",
             "pins:",
@@ -176,8 +185,10 @@ mod tests {
             "background-colour \"auto\"",
             "size 1.0",
             "titlebars:",
-            "button-position \"left\"",
+            "colour-focused \"#f4f5f7\"",
+            "button-position \"right\"",
             "title-position \"center\"",
+            "colour-focused \"#d65d26\"",
             "show-icons false",
             "show-title true",
             "height 32",
@@ -194,6 +205,28 @@ mod tests {
         assert!(!DEFAULT_CONFIG.contains("border-colour-inactive"));
         assert!(!DEFAULT_CONFIG.contains("gaming:"));
         assert!(!DEFAULT_CONFIG.contains("gamescope"));
+        assert!(!DEFAULT_CONFIG.contains("halley-config-version"));
+        assert!(DEFAULT_CONFIG.contains("Startup never\n# rewrites an existing config"));
+    }
+
+    #[test]
+    fn template_starts_with_six_empty_workspaces_per_sample_output() {
+        let config = RuneConfig::from_str(DEFAULT_CONFIG).expect("bootstrap template parses");
+        let autostart = crate::parse_autostart(&config).expect("bootstrap autostart parses");
+
+        assert!(autostart.once.is_empty());
+        assert!(autostart.on_reload.is_empty());
+        assert_eq!(autostart.clusters.len(), 12);
+        for (index, cluster) in autostart.clusters.iter().enumerate() {
+            let number = index + 1;
+            assert_eq!(cluster.name, number.to_string());
+            assert!(cluster.members.is_empty());
+            assert_eq!(cluster.layout, None);
+            assert_eq!(
+                cluster.output.as_deref(),
+                Some(if number <= 6 { "DP-1" } else { "DP-2" })
+            );
+        }
     }
 
     #[test]

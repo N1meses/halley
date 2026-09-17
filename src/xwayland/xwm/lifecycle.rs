@@ -65,6 +65,9 @@ pub(super) fn forget_window<D: SessionDriver>(
     let Some(window) = window_for_surface(&session.wayland, &session.nodes, surface) else {
         return was_pending;
     };
+    if session.interactions.steam_close_pressed.as_ref() == Some(&window) {
+        session.interactions.steam_close_pressed = None;
+    }
     if let Some(geometry) = session.wayland.space.element_geometry(&window) {
         remember_normal_size(session, surface, geometry.size);
     }
@@ -367,6 +370,13 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
                     .insert(xid, OverrideRedirectPlacement { geometry });
                 return;
             };
+            // During an explicit move, older ConfigureNotify replies must not
+            // pull the rendered pop-out behind the current pointer position.
+            if matches!(&self.interactions.grab,
+                crate::input::grab::Grab::MovePopup { window: grabbed, .. } if grabbed == &window)
+            {
+                return;
+            }
             let previous_output = crate::wayland::window_output_name(&window);
             let resolution = override_redirect_resolution(self, &surface, geometry);
             apply_override_redirect_resolution(&window, &resolution);
@@ -411,7 +421,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
         {
             ExternalConfigureResult::NotPending => {
                 let opening = window.wl_surface().is_some_and(|wl_surface| {
-                    self.window_open_animations
+                    self.window_animations
                         .is_animating(wl_surface.as_ref(), now)
                 });
                 let client_geometry_guarded = self
@@ -550,6 +560,9 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
         let maximized = window_for_surface(&self.wayland, &self.nodes, &surface)
             .and_then(|window| window.wl_surface().map(|surface| surface.into_owned()))
             .is_some_and(|wl_surface| {
+                if self.fullscreen.suppresses_client_maximize(&wl_surface) {
+                    return true;
+                }
                 let _ = crate::session::set_surface_field_maximized(self, &wl_surface, true);
                 self.maximize.contains(&wl_surface)
             });
@@ -595,11 +608,17 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             .and_then(|wl_surface| self.nodes.id_for_surface(&wl_surface))
             .is_some_and(|id| crate::nodes::collapse(self, id, SERIAL_COUNTER.next_serial()));
         if !changed {
-            // Keep EWMH state truthful when a minimize cannot be honored
-            // (for example, while another fullscreen transition owns it).
+            // Keep both EWMH and ICCCM state truthful when a minimize cannot
+            // be honored (for example, while fullscreen owns the window).
+            // Some clients stop presenting as soon as they send
+            // WM_CHANGE_STATE(IconicState) and wait for WM_STATE to confirm or
+            // reject the request. Re-publish NormalState even when it was
+            // already our tracked state so the client receives that rejection.
             if let Err(err) = surface.set_hidden(false) {
                 eventline::warn!("xwayland: failed to reject minimize request: {err}");
             }
+            self.xwayland
+                .transition_surface(&surface, WindowState::Normal);
         }
         self.request_redraw();
     }

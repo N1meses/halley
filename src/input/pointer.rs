@@ -8,6 +8,7 @@ use smithay::input::pointer::AxisFrame;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle};
+use smithay::wayland::compositor::{RegionAttributes, SurfaceAttributes, with_states};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::shell::wlr_layer::Layer;
 
@@ -59,7 +60,7 @@ pub struct PointerRoutingContext<'a> {
     pub cameras: &'a OutputCameras,
     pub clusters: &'a crate::clusters::ClusterSystem,
     pub nodes: &'a crate::nodes::NodesState,
-    pub window_open_animations: &'a crate::animation::WindowOpenAnimations,
+    pub window_animations: &'a crate::animation::WindowAnimations,
     pub primary: &'a Output,
     pub fullscreen: &'a crate::wayland::fullscreen::FullscreenManager,
     pub maximize: &'a crate::presentation::maximize::FieldMaximizeManager,
@@ -414,7 +415,7 @@ fn window_under(
                 context.cameras,
                 Some(context.clusters),
                 Some(context.nodes),
-                context.window_open_animations,
+                context.window_animations,
                 context.fullscreen,
                 context.maximize,
                 context.decorations,
@@ -522,7 +523,7 @@ fn window_under(
                 outer,
                 screen_location,
                 border_resize_allowed,
-                f64::from(border_width.max(8)),
+                border_resize_band(border_width),
             ) {
                 return Some(PointerRoute {
                     output: output.clone(),
@@ -573,10 +574,19 @@ fn window_under(
 fn visual_bounds_required(hit_kind: WindowHitKind, is_x11: bool) -> bool {
     // Native popup trees perform their own surface-local hit testing and may
     // legitimately extend beyond the toplevel's visual rectangle. X11
-    // override-redirect windows are independent rectangular surfaces; the
-    // X11 fast path below intentionally skips surface-tree input regions, so
-    // it must retain this explicit bounds gate in the popup plane.
+    // override-redirect windows are independent surfaces. Retain this bounds
+    // gate as well as their surface-local input-region check below.
     hit_kind == WindowHitKind::Any || is_x11
+}
+
+// Visible borders own their exact rendered width; borderless windows reserve
+// only a narrow content edge so nearby client controls remain clickable.
+fn border_resize_band(border_width: i32) -> f64 {
+    if border_width > 0 {
+        f64::from(border_width)
+    } else {
+        3.0
+    }
 }
 
 const TITLEBAR_CONTROL_RESIZE_BAND: f64 = 8.0;
@@ -615,13 +625,10 @@ fn decoration_hit_at(
 
 /// Resolves the client surface under a window-local point.
 ///
-/// X11 toplevels deliberately skip both the input region and the surface-tree
-/// walk. XWayland derives a `wl_surface` input region from the X window's input
-/// shape, and an X11 client's idea of that shape is expressed against the X
-/// server's geometry rather than the compositor's placement. Consulting it lets
-/// a stale region silently drop the window out of routing. Hyprland made the
-/// same call: its hit tester asserts it is never asked to walk an X11 surface
-/// tree and returns `pos - window_location` unconditionally.
+/// Managed X11 windows retain the compatibility fast path: their input shape
+/// can lag compositor-owned geometry changes. Override-redirect windows are
+/// client-positioned, so honor the surface-local input shape XWayland supplies.
+/// Their transparent margins must not steal input from surfaces underneath.
 fn window_focus(
     window: &Window,
     location: Point<f64, Logical>,
@@ -634,6 +641,14 @@ fn window_focus(
             return None;
         }
         let surface = window.wl_surface()?.into_owned();
+        if crate::xwayland::is_override_redirect(window)
+            && !with_states(&surface, |states| {
+                let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                popup_input_region_contains(attributes.current().input_region.as_ref(), local)
+            })
+        {
+            return None;
+        }
         return Some((surface, render_location.to_f64()));
     }
     if !window.is_in_input_region(&local) {
@@ -642,6 +657,13 @@ fn window_focus(
     window
         .surface_under(local, surface_type)
         .map(|(surface, surface_location)| (surface, (surface_location + render_location).to_f64()))
+}
+
+fn popup_input_region_contains(
+    region: Option<&RegionAttributes>,
+    local: Point<f64, Logical>,
+) -> bool {
+    region.is_none_or(|region| region.contains(local.to_i32_floor()))
 }
 
 fn exclusive_pointer_member_is_allowed(
@@ -802,6 +824,74 @@ mod tests {
     }
 
     #[test]
+    fn shaped_x11_popup_passes_through_tall_transparent_margins() {
+        use smithay::wayland::compositor::{RectangleKind, RegionAttributes};
+        // Representative live ChatGPT voice input shape inside its 772x2849
+        // bounding rectangle. Shape coordinates are local, not output-global.
+        let region = RegionAttributes {
+            rects: vec![
+                (
+                    RectangleKind::Add,
+                    Rectangle::new((225, 1296).into(), (293, 56).into()),
+                ),
+                (
+                    RectangleKind::Add,
+                    Rectangle::new((315, 1354).into(), (113, 121).into()),
+                ),
+            ],
+        };
+        for point in [
+            (370.0, 100.0),
+            (370.0, 2300.0),
+            (100.0, 1400.0),
+            (370.0, 1353.0),
+        ] {
+            assert!(!super::popup_input_region_contains(
+                Some(&region),
+                point.into()
+            ));
+        }
+        for point in [(230.0, 1300.0), (370.0, 1400.0)] {
+            assert!(super::popup_input_region_contains(
+                Some(&region),
+                point.into()
+            ));
+        }
+    }
+
+    #[test]
+    fn popup_input_region_preserves_empty_default_and_subtracted_holes() {
+        use smithay::wayland::compositor::{RectangleKind, RegionAttributes};
+        let point = (20.0, 20.0).into();
+        assert!(super::popup_input_region_contains(None, point));
+        assert!(!super::popup_input_region_contains(
+            Some(&RegionAttributes::default()),
+            point
+        ));
+        let region = RegionAttributes {
+            rects: vec![
+                (
+                    RectangleKind::Add,
+                    Rectangle::new((0, 0).into(), (100, 100).into()),
+                ),
+                (
+                    RectangleKind::Subtract,
+                    Rectangle::new((10, 10).into(), (20, 20).into()),
+                ),
+            ],
+        };
+        assert!(!super::popup_input_region_contains(Some(&region), point));
+        assert!(super::popup_input_region_contains(
+            Some(&region),
+            (40.0, 40.0).into()
+        ));
+        assert!(!super::popup_input_region_contains(
+            Some(&region),
+            (-0.1, 40.0).into()
+        ));
+    }
+
+    #[test]
     fn titlebar_perimeter_resizes_while_control_interior_remains_clickable() {
         let config = halley_config::Titlebars {
             button_position: halley_config::TitlebarButtonPosition::Right,
@@ -859,12 +949,11 @@ mod tests {
             ))
         );
 
-        let left_layout = crate::titlebar::DecorationLayout::new(
-            client,
-            0,
-            32,
-            &halley_config::Titlebars::default(),
-        );
+        let left_config = halley_config::Titlebars {
+            button_position: halley_config::TitlebarButtonPosition::Left,
+            ..halley_config::Titlebars::default()
+        };
+        let left_layout = crate::titlebar::DecorationLayout::new(client, 0, 32, &left_config);
         assert_eq!(
             decoration_hit_at(
                 Some(&left_layout),
@@ -889,6 +978,35 @@ mod tests {
                 crate::titlebar::Control::Close
             ))
         );
+    }
+
+    #[test]
+    fn resize_band_preserves_content_next_to_thin_and_missing_borders() {
+        use crate::input::grab::ResizeHandle;
+        use crate::titlebar::Hit;
+        use smithay::utils::{Point, Rectangle};
+
+        for width in [0, 1, 2, 4, 12] {
+            let frame = Rectangle::new((100, 100).into(), (300, 300).into());
+            let band = super::border_resize_band(width);
+            let expected_band = if width == 0 { 3.0 } else { f64::from(width) };
+            assert_eq!(band, expected_band);
+            assert_eq!(
+                decoration_hit_at(None, frame, Point::from((399.5, 250.0)), true, band),
+                Some(Hit::Resize(ResizeHandle::Right)),
+            );
+            assert_eq!(
+                decoration_hit_at(
+                    None,
+                    frame,
+                    Point::from((400.0 - expected_band - 0.5, 250.0)),
+                    true,
+                    band
+                ),
+                None,
+                "client input beyond the border must remain available (width={width})",
+            );
+        }
     }
 
     #[test]

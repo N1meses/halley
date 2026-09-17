@@ -7,6 +7,14 @@ struct CoreVisualFlags {
     join_border_ready: bool,
 }
 
+fn show_core_action_controls(
+    id: halley_core::cluster::ClusterId,
+    bloom_open: bool,
+    edit_target: Option<halley_core::cluster::ClusterId>,
+) -> bool {
+    bloom_open && edit_target == Some(id)
+}
+
 fn core_visual_flags(focused: bool, hovered: bool, join_ready: bool) -> CoreVisualFlags {
     CoreVisualFlags {
         identity_highlighted: focused || hovered,
@@ -14,13 +22,41 @@ fn core_visual_flags(focused: bool, hovered: bool, join_ready: bool) -> CoreVisu
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CollapsedCoreVisuals {
+    pub(super) ring: (f32, f32, f32),
+    pub(super) fill: (f32, f32, f32),
+    pub(super) icon_colors: [[u8; 4]; 2],
+}
+
+pub(super) fn collapsed_core_visuals(
+    nodes: halley_config::Nodes,
+    highlighted: bool,
+) -> CollapsedCoreVisuals {
+    let ring = node_ring_color(nodes, highlighted);
+    CollapsedCoreVisuals {
+        ring,
+        fill: node_fill_color(nodes, ring),
+        icon_colors: [
+            rgba(nodes.border_color),
+            rgba(nodes.border_color_highlighted),
+        ],
+    }
+}
+
 pub(super) struct ClusterElementContext<'a> {
     pub(super) output: &'a Output,
+    pub(super) primary_output: &'a Output,
     pub(super) output_geometry: Rectangle<i32, Logical>,
+    pub(super) space: &'a smithay::desktop::Space<smithay::desktop::Window>,
     pub(super) clusters: &'a crate::clusters::ClusterSystem,
     pub(super) nodes: &'a crate::nodes::NodesState,
     pub(super) cameras: &'a crate::presentation::camera::OutputCameras,
+    pub(super) window_animations: &'a crate::animation::WindowAnimations,
+    pub(super) fullscreen: &'a crate::wayland::fullscreen::FullscreenManager,
+    pub(super) maximize: &'a crate::presentation::maximize::FieldMaximizeManager,
     pub(super) decorations: &'a halley_config::Decorations,
+    pub(super) font: &'a halley_config::Font,
     pub(super) pins: &'a halley_config::Pins,
     pub(super) overlays: &'a halley_config::Overlays,
     pub(super) pin_renderer: &'a mut crate::render::pin::PinRenderer,
@@ -39,11 +75,17 @@ pub(super) fn cluster_elements(
 ) -> Result<Vec<StackGroup>, Box<dyn Error>> {
     let ClusterElementContext {
         output,
+        primary_output,
         output_geometry,
+        space,
         clusters,
         nodes,
         cameras,
+        window_animations,
+        fullscreen,
+        maximize,
         decorations,
+        font,
         pins,
         overlays,
         pin_renderer,
@@ -63,10 +105,67 @@ pub(super) fn cluster_elements(
     let focused_node = nodes.focused();
     let output_name = output.name();
     let join_readiness = clusters.join_readiness_on_output(&output_name);
-    let icon_colors = [
-        rgba(decorations.border_color_unfocused),
-        rgba(decorations.border_color_focused),
-    ];
+
+    // Labels share the desktop stack with the cluster core. Use the same
+    // presentation geometry as live-window rendering so a label never chooses
+    // space that only appears empty before camera or opening transforms.
+    let mut fixed_label_obstacles = space
+        .elements()
+        .filter(|window| crate::wayland::window_is_on_output(window, output, primary_output))
+        .filter_map(|window| {
+            crate::presentation::window::window_visual_state(
+                space,
+                cameras,
+                Some(clusters),
+                Some(nodes),
+                window,
+                output,
+                window_animations,
+                fullscreen,
+                maximize,
+                decorations,
+                font,
+                now,
+            )
+        })
+        .filter(|visual| visual.opening_alpha > 0.01)
+        .map(|visual| visual.animated_rect)
+        .collect::<Vec<_>>();
+    fixed_label_obstacles.extend(
+        nodes
+            .collapsed_on_output(&output_name)
+            .filter(|record| clusters.cluster_for_member(record.id).is_none())
+            .filter_map(|record| {
+                let node = nodes.field.node(record.id)?;
+                let position = nodes.landmark_position(record.id, node.pos, now);
+                let center = crate::nodes::screen_from_world(position, camera, output_geometry)
+                    - output_geometry.loc;
+                let side = crate::nodes::NODE_DIAMETER_PX.round() as i32;
+                Some(Rectangle::<i32, Physical>::new(
+                    (center.x - side / 2, center.y - side / 2).into(),
+                    (side, side).into(),
+                ))
+            }),
+    );
+    let core_label_obstacles = clusters
+        .collapsed_core_landmarks()
+        .into_iter()
+        .filter(|(_, _, core_output, _, _)| core_output == &output_name)
+        .map(|(cluster, core, _, position, _)| {
+            let position = nodes.landmark_position(core, position, now);
+            let center = crate::nodes::screen_from_world(position, camera, output_geometry)
+                - output_geometry.loc;
+            let side = crate::clusters::CORE_DIAMETER_PX.round() as i32;
+            (
+                cluster,
+                Rectangle::<i32, Physical>::new(
+                    (center.x - side / 2, center.y - side / 2).into(),
+                    (side, side).into(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
     let mut groups = Vec::new();
     for (_, id, metadata) in clusters.clusters_for_output(&output.name()) {
         let focused = focused_node.is_some_and(|node| {
@@ -92,14 +191,15 @@ pub(super) fn cluster_elements(
             (local.x - side / 2, local.y - side / 2).into(),
             (side, side).into(),
         );
-        let ring = node_ring_color(decorations, highlighted);
+        let visual = collapsed_core_visuals(nodes.config, highlighted);
+        let ring = visual.ring;
         let core_border = if visual_flags.join_border_ready {
-            let focused = decorations.border_color_focused;
-            (focused.r, focused.g, focused.b)
+            let highlighted = nodes.config.border_color_highlighted;
+            (highlighted.r, highlighted.g, highlighted.b)
         } else {
             ring
         };
-        let fill = node_fill_color(nodes.config, ring);
+        let fill = visual.fill;
         let mut elements = Vec::new();
         if clusters
             .registry()
@@ -132,7 +232,16 @@ pub(super) fn cluster_elements(
                 (false, halley_config::NodeDisplayPolicy::Always) => 1.0,
             }
         };
-        elements.extend(super::nodes::landmark_label_elements(
+        let label_obstacles = fixed_label_obstacles
+            .iter()
+            .copied()
+            .chain(
+                core_label_obstacles
+                    .iter()
+                    .filter_map(|(other, obstacle)| (*other != id).then_some(*obstacle)),
+            )
+            .collect::<Vec<_>>();
+        elements.extend(super::nodes::landmark_label_elements_avoiding(
             renderer,
             node_renderer,
             ui_text,
@@ -147,7 +256,57 @@ pub(super) fn cluster_elements(
                 hover_mix,
                 alpha: 1.0,
             },
+            &label_obstacles,
         )?);
+        if show_core_action_controls(
+            id,
+            bloom_open,
+            clusters.bloom_edit_target_on_output(&output_name),
+        ) {
+            let text = contrast_text_rgb(fill);
+            for (control, button) in crate::clusters::action_button_rects(center, output_geometry) {
+                let button = Rectangle::<i32, Physical>::new(
+                    (
+                        button.loc.x - output_geometry.loc.x,
+                        button.loc.y - output_geometry.loc.y,
+                    )
+                        .into(),
+                    (button.size.w, button.size.h).into(),
+                );
+                let glyph_side = 14;
+                let glyph = Rectangle::new(
+                    (
+                        button.loc.x + (button.size.w - glyph_side) / 2,
+                        button.loc.y + (button.size.h - glyph_side) / 2,
+                    )
+                        .into(),
+                    (glyph_side, glyph_side).into(),
+                );
+                let icon = match control {
+                    crate::clusters::ClusterActionControl::Close => cluster_renderer.close_icon(
+                        renderer,
+                        glyph,
+                        [text[0], text[1], text[2], 255],
+                        nodes.config.opacity,
+                    )?,
+                    crate::clusters::ClusterActionControl::Edit => cluster_renderer.edit_icon(
+                        renderer,
+                        glyph,
+                        [text[0], text[1], text[2], 255],
+                        nodes.config.opacity,
+                    )?,
+                };
+                elements.push(SceneElement::ClusterIcon(icon));
+                elements.push(SceneElement::ClusterCore(cluster_renderer.core(
+                    renderer,
+                    button,
+                    ring,
+                    fill,
+                    nodes.config.opacity,
+                    false,
+                )?));
+            }
+        }
         if clusters.config().show_icons {
             let icon_side =
                 ((side as f32 * nodes.config.icon_size * 0.98).round() as i32).clamp(16, 42);
@@ -158,7 +317,7 @@ pub(super) fn cluster_elements(
                     (icon_side, icon_side).into(),
                 ),
                 highlighted,
-                icon_colors,
+                visual.icon_colors,
                 nodes.config.opacity,
             )?));
         }
@@ -204,6 +363,39 @@ fn rgba(color: halley_config::BorderColor) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_controls_belong_to_the_open_bloom_core_only() {
+        let first = halley_core::cluster::ClusterId::new(1);
+        let second = halley_core::cluster::ClusterId::new(2);
+        assert!(show_core_action_controls(first, true, Some(first)));
+        assert!(!show_core_action_controls(first, false, Some(first)));
+        assert!(!show_core_action_controls(first, true, Some(second)));
+        assert!(!show_core_action_controls(first, true, None));
+    }
+
+    #[test]
+    fn collapsed_core_palette_is_owned_by_nodes() {
+        let nodes = halley_config::Nodes {
+            border_color: halley_config::BorderColor {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+            },
+            border_color_highlighted: halley_config::BorderColor {
+                r: 0.8,
+                g: 0.4,
+                b: 0.2,
+            },
+            ..halley_config::Nodes::default()
+        };
+
+        let idle = collapsed_core_visuals(nodes, false);
+        let highlighted = collapsed_core_visuals(nodes, true);
+        assert_eq!(idle.ring, (0.1, 0.2, 0.3));
+        assert_eq!(highlighted.ring, (0.8, 0.4, 0.2));
+        assert_eq!(idle.icon_colors, [[26, 51, 77, 255], [204, 102, 51, 255]]);
+    }
 
     #[test]
     fn join_readiness_changes_only_the_core_border_highlight_state() {

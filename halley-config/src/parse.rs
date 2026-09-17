@@ -113,6 +113,16 @@ pub(crate) fn parse_action(s: &str) -> Action {
     {
         return Action::FocusDirection(direction);
     }
+    if let ["window-transfer", direction] = words.as_slice()
+        && let Some(direction) = parse_direction(direction)
+    {
+        return Action::TransferWindow(direction);
+    }
+    if let ["pan-field", direction] = words.as_slice()
+        && let Some(direction) = parse_direction(direction)
+    {
+        return Action::PanField(direction);
+    }
     if let ["node", "move", direction] | ["node-move", direction] | ["move", direction] =
         words.as_slice()
         && let Some(direction) = parse_direction(direction)
@@ -195,9 +205,12 @@ pub(crate) fn parse_action(s: &str) -> Action {
             Action::ClusterLayoutCycle
         }
         "cluster-toggle-float" | "cluster_toggle_float" => Action::ClusterToggleFloat,
+        "arrange-visible" | "arrange_visible" => Action::ArrangeVisible,
+        "undo-arrange" | "undo_arrange" => Action::UndoArrange,
         "move-window" | "move_window" => Action::PointerMoveWindow,
         "resize-window" | "resize_window" => Action::PointerResizeWindow,
         "pan-field" | "pan_field" => Action::PointerPanField,
+        "drag-pan" | "drag_pan" | "field-jump" | "field_jump" => Action::PointerDragPan,
         "reload" | "reload-config" | "reload_config" => Action::Reload,
         "open-terminal" | "open_terminal" | "default-terminal" | "default_terminal" => {
             Action::OpenTerminal
@@ -765,6 +778,25 @@ end
     }
 
     #[test]
+    fn parses_arrange_and_undo_actions() {
+        let kb = parse(
+            r#"
+keybinds:
+  mod "super"
+  "$var.mod+a" "arrange-visible"
+  "$var.mod+shift+a" "undo_arrange"
+end
+"#,
+        );
+        assert_eq!(kb.binds[0].action, Action::ArrangeVisible);
+        assert_eq!(kb.binds[0].scope, BindingScope::Field);
+        assert!(!kb.binds[0].repeat);
+        assert_eq!(kb.binds[1].action, Action::UndoArrange);
+        assert_eq!(kb.binds[1].scope, BindingScope::Field);
+        assert!(!kb.binds[1].repeat);
+    }
+
+    #[test]
     fn parses_remappable_compositor_pointer_actions() {
         let kb = parse(
             r#"
@@ -772,14 +804,21 @@ keybinds:
   mod "super"
   "$var.mod+click-left" "move-window"
   "$var.mod+click-right" "resize-window"
+  "$var.mod+shift+click-left" "drag-pan"
   "click-left" "pan-field"
 end
 "#,
         );
         assert_eq!(kb.binds[0].action, Action::PointerMoveWindow);
         assert_eq!(kb.binds[1].action, Action::PointerResizeWindow);
-        assert_eq!(kb.binds[2].action, Action::PointerPanField);
+        assert_eq!(kb.binds[2].action, Action::PointerDragPan);
         assert_eq!(kb.binds[2].scope, BindingScope::Field);
+        assert_eq!(kb.binds[3].action, Action::PointerPanField);
+        assert_eq!(kb.binds[3].scope, BindingScope::Field);
+
+        for alias in ["drag_pan", "field-jump", "field_jump"] {
+            assert_eq!(parse_action(alias), Action::PointerDragPan);
+        }
     }
 
     #[test]

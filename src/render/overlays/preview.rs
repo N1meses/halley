@@ -60,21 +60,31 @@ fn needs_refresh(
 }
 
 impl OverlayPreviewCache {
+    /// Reuse an already-current GPU snapshot for compositor-driven handoffs.
+    ///
+    /// A dirty entry predates the client's latest commit and must not replace
+    /// the live window during a close/collapse animation.
+    pub fn clean_texture(&self, id: NodeId, maximized: bool) -> Option<WindowTexture> {
+        (!self.dirty.contains(&id))
+            .then(|| self.entries.get(&id))
+            .flatten()
+            .filter(|entry| entry.maximized == maximized)
+            .map(|entry| entry.texture.clone())
+    }
+
     /// Preserve a compositor-owned last-good frame for a window that is about
     /// to leave the mapped scene. Collapsed nodes keep their client surface
     /// hidden, so trying to create their first preview later can otherwise
     /// sample an empty surface tree (Steam commonly exposes this as a white
     /// Alt-Tab/Apogee tile).
     pub fn store_last_good(&mut self, id: NodeId, texture: WindowTexture, maximized: bool) {
-        let element_id = self
-            .entries
-            .get(&id)
-            .map(|entry| entry.id.clone())
-            .unwrap_or_else(Id::new);
+        // The texture contents are new, so the render-element identity must
+        // be new as well. Reusing the old Id makes output damage tracking treat
+        // the replacement as unchanged and only repaint later hover rectangles.
         self.entries.insert(
             id,
             Entry {
-                id: element_id,
+                id: Id::new(),
                 texture,
                 maximized,
             },
@@ -137,10 +147,6 @@ impl OverlayPreviewCache {
         );
         if refresh {
             let previous = self.entries.remove(&id);
-            let element_id = previous
-                .as_ref()
-                .map(|entry| entry.id.clone())
-                .unwrap_or_else(Id::new);
             let reusable = previous.as_ref().map(|entry| entry.texture.texture.clone());
             match crate::render::window_texture::capture_decorated(
                 renderer,
@@ -161,7 +167,9 @@ impl OverlayPreviewCache {
                     self.entries.insert(
                         id,
                         Entry {
-                            id: element_id,
+                            // A refreshed texture is new damage even when its
+                            // allocation was reused in place.
+                            id: Id::new(),
                             texture,
                             maximized,
                         },

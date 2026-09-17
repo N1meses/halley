@@ -36,13 +36,34 @@ struct FullscreenWindow {
     /// rectangle already includes the outgoing camera and must not be projected
     /// through the incoming camera again.
     presentation_output: Option<Rectangle<i32, Physical>>,
+    /// Output-local rectangle of the real post-fullscreen live endpoint.
+    /// This can differ from `presentation_output` during a maximize-to-
+    /// fullscreen handoff, where entry starts at the maximized rectangle but
+    /// exit restores the earlier windowed rectangle.
+    restore_presentation_output: Option<Rectangle<i32, Physical>>,
     fullscreen_size: Size<i32, Logical>,
     transition: Option<MotionTimeline>,
+    /// Motion sample held while the matching client configure/repaint is
+    /// pending. Rapid reversals reuse this sample instead of snapping back to
+    /// the last committed endpoint before the new timeline can begin.
+    pending_motion: (f64, f64),
     external_pending: Option<ExternalPending>,
     snapshot_serials: Vec<Serial>,
     origin: FullscreenOrigin,
     native: Option<NativeFullscreenState>,
+    restore_kind: FullscreenRestoreKind,
     preserve_stack: bool,
+    /// Temporarily releases output-camera/top-layer ownership while retaining
+    /// the client's fullscreen protocol and geometry. Only a direct click on
+    /// this surface resumes immersive presentation.
+    presentation_paused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum FullscreenRestoreKind {
+    #[default]
+    Windowed,
+    FieldMaximized,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +97,11 @@ impl NativeFullscreenState {
             }
             FullscreenOrigin::Compositor => {
                 self.compositor_requested = true;
-                self.protocol_desired = true;
+                // Mod+F owns the output presentation, not the client's
+                // fullscreen state. Keeping this protocol-windowed gives
+                // Firefox a real state edge when HTML video later enters
+                // fullscreen, which is required for correct 16:10 reflow.
+                self.protocol_desired = self.client_requested;
             }
             FullscreenOrigin::Maximize => {}
         }
@@ -90,7 +115,7 @@ impl NativeFullscreenState {
                 // retains the output presentation. Firefox uses this edge to
                 // reflow HTML fullscreen content when the toplevel was already
                 // fullscreen before the video entered fullscreen.
-                self.protocol_desired = self.compositor_requested;
+                self.protocol_desired = false;
             }
             FullscreenOrigin::Compositor => {
                 self.compositor_requested = false;
@@ -193,15 +218,79 @@ impl FullscreenManager {
         }
     }
 
+    /// Parks a fullscreen presentation when explicit navigation selects a
+    /// different window on the same output. Protocol fullscreen and client
+    /// geometry remain intact; only output-camera and top-layer ownership are
+    /// released so the Field can move to the selected window.
+    pub(crate) fn pause_presentation_on_output_except(
+        &mut self,
+        output: &str,
+        selected: &WlSurface,
+    ) -> bool {
+        let mut changed = false;
+        for (surface, entry) in &mut self.windows {
+            if surface != selected
+                && entry.target_output == output
+                && entry.origin != FullscreenOrigin::Maximize
+                && entry.desired
+                && entry.active
+                && !entry.presentation_paused
+            {
+                entry.presentation_paused = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Resumes any parked fullscreen presentation after direct pointer
+    /// activation.
+    pub(crate) fn resume_presentation(&mut self, surface: &WlSurface) -> Option<String> {
+        self.resume_presentation_if(surface, |_| true)
+    }
+
+    /// Explicit keyboard/navigation focus resumes native Wayland fullscreen
+    /// clients such as browser video. External/XWayland fullscreen retains the
+    /// game-oriented click-only resume policy.
+    pub(crate) fn resume_presentation_on_explicit_focus(
+        &mut self,
+        surface: &WlSurface,
+    ) -> Option<String> {
+        self.resume_presentation_if(surface, resumes_on_explicit_focus)
+    }
+
+    pub(crate) fn is_presentation_paused(&self, surface: &WlSurface) -> bool {
+        self.windows
+            .get(surface)
+            .is_some_and(|entry| entry.presentation_paused)
+    }
+
+    fn resume_presentation_if(
+        &mut self,
+        surface: &WlSurface,
+        allows: impl FnOnce(&FullscreenWindow) -> bool,
+    ) -> Option<String> {
+        let entry = self.windows.get_mut(surface)?;
+        if !entry.presentation_paused
+            || entry.origin == FullscreenOrigin::Maximize
+            || !allows(entry)
+        {
+            return None;
+        }
+        entry.presentation_paused = false;
+        Some(entry.target_output.clone())
+    }
+
     pub fn reload(&mut self, animations: Animations) -> bool {
         self.animations = animations;
-        if animations_enabled(animations) {
+        if animations_enabled(&self.animations) {
             return false;
         }
         self.windows.retain(|_, entry| {
             entry.transition = None;
             entry.snapshot_serials.clear();
             entry.presented = entry.desired;
+            entry.pending_motion = (if entry.desired { 1.0 } else { 0.0 }, 0.0);
             entry.active || entry.desired || entry.presented
         });
         true
@@ -233,7 +322,7 @@ impl FullscreenManager {
         origin: FullscreenOrigin,
         requested: bool,
     ) -> bool {
-        if !animations_enabled(self.animations) {
+        if !animations_enabled(&self.animations) {
             return false;
         }
         let mut native = self
@@ -260,15 +349,28 @@ impl FullscreenManager {
         toplevel: &ToplevelSurface,
         requested: Option<WlOutput>,
     ) {
-        self.request_with_origin(wayland, toplevel, requested, FullscreenOrigin::Client);
+        self.request_with_origin(
+            wayland,
+            toplevel,
+            requested,
+            FullscreenOrigin::Client,
+            false,
+        );
     }
 
     pub(crate) fn request_compositor(
         &mut self,
         wayland: &mut WaylandState,
         toplevel: &ToplevelSurface,
+        retain_maximized: bool,
     ) {
-        self.request_with_origin(wayland, toplevel, None, FullscreenOrigin::Compositor);
+        self.request_with_origin(
+            wayland,
+            toplevel,
+            None,
+            FullscreenOrigin::Compositor,
+            retain_maximized,
+        );
         if let Some(entry) = self.windows.get_mut(toplevel.wl_surface()) {
             // Mod+F already captured the outgoing texture at input time. Do
             // not overwrite it in the pre-commit hook after the new buffer
@@ -283,6 +385,7 @@ impl FullscreenManager {
         toplevel: &ToplevelSurface,
         requested: Option<WlOutput>,
         origin: FullscreenOrigin,
+        retain_maximized: bool,
     ) {
         let window = find_window(wayland, toplevel.wl_surface()).cloned();
         // A client can enter its own fullscreen mode while the compositor is
@@ -342,17 +445,31 @@ impl FullscreenManager {
                 }),
                 presentation_windowed: None,
                 presentation_output: None,
+                restore_presentation_output: None,
                 fullscreen_size: output_geometry.size,
                 transition: None,
+                pending_motion: (0.0, 0.0),
                 external_pending: None,
                 snapshot_serials: Vec::new(),
                 origin,
                 native: Some(NativeFullscreenState::default()),
+                restore_kind: FullscreenRestoreKind::Windowed,
                 preserve_stack: false,
+                presentation_paused: false,
             });
-        let transition_requested = !entry.active;
+        let now = crate::frame_clock::monotonic_now();
+        let visual_before = entry.desired;
+        let motion_before = visual_motion_state(entry, now);
         request_native_owner(entry, origin);
+        let transition_requested = visual_before != entry.desired;
+        if transition_requested {
+            entry.pending_motion = motion_before;
+            entry.transition = None;
+        }
         entry.target_output = target.name();
+        if retain_maximized {
+            entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
+        }
         // The destination is the size we are about to configure, decided once
         // here, exactly like field maximize decides its target rect at toggle
         // time. `handle_commit` only re-reads the client's committed size once
@@ -360,9 +477,16 @@ impl FullscreenManager {
         entry.fullscreen_size = output_geometry.size;
         let protocol_origin = native_protocol_origin(entry);
         let protocol_desired = entry.native.is_none_or(|native| native.protocol_desired);
+        let keep_maximized_protocol =
+            retain_maximized && origin == FullscreenOrigin::Compositor && !protocol_desired;
 
         toplevel.with_pending_state(|state| {
-            apply_protocol_presentation_state(state, protocol_origin, protocol_desired);
+            apply_protocol_presentation_state_for_request(
+                state,
+                protocol_origin,
+                protocol_desired,
+                keep_maximized_protocol,
+            );
             super::decoration::clear_tiled_hint(state);
             state.size = Some(output_geometry.size);
             state.bounds = Some(output_geometry.size);
@@ -373,7 +497,7 @@ impl FullscreenManager {
         });
         let configure_serial = send_required_configure(toplevel);
         if let Some(serial) = configure_serial
-            && animations_enabled(self.animations)
+            && animations_enabled(&self.animations)
             && transition_requested
         {
             entry.snapshot_serials.push(serial);
@@ -387,13 +511,18 @@ impl FullscreenManager {
             .windows
             .get_mut(toplevel.wl_surface())
             .and_then(|entry| {
-                release_native_owner(entry, FullscreenOrigin::Client);
-                entry.native?.compositor_requested.then_some((
-                    entry.target_output.clone(),
-                    entry.fullscreen_size,
-                    native_protocol_origin(entry),
-                    entry.native?.protocol_desired,
-                ))
+                entry.native?.compositor_requested.then(|| {
+                    release_native_owner(entry, FullscreenOrigin::Client);
+                    (
+                        entry.target_output.clone(),
+                        entry.fullscreen_size,
+                        native_protocol_origin(entry),
+                        entry
+                            .native
+                            .expect("native owner checked above")
+                            .protocol_desired,
+                    )
+                })
             });
         if let Some((target_output, fullscreen_size, origin, protocol_desired)) = nested {
             let bounds = output_by_name(wayland, &target_output)
@@ -428,13 +557,15 @@ impl FullscreenManager {
             .windows
             .get_mut(toplevel.wl_surface())
             .and_then(|entry| {
-                let had_compositor = entry.native?.compositor_requested;
-                release_native_owner(entry, FullscreenOrigin::Compositor);
-                (had_compositor && entry.native?.client_requested).then_some((
-                    entry.target_output.clone(),
-                    entry.fullscreen_size,
-                    native_protocol_origin(entry),
-                ))
+                let native = entry.native?;
+                (native.compositor_requested && native.client_requested).then(|| {
+                    release_native_owner(entry, FullscreenOrigin::Compositor);
+                    (
+                        entry.target_output.clone(),
+                        entry.fullscreen_size,
+                        native_protocol_origin(entry),
+                    )
+                })
             });
         if let Some((target_output, fullscreen_size, origin)) = retained_client {
             let bounds = output_by_name(wayland, &target_output)
@@ -459,15 +590,22 @@ impl FullscreenManager {
             .windows
             .get_mut(toplevel.wl_surface())
             .map(|entry| {
+                let now = crate::frame_clock::monotonic_now();
+                let visual_before = entry.desired;
+                let motion_before = visual_motion_state(entry, now);
                 release_all_native_owners(entry);
+                let transition_requested = visual_before != entry.desired;
+                if transition_requested {
+                    entry.pending_motion = motion_before;
+                    entry.transition = None;
+                }
                 if let Some(window) = find_window(wayland, toplevel.wl_surface()) {
                     entry.fullscreen_size = window.geometry().size;
                 }
-                entry.presentation_windowed =
-                    entry.restore.as_ref().map(|restore| restore.geometry);
+                select_restore_presentation_endpoint(entry);
                 (
                     entry.restore.as_ref().map(|restore| restore.geometry.size),
-                    entry.active,
+                    transition_requested,
                     entry.origin,
                 )
             })
@@ -487,7 +625,7 @@ impl FullscreenManager {
             super::decoration::apply_tiled_hint(state);
         });
         if let Some(serial) = send_required_configure(toplevel)
-            && animations_enabled(self.animations)
+            && animations_enabled(&self.animations)
             && transition_requested
             && let Some(entry) = self.windows.get_mut(toplevel.wl_surface())
         {
@@ -554,13 +692,17 @@ impl FullscreenManager {
                 }),
                 presentation_windowed: None,
                 presentation_output: None,
+                restore_presentation_output: None,
                 fullscreen_size: output_geometry.size,
                 transition: None,
+                pending_motion: (0.0, 0.0),
                 external_pending: None,
                 snapshot_serials: Vec::new(),
                 origin,
                 native: None,
+                restore_kind: FullscreenRestoreKind::Windowed,
                 preserve_stack: false,
+                presentation_paused: false,
             });
         super::set_window_output(&window, &target);
         // X11 fullscreen changes presentation geometry, not stacking. Using
@@ -670,13 +812,17 @@ impl FullscreenManager {
                 restore: restore.clone(),
                 presentation_windowed: None,
                 presentation_output: None,
+                restore_presentation_output: None,
                 fullscreen_size: output_geometry.size,
                 transition: None,
+                pending_motion: (0.0, 0.0),
                 external_pending: None,
                 snapshot_serials: Vec::new(),
                 origin,
                 native: None,
+                restore_kind: FullscreenRestoreKind::Windowed,
                 preserve_stack: false,
+                presentation_paused: false,
             });
         entry.origin = origin;
         entry.target_output = target_name;
@@ -690,6 +836,7 @@ impl FullscreenManager {
             true,
             output_geometry,
             presentation,
+            crate::frame_clock::monotonic_now(),
         ))
     }
 
@@ -721,6 +868,7 @@ impl FullscreenManager {
             false,
             geometry,
             presentation,
+            crate::frame_clock::monotonic_now(),
         ))
     }
 
@@ -737,7 +885,7 @@ impl FullscreenManager {
         let Some(entry) = self.windows.get_mut(&wl_surface) else {
             return ExternalConfigureResult::NotPending;
         };
-        let result = acknowledge_external_geometry(entry, observed, self.animations, now);
+        let result = acknowledge_external_geometry(entry, observed, &self.animations, now);
         let ExternalConfigureResult::Settled {
             fullscreen,
             animated,
@@ -783,7 +931,7 @@ impl FullscreenManager {
         let ExternalConfigureResult::Settled {
             fullscreen,
             animated: _,
-        } = acknowledge_external_surface(entry, surface_size, self.animations, now)
+        } = acknowledge_external_surface(entry, surface_size, &self.animations, now)
         else {
             return false;
         };
@@ -876,16 +1024,20 @@ impl FullscreenManager {
         let target_output = entry.target_output.clone();
         let restore = entry.restore.clone();
         let preserve_stack = entry.preserve_stack;
+        let retain_maximized = entry.restore_kind == FullscreenRestoreKind::FieldMaximized
+            && entry.origin == FullscreenOrigin::Compositor
+            && !protocol_desired;
         let committed = toplevel.with_committed_state(|state| {
             state.is_some_and(|state| {
-                if protocol_desired {
+                protocol_commit_is_active(
+                    protocol_desired,
                     state
                         .states
-                        .contains(protocol_presentation_state(protocol_origin))
-                } else {
-                    state.states.contains(State::Fullscreen)
-                        || state.states.contains(State::Maximized)
-                }
+                        .contains(protocol_presentation_state(protocol_origin)),
+                    state.states.contains(State::Fullscreen),
+                    state.states.contains(State::Maximized),
+                    retain_maximized,
+                )
             })
         });
         let commit_action = fullscreen_commit_action(entry, committed);
@@ -986,7 +1138,7 @@ impl FullscreenManager {
                 },
             );
         }
-        settle_visual_commit(entry, self.animations, now, visual_desired);
+        settle_visual_commit(entry, &self.animations, now, visual_desired);
         true
     }
 
@@ -1000,32 +1152,7 @@ impl FullscreenManager {
         if entry.target_output != output.name() {
             return None;
         }
-        let progress = entry
-            .transition
-            .map(|transition| transition.value_at(now))
-            .unwrap_or_else(|| if entry.presented { 1.0 } else { 0.0 })
-            .clamp(0.0, 1.0);
-        let transition_completion = entry
-            .transition
-            .map(|transition| transition.completion_at(now))
-            .unwrap_or_else(|| {
-                if entry.desired != entry.active || entry.external_pending.is_some() {
-                    0.0
-                } else {
-                    1.0
-                }
-            });
-        fullscreen_presentation_is_visible(progress, entry_owns_presentation(entry)).then_some(
-            FullscreenPresentation {
-                progress,
-                transition_completion,
-                windowed_geometry: entry
-                    .presentation_windowed
-                    .or_else(|| entry.restore.as_ref().map(|restore| restore.geometry)),
-                windowed_output_rect: entry.presentation_output,
-                fullscreen_size: entry.fullscreen_size,
-            },
-        )
+        fullscreen_presentation(entry, now)
     }
 
     /// Returns the monitor-wide camera track for the fullscreen transaction.
@@ -1052,6 +1179,7 @@ impl FullscreenManager {
     ) -> Option<FullscreenCameraFrame> {
         let (_, entry) = self.windows.iter().find(|(surface, entry)| {
             matches(surface)
+                && entry_owns_output_presentation(entry)
                 && entry.target_output == output.name()
                 && (entry.active
                     || entry.desired
@@ -1059,11 +1187,7 @@ impl FullscreenManager {
                     || entry.transition.is_some()
                     || entry.external_pending.is_some())
         })?;
-        let progress = entry
-            .transition
-            .map(|transition| transition.value_at(now))
-            .unwrap_or_else(|| if entry.presented { 1.0 } else { 0.0 })
-            .clamp(0.0, 1.0) as f32;
+        let progress = visual_motion_state(entry, now).0.clamp(0.0, 1.0) as f32;
         let center = entry
             .restore
             .as_ref()
@@ -1102,7 +1226,9 @@ impl FullscreenManager {
         mut matches: impl FnMut(&WlSurface) -> bool,
     ) -> bool {
         self.windows.iter().any(|(surface, entry)| {
-            matches(surface) && entry_covers_top(entry, &output.name(), now)
+            matches(surface)
+                && entry_owns_output_presentation(entry)
+                && entry_covers_top(entry, &output.name(), now)
         })
     }
 
@@ -1150,6 +1276,21 @@ impl FullscreenManager {
             matches(surface)
                 && entry.origin != FullscreenOrigin::Maximize
                 && entry_occupies_output(entry, &output.name())
+        })
+    }
+
+    /// Whether immersive fullscreen is presenting on this output right now.
+    ///
+    /// Includes enter/exit transitions so overlay chrome such as Bearings
+    /// disappears with the client. Parked (Alt-Tabbed) fullscreen and
+    /// field-maximize are excluded so the desktop overlay can return.
+    pub(crate) fn presents_immersive_on_output_matching(
+        &self,
+        output: &Output,
+        mut matches: impl FnMut(&WlSurface) -> bool,
+    ) -> bool {
+        self.windows.iter().any(|(surface, entry)| {
+            matches(surface) && entry_presents_immersive(entry, &output.name())
         })
     }
 
@@ -1239,6 +1380,35 @@ impl FullscreenManager {
             .collect()
     }
 
+    /// Whether releasing the client's fullscreen request should hand the
+    /// window back to the field-maximize presentation it replaced on entry.
+    /// A concurrent Mod+F owner keeps fullscreen instead.
+    pub(crate) fn client_unfullscreen_restores_maximize(&self, surface: &WlSurface) -> bool {
+        self.windows
+            .get(surface)
+            .is_some_and(client_release_restores_field_maximize)
+    }
+
+    /// Whether leaving compositor-owned fullscreen should restore the
+    /// field-maximize presentation it replaced. Nested client fullscreen keeps
+    /// ownership instead.
+    pub(crate) fn compositor_unfullscreen_restores_maximize(&self, surface: &WlSurface) -> bool {
+        self.windows
+            .get(surface)
+            .is_some_and(compositor_release_restores_field_maximize)
+    }
+
+    /// Client maximize requests received while Mod+F owns the window are
+    /// echoes of the previous maximized state, not a new user action.
+    pub(crate) fn suppresses_client_maximize(&self, surface: &WlSurface) -> bool {
+        self.windows.get(surface).is_some_and(|entry| {
+            entry.desired
+                && entry
+                    .native
+                    .is_some_and(|native| native.compositor_requested)
+        })
+    }
+
     pub(crate) fn restore_placement(
         &self,
         surface: &WlSurface,
@@ -1255,11 +1425,21 @@ impl FullscreenManager {
         Some((restore.location, restore.output.clone()))
     }
 
+    pub(crate) fn restore_presentation_output(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<Rectangle<i32, Physical>> {
+        self.windows
+            .get(surface)
+            .and_then(|entry| entry.restore_presentation_output)
+    }
+
     pub(crate) fn override_restore_from_field(
         &mut self,
         surface: &WlSurface,
         restore_geometry: Rectangle<i32, Logical>,
         restore_output: String,
+        restore_output_rect: Option<Rectangle<i32, Physical>>,
         field_geometry: Rectangle<i32, Logical>,
         field_output_rect: Option<Rectangle<i32, Physical>>,
     ) {
@@ -1271,6 +1451,8 @@ impl FullscreenManager {
             });
             entry.presentation_windowed = Some(field_geometry);
             entry.presentation_output = field_output_rect;
+            entry.restore_presentation_output = restore_output_rect;
+            entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
         }
     }
 
@@ -1282,8 +1464,13 @@ impl FullscreenManager {
         surface: &WlSurface,
         presentation_output: Rectangle<i32, Physical>,
     ) {
-        if let Some(entry) = self.windows.get_mut(surface) {
-            entry.presentation_output = Some(presentation_output);
+        if let Some(entry) = self.windows.get_mut(surface)
+            && entry.restore_presentation_output.is_none()
+        {
+            // The first output-local windowed rectangle is the canonical live
+            // restore endpoint. A reversal may be visibly between endpoints;
+            // never replace the canonical endpoint with that transient frame.
+            retain_restore_presentation_output(entry, presentation_output);
         }
     }
 
@@ -1302,6 +1489,7 @@ impl FullscreenManager {
             });
             entry.presentation_windowed = Some(restore_geometry);
             entry.presentation_output = presentation_output;
+            entry.restore_presentation_output = presentation_output;
             entry.preserve_stack = true;
         }
     }
@@ -1330,7 +1518,7 @@ impl FullscreenManager {
         surface: &WlSurface,
         fullscreen: bool,
     ) -> bool {
-        animations_enabled(self.animations)
+        animations_enabled(&self.animations)
             && self
                 .windows
                 .get(surface)
@@ -1411,8 +1599,67 @@ pub struct FullscreenCleanup {
     pub finished_surfaces: Vec<WlSurface>,
 }
 
-fn animations_enabled(animations: Animations) -> bool {
+fn resumes_on_explicit_focus(entry: &FullscreenWindow) -> bool {
+    entry.native.is_some()
+}
+
+fn animations_enabled(animations: &Animations) -> bool {
     animations.enabled && animations.fullscreen.enabled
+}
+
+fn client_release_restores_field_maximize(entry: &FullscreenWindow) -> bool {
+    if entry.restore_kind != FullscreenRestoreKind::FieldMaximized {
+        return false;
+    }
+    entry
+        .native
+        .map_or(entry.origin == FullscreenOrigin::Client, |native| {
+            native.client_requested && !native.compositor_requested
+        })
+}
+
+fn compositor_release_restores_field_maximize(entry: &FullscreenWindow) -> bool {
+    if entry.restore_kind != FullscreenRestoreKind::FieldMaximized {
+        return false;
+    }
+    entry
+        .native
+        .is_some_and(|native| native.compositor_requested && !native.client_requested)
+}
+
+/// Whether the committed xdg states still count as the protocol fullscreen
+/// edge `handle_commit` is waiting on.
+fn protocol_commit_is_active(
+    protocol_desired: bool,
+    has_target_state: bool,
+    has_fullscreen: bool,
+    has_maximized: bool,
+    retain_maximized: bool,
+) -> bool {
+    if protocol_desired {
+        has_target_state
+    } else if retain_maximized {
+        // Mod+F replaced field-maximize without taking the Fullscreen bit.
+        // Leftover Maximized is intentional so Firefox does not snap to its
+        // windowed size; only leftover Fullscreen still blocks the visual.
+        has_fullscreen
+    } else {
+        has_fullscreen || has_maximized
+    }
+}
+
+fn apply_protocol_presentation_state_for_request(
+    state: &mut ToplevelState,
+    origin: FullscreenOrigin,
+    active: bool,
+    retain_maximized: bool,
+) {
+    if retain_maximized && origin == FullscreenOrigin::Compositor && !active {
+        state.states.unset(State::Fullscreen);
+        state.states.set(State::Maximized);
+        return;
+    }
+    apply_protocol_presentation_state(state, origin, active);
 }
 
 fn protocol_presentation_state(origin: FullscreenOrigin) -> State {
@@ -1432,6 +1679,51 @@ fn apply_protocol_presentation_state(
     if active {
         state.states.set(protocol_presentation_state(origin));
     }
+}
+
+fn fullscreen_presentation(
+    entry: &FullscreenWindow,
+    now: Duration,
+) -> Option<FullscreenPresentation> {
+    // A parked client keeps its fullscreen buffer and protocol state, but
+    // presents that buffer at its original Field geometry. Reporting settled
+    // fullscreen progress would pin the texture to the output and make it
+    // travel with the camera.
+    let progress = if entry.presentation_paused {
+        0.0
+    } else {
+        visual_motion_state(entry, now).0.clamp(0.0, 1.0)
+    };
+    let transition_completion = entry
+        .transition
+        .map(|transition| transition.completion_at(now))
+        .unwrap_or_else(|| {
+            if entry.desired != entry.active || entry.external_pending.is_some() {
+                0.0
+            } else {
+                1.0
+            }
+        });
+    fullscreen_presentation_is_visible(
+        progress,
+        entry.presentation_paused || entry_owns_presentation(entry),
+    )
+    .then_some(FullscreenPresentation {
+        progress,
+        transition_completion,
+        windowed_geometry: entry
+            .presentation_windowed
+            .or_else(|| entry.restore.as_ref().map(|restore| restore.geometry)),
+        // presentation_output is an already-projected output-local handoff
+        // source. A parked surface must instead project its restore geometry
+        // through the live Field camera on every frame.
+        windowed_output_rect: if entry.presentation_paused {
+            None
+        } else {
+            entry.presentation_output
+        },
+        fullscreen_size: entry.fullscreen_size,
+    })
 }
 
 fn fullscreen_presentation_is_visible(progress: f64, transition_active: bool) -> bool {
@@ -1456,10 +1748,10 @@ fn fullscreen_entry_suppresses_chrome(entry: &FullscreenWindow) -> bool {
 
 /// Protocol state used for a native presentation.
 ///
-/// Fullscreen ownership always advertises the real fullscreen protocol state.
-/// This matches Niri's transaction model and, importantly, gives clients one
-/// stable state to acknowledge across repeated enter/exit cycles. Field
-/// maximize is the only path which advertises maximized.
+/// Client ownership advertises fullscreen. Compositor-only Mod+F deliberately
+/// remains protocol-windowed while still configuring the output-sized buffer,
+/// so a later client fullscreen request produces the state edge applications
+/// use to reflow nested content. Field maximize advertises maximized.
 fn native_protocol_origin(entry: &FullscreenWindow) -> FullscreenOrigin {
     match entry.native {
         Some(native) if native.client_requested => FullscreenOrigin::Client,
@@ -1565,6 +1857,16 @@ fn committed_xdg_window_size(surface: &WlSurface) -> Option<Size<i32, Logical>> 
     })
 }
 
+fn entry_owns_output_presentation(entry: &FullscreenWindow) -> bool {
+    !entry.presentation_paused
+}
+
+fn entry_presents_immersive(entry: &FullscreenWindow, output: &str) -> bool {
+    entry.origin != FullscreenOrigin::Maximize
+        && entry_owns_output_presentation(entry)
+        && entry_occupies_output(entry, output)
+}
+
 fn entry_covers_top(entry: &FullscreenWindow, output: &str, now: Duration) -> bool {
     entry.target_output == output
         && entry.active
@@ -1575,6 +1877,21 @@ fn entry_covers_top(entry: &FullscreenWindow, output: &str, now: Duration) -> bo
 
 fn desired_matches(entry: Option<&FullscreenWindow>, desired: bool) -> bool {
     entry.is_some_and(|entry| entry.desired == desired)
+}
+
+fn retain_restore_presentation_output(
+    entry: &mut FullscreenWindow,
+    presentation_output: Rectangle<i32, Physical>,
+) {
+    if entry.restore_presentation_output.is_none() {
+        entry.presentation_output = Some(presentation_output);
+        entry.restore_presentation_output = Some(presentation_output);
+    }
+}
+
+fn select_restore_presentation_endpoint(entry: &mut FullscreenWindow) {
+    entry.presentation_windowed = entry.restore.as_ref().map(|restore| restore.geometry);
+    entry.presentation_output = entry.restore_presentation_output;
 }
 
 fn prefer_seeded_restore(
@@ -1634,6 +1951,7 @@ fn settle_external_fullscreen(
     entry.target_output = target_output.to_string();
     entry.fullscreen_size = fullscreen_size;
     entry.transition = None;
+    entry.pending_motion = (1.0, 0.0);
     entry.external_pending = None;
 }
 
@@ -1642,10 +1960,12 @@ fn begin_external_transaction(
     desired: bool,
     geometry: Rectangle<i32, Logical>,
     presentation: ExternalPresentationKind,
+    now: Duration,
 ) -> ExternalTransactionRequest {
     if entry.desired == desired {
         return ExternalTransactionRequest::NoChange;
     }
+    freeze_visual_for_configure(entry, now);
     entry.desired = desired;
     entry.external_pending = Some(ExternalPending {
         geometry,
@@ -1659,7 +1979,7 @@ fn begin_external_transaction(
 fn acknowledge_external_geometry(
     entry: &mut FullscreenWindow,
     observed: Rectangle<i32, Logical>,
-    animations: Animations,
+    animations: &Animations,
     now: Duration,
 ) -> ExternalConfigureResult {
     let Some(pending) = entry.external_pending.as_mut() else {
@@ -1675,7 +1995,7 @@ fn acknowledge_external_geometry(
 fn acknowledge_external_surface(
     entry: &mut FullscreenWindow,
     surface_size: Option<Size<i32, Logical>>,
-    animations: Animations,
+    animations: &Animations,
     now: Duration,
 ) -> ExternalConfigureResult {
     let Some(pending) = entry.external_pending.as_mut() else {
@@ -1697,7 +2017,7 @@ fn acknowledge_external_surface(
 
 fn settle_external_transaction(
     entry: &mut FullscreenWindow,
-    animations: Animations,
+    animations: &Animations,
     now: Duration,
 ) -> ExternalConfigureResult {
     let Some(pending) = entry.external_pending else {
@@ -1729,6 +2049,7 @@ fn finish_external_transition(entry: &mut FullscreenWindow) {
     entry.active = entry.desired;
     entry.presented = entry.desired;
     entry.transition = None;
+    entry.pending_motion = (if entry.desired { 1.0 } else { 0.0 }, 0.0);
 }
 
 fn relocate_external_window(
@@ -1763,16 +2084,29 @@ fn relocate_external_window(
     true
 }
 
+fn visual_motion_state(entry: &FullscreenWindow, now: Duration) -> (f64, f64) {
+    if entry.desired != entry.active || entry.external_pending.is_some() {
+        entry.pending_motion
+    } else {
+        entry
+            .transition
+            .map(|transition| (transition.value_at(now), transition.velocity_at(now)))
+            .unwrap_or_else(|| (if entry.presented { 1.0 } else { 0.0 }, 0.0))
+    }
+}
+
+fn freeze_visual_for_configure(entry: &mut FullscreenWindow, now: Duration) {
+    entry.pending_motion = visual_motion_state(entry, now);
+    entry.transition = None;
+}
+
 fn retarget_visual(
     entry: &mut FullscreenWindow,
-    animations: Animations,
+    animations: &Animations,
     now: Duration,
     presented: bool,
 ) {
-    let (current, velocity) = entry
-        .transition
-        .map(|transition| (transition.value_at(now), transition.velocity_at(now)))
-        .unwrap_or_else(|| (if entry.presented { 1.0 } else { 0.0 }, 0.0));
+    let (current, velocity) = visual_motion_state(entry, now);
     if animations_enabled(animations) {
         entry.transition = Some(MotionTimeline::between(
             animations.fullscreen.motion,
@@ -1792,7 +2126,7 @@ fn retarget_visual(
 /// clock, matching Niri's resize transaction boundary.
 fn settle_visual_commit(
     entry: &mut FullscreenWindow,
-    animations: Animations,
+    animations: &Animations,
     now: Duration,
     desired: bool,
 ) {
@@ -1881,8 +2215,10 @@ mod tests {
             restore: None,
             presentation_windowed: None,
             presentation_output: None,
+            restore_presentation_output: None,
             fullscreen_size: (1920, 1080).into(),
             transition: None,
+            pending_motion: (if active { 1.0 } else { 0.0 }, 0.0),
             external_pending: None,
             snapshot_serials: Vec::new(),
             origin: FullscreenOrigin::Client,
@@ -1892,7 +2228,9 @@ mod tests {
                 protocol_desired: active,
                 protocol_active: active,
             }),
+            restore_kind: FullscreenRestoreKind::Windowed,
             preserve_stack: false,
+            presentation_paused: false,
         }
     }
 
@@ -1965,6 +2303,29 @@ mod tests {
     }
 
     #[test]
+    fn client_fullscreen_restores_the_field_maximize_it_replaced() {
+        let mut entry = test_entry(true);
+        entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
+        assert!(client_release_restores_field_maximize(&entry));
+
+        entry.native.as_mut().unwrap().compositor_requested = true;
+        assert!(
+            !client_release_restores_field_maximize(&entry),
+            "Mod+F must keep ownership when nested client fullscreen exits"
+        );
+
+        entry.native = None;
+        entry.origin = FullscreenOrigin::Client;
+        assert!(
+            client_release_restores_field_maximize(&entry),
+            "X11 client fullscreen follows the same restore policy"
+        );
+
+        entry.restore_kind = FullscreenRestoreKind::Windowed;
+        assert!(!client_release_restores_field_maximize(&entry));
+    }
+
+    #[test]
     fn only_visual_owner_edges_need_a_new_outgoing_snapshot() {
         let mut native = NativeFullscreenState::default();
         assert!(native_owner_change_is_visual(
@@ -1990,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn compositor_fullscreen_uses_the_fullscreen_protocol_state() {
+    fn compositor_fullscreen_stays_protocol_windowed_for_nested_client_reflow() {
         let mut entry = test_entry(false);
         let target = entry.target_output.clone();
         let fullscreen_size = entry.fullscreen_size;
@@ -1999,12 +2360,12 @@ mod tests {
         let compositor_only = entry.native.expect("native state");
         assert!(compositor_only.compositor_requested);
         assert!(!compositor_only.client_requested);
-        assert!(compositor_only.protocol_desired);
+        assert!(!compositor_only.protocol_desired);
         assert!(entry.desired);
         assert_eq!(entry.origin, FullscreenOrigin::Compositor);
         assert_eq!(native_protocol_origin(&entry), FullscreenOrigin::Compositor);
         assert_eq!(
-            fullscreen_commit_action(&entry, true),
+            fullscreen_commit_action(&entry, false),
             FullscreenCommitAction::Visual(true)
         );
         let mut pending = ToplevelState::default();
@@ -2013,7 +2374,7 @@ mod tests {
             native_protocol_origin(&entry),
             compositor_only.protocol_desired,
         );
-        assert!(pending.states.contains(State::Fullscreen));
+        assert!(!pending.states.contains(State::Fullscreen));
         assert!(!pending.states.contains(State::Maximized));
 
         entry.active = true;
@@ -2045,7 +2406,7 @@ mod tests {
         let nested_unset = entry.native.expect("native state");
         assert!(nested_unset.compositor_requested);
         assert!(!nested_unset.client_requested);
-        assert!(nested_unset.protocol_desired);
+        assert!(!nested_unset.protocol_desired);
         assert!(entry.desired);
         assert!(entry.active);
         assert!(entry.presented);
@@ -2054,9 +2415,80 @@ mod tests {
         assert_eq!(entry.target_output, target);
         assert_eq!(entry.fullscreen_size, fullscreen_size);
         assert_eq!(
-            fullscreen_commit_action(&entry, true),
+            fullscreen_commit_action(&entry, false),
             FullscreenCommitAction::ProtocolOnly
         );
+        apply_protocol_presentation_state(
+            &mut pending,
+            native_protocol_origin(&entry),
+            nested_unset.protocol_desired,
+        );
+        assert!(!pending.states.contains(State::Fullscreen));
+        assert!(!pending.states.contains(State::Maximized));
+    }
+
+    #[test]
+    fn compositor_fullscreen_from_maximize_keeps_the_maximized_bit() {
+        let mut pending = ToplevelState::default();
+        apply_protocol_presentation_state_for_request(
+            &mut pending,
+            FullscreenOrigin::Compositor,
+            false,
+            true,
+        );
+        assert!(!pending.states.contains(State::Fullscreen));
+        assert!(pending.states.contains(State::Maximized));
+
+        apply_protocol_presentation_state_for_request(
+            &mut pending,
+            FullscreenOrigin::Compositor,
+            false,
+            false,
+        );
+        assert!(!pending.states.contains(State::Fullscreen));
+        assert!(!pending.states.contains(State::Maximized));
+    }
+
+    #[test]
+    fn leftover_maximized_does_not_block_protocol_windowed_mod_f() {
+        assert!(!protocol_commit_is_active(false, false, false, true, true));
+        assert!(protocol_commit_is_active(false, false, false, true, false));
+        assert!(protocol_commit_is_active(false, false, true, false, true));
+        assert!(protocol_commit_is_active(true, true, true, false, false));
+    }
+
+    #[test]
+    fn compositor_fullscreen_restores_the_field_maximize_it_replaced() {
+        let mut entry = test_entry(false);
+        entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
+        request_native_owner(&mut entry, FullscreenOrigin::Compositor);
+        assert!(compositor_release_restores_field_maximize(&entry));
+
+        request_native_owner(&mut entry, FullscreenOrigin::Client);
+        assert!(
+            !compositor_release_restores_field_maximize(&entry),
+            "nested client fullscreen keeps ownership when Mod+F exits"
+        );
+
+        entry.restore_kind = FullscreenRestoreKind::Windowed;
+        release_native_owner(&mut entry, FullscreenOrigin::Client);
+        assert!(!compositor_release_restores_field_maximize(&entry));
+    }
+
+    #[test]
+    fn maximized_buffer_can_start_compositor_fullscreen_from_field_maximize() {
+        let mut entering = test_entry(false);
+        entering.restore = Some(WindowedPlacement {
+            location: (400, 240).into(),
+            geometry: Rectangle::new((400, 240).into(), (800, 600).into()),
+            output: Some("DP-1".to_string()),
+        });
+        entering.restore_kind = FullscreenRestoreKind::FieldMaximized;
+        assert!(native_visual_buffer_matches(
+            &entering,
+            Some((1840, 1120).into()),
+            true,
+        ));
     }
 
     #[test]
@@ -2121,6 +2553,62 @@ mod tests {
     }
 
     #[test]
+    fn explicit_focus_resumes_native_video_but_not_external_games() {
+        let native = test_entry(true);
+        assert!(resumes_on_explicit_focus(&native));
+
+        let mut external = test_entry(true);
+        external.native = None;
+        assert!(!resumes_on_explicit_focus(&external));
+    }
+
+    #[test]
+    fn immersive_presentation_excludes_parked_and_maximize() {
+        let mut client = test_entry(true);
+        assert!(entry_presents_immersive(&client, "DP-1"));
+        assert!(!entry_presents_immersive(&client, "DP-2"));
+
+        client.presentation_paused = true;
+        assert!(!entry_presents_immersive(&client, "DP-1"));
+
+        let mut maximize = test_entry(true);
+        maximize.origin = FullscreenOrigin::Maximize;
+        assert!(!entry_presents_immersive(&maximize, "DP-1"));
+
+        let mut compositor = test_entry(true);
+        compositor.origin = FullscreenOrigin::Compositor;
+        assert!(entry_presents_immersive(&compositor, "DP-1"));
+    }
+
+    #[test]
+    fn parked_fullscreen_releases_only_output_presentation_ownership() {
+        let mut entry = test_entry(true);
+        let restore_geometry = Rectangle::new((240, 160).into(), (1280, 720).into());
+        entry.restore = Some(WindowedPlacement {
+            location: restore_geometry.loc,
+            geometry: restore_geometry,
+            output: Some("DP-1".to_string()),
+        });
+        entry.presentation_output = Some(Rectangle::new(
+            (0, 0).into(),
+            entry.fullscreen_size.to_physical(1),
+        ));
+        assert!(entry_owns_output_presentation(&entry));
+        assert!(entry.desired);
+        assert!(entry.active);
+
+        entry.presentation_paused = true;
+        let parked = fullscreen_presentation(&entry, Duration::ZERO)
+            .expect("parked fullscreen retains a spatial presentation");
+        assert!(!entry_owns_output_presentation(&entry));
+        assert!(entry.desired);
+        assert!(entry.active);
+        assert_eq!(parked.progress, 0.0);
+        assert_eq!(parked.windowed_geometry, Some(restore_geometry));
+        assert_eq!(parked.windowed_output_rect, None);
+    }
+
+    #[test]
     fn output_occupancy_includes_transitional_fullscreen_windows() {
         let motion = AnimationMotion::Easing(EasingMotion {
             duration_ms: 400,
@@ -2146,7 +2634,7 @@ mod tests {
     fn local_killswitch_disables_visual_motion() {
         let mut animations = Animations::default();
         animations.fullscreen.enabled = false;
-        assert!(!animations_enabled(animations));
+        assert!(!animations_enabled(&animations));
     }
 
     #[test]
@@ -2159,12 +2647,12 @@ mod tests {
         let mut entry = test_entry(false);
         let started = Duration::from_secs(1);
 
-        retarget_visual(&mut entry, animations, started, true);
+        retarget_visual(&mut entry, &animations, started, true);
         let forward = entry.transition.expect("forward transition");
         let reversed_at = started + Duration::from_millis(100);
         let value_before_reverse = forward.value_at(reversed_at);
 
-        retarget_visual(&mut entry, animations, reversed_at, false);
+        retarget_visual(&mut entry, &animations, reversed_at, false);
         let reverse = entry.transition.expect("reverse transition");
 
         assert!(!entry.active);
@@ -2172,6 +2660,40 @@ mod tests {
         assert_eq!(
             reverse.value_at(reversed_at + Duration::from_millis(400)),
             0.0
+        );
+    }
+
+    #[test]
+    fn rapid_fullscreen_reversal_before_commit_preserves_motion() {
+        let mut animations = Animations::default();
+        animations.fullscreen.motion = AnimationMotion::Easing(EasingMotion {
+            duration_ms: 400,
+            curve: AnimationCurve::Linear,
+        });
+        let started = Duration::from_secs(1);
+        let reversed_at = started + Duration::from_millis(100);
+        let mut entry = test_entry(true);
+        entry.desired = false;
+        entry.pending_motion = (1.0, 0.0);
+        settle_visual_commit(&mut entry, &animations, started, false);
+
+        let value_before_reverse = visual_motion_state(&entry, reversed_at).0;
+        freeze_visual_for_configure(&mut entry, reversed_at);
+        entry.desired = true;
+
+        assert!(entry.transition.is_none());
+        assert_eq!(
+            visual_motion_state(&entry, reversed_at).0,
+            value_before_reverse,
+            "waiting for the reversal configure must hold the current rectangle"
+        );
+
+        settle_visual_commit(&mut entry, &animations, reversed_at, true);
+        let reverse = entry.transition.expect("reverse transition");
+        assert_eq!(reverse.value_at(reversed_at), value_before_reverse);
+        assert_eq!(
+            reverse.value_at(reversed_at + Duration::from_millis(400)),
+            1.0
         );
     }
 
@@ -2184,7 +2706,7 @@ mod tests {
         assert!(entry.transition.is_none());
         assert!(!entry.active);
 
-        settle_visual_commit(&mut entry, animations, Duration::ZERO, true);
+        settle_visual_commit(&mut entry, &animations, Duration::ZERO, true);
         assert!(entry.active);
         assert!(entry.transition.is_some());
     }
@@ -2253,7 +2775,7 @@ mod tests {
         animations.fullscreen.enabled = false;
         let mut entry = test_entry(false);
 
-        retarget_visual(&mut entry, animations, Duration::ZERO, true);
+        retarget_visual(&mut entry, &animations, Duration::ZERO, true);
 
         assert!(!entry.active);
         assert!(entry.presented);
@@ -2264,7 +2786,7 @@ mod tests {
     fn external_fullscreen_is_logically_settled_without_animation() {
         let animations = Animations::default();
         let mut entry = test_entry(false);
-        retarget_visual(&mut entry, animations, Duration::from_secs(1), true);
+        retarget_visual(&mut entry, &animations, Duration::from_secs(1), true);
 
         settle_external_fullscreen(&mut entry, "HDMI-A-1", (2560, 1440).into());
 
@@ -2288,23 +2810,29 @@ mod tests {
                 true,
                 target,
                 ExternalPresentationKind::Animated,
+                Duration::ZERO,
             ),
             ExternalTransactionRequest::Configure(target)
         );
         assert_eq!(
-            acknowledge_external_surface(&mut entry, Some(target.size), animations, Duration::ZERO,),
+            acknowledge_external_surface(
+                &mut entry,
+                Some(target.size),
+                &animations,
+                Duration::ZERO,
+            ),
             ExternalConfigureResult::Waiting
         );
         assert!(!entry.external_pending.unwrap().surface_committed);
 
         assert_eq!(
-            acknowledge_external_geometry(&mut entry, intermediate, animations, Duration::ZERO),
+            acknowledge_external_geometry(&mut entry, intermediate, &animations, Duration::ZERO),
             ExternalConfigureResult::Waiting
         );
         assert!(entry.transition.is_none());
 
         assert_eq!(
-            acknowledge_external_geometry(&mut entry, target, animations, Duration::from_secs(1),),
+            acknowledge_external_geometry(&mut entry, target, &animations, Duration::from_secs(1),),
             ExternalConfigureResult::Waiting
         );
         assert!(!entry.active);
@@ -2315,7 +2843,7 @@ mod tests {
             acknowledge_external_surface(
                 &mut entry,
                 Some(target.size),
-                animations,
+                &animations,
                 Duration::from_secs(1),
             ),
             ExternalConfigureResult::Settled {
@@ -2332,7 +2860,13 @@ mod tests {
     fn duplicate_external_request_preserves_the_active_transaction() {
         let mut entry = test_entry(false);
         let target = Rectangle::new((0, 0).into(), (1920, 1080).into());
-        begin_external_transaction(&mut entry, true, target, ExternalPresentationKind::Animated);
+        begin_external_transaction(
+            &mut entry,
+            true,
+            target,
+            ExternalPresentationKind::Animated,
+            Duration::ZERO,
+        );
         let pending = entry.external_pending;
 
         assert!(desired_matches(Some(&entry), true));
@@ -2391,18 +2925,21 @@ mod tests {
             true,
             fullscreen,
             ExternalPresentationKind::Opening,
+            Duration::ZERO,
         );
         begin_external_transaction(
             &mut entry,
             false,
             restore,
             ExternalPresentationKind::Opening,
+            Duration::ZERO,
         );
         begin_external_transaction(
             &mut entry,
             true,
             fullscreen,
             ExternalPresentationKind::Opening,
+            Duration::ZERO,
         );
 
         assert_eq!(
@@ -2424,10 +2961,16 @@ mod tests {
         let mut entry = test_entry(false);
         let target = Rectangle::new((0, 0).into(), (1920, 1080).into());
 
-        begin_external_transaction(&mut entry, true, target, ExternalPresentationKind::Opening);
+        begin_external_transaction(
+            &mut entry,
+            true,
+            target,
+            ExternalPresentationKind::Opening,
+            Duration::ZERO,
+        );
 
         assert_eq!(
-            acknowledge_external_geometry(&mut entry, target, animations, Duration::ZERO),
+            acknowledge_external_geometry(&mut entry, target, &animations, Duration::ZERO),
             ExternalConfigureResult::Settled {
                 fullscreen: true,
                 animated: false,
@@ -2442,12 +2985,18 @@ mod tests {
         let animations = Animations::default();
         let mut entry = test_entry(false);
         let target = Rectangle::new((0, 0).into(), (1920, 1080).into());
-        begin_external_transaction(&mut entry, true, target, ExternalPresentationKind::Animated);
-        acknowledge_external_geometry(&mut entry, target, animations, Duration::from_secs(1));
+        begin_external_transaction(
+            &mut entry,
+            true,
+            target,
+            ExternalPresentationKind::Animated,
+            Duration::ZERO,
+        );
+        acknowledge_external_geometry(&mut entry, target, &animations, Duration::from_secs(1));
         acknowledge_external_surface(
             &mut entry,
             Some(target.size),
-            animations,
+            &animations,
             Duration::from_secs(1),
         );
         assert!(entry.transition.is_some());
@@ -2482,6 +3031,42 @@ mod tests {
         assert_eq!(fallback.geometry, buffered_geometry);
         assert_eq!(restore.geometry, seeded_geometry);
         assert_eq!(restore.location, seeded_geometry.loc);
+    }
+
+    #[test]
+    fn rapid_fullscreen_reentry_keeps_the_original_live_restore_rectangle() {
+        let original = Rectangle::new((120, 90).into(), (800, 600).into());
+        let intermediate = Rectangle::new((70, 55).into(), (1200, 800).into());
+        let mut entry = test_entry(false);
+
+        retain_restore_presentation_output(&mut entry, original);
+        retain_restore_presentation_output(&mut entry, intermediate);
+
+        assert_eq!(entry.presentation_output, Some(original));
+        assert_eq!(entry.restore_presentation_output, Some(original));
+    }
+
+    #[test]
+    fn maximize_to_fullscreen_exit_selects_the_real_windowed_endpoint() {
+        let floating_world = Rectangle::<i32, Logical>::new((120, 90).into(), (800, 600).into());
+        let floating_output = Rectangle::<i32, Physical>::new((120, 90).into(), (800, 600).into());
+        let maximized_world = Rectangle::<i32, Logical>::new((20, 20).into(), (1880, 1040).into());
+        let maximized_output =
+            Rectangle::<i32, Physical>::new((20, 20).into(), (1880, 1040).into());
+        let mut entry = test_entry(true);
+        entry.restore = Some(WindowedPlacement {
+            location: floating_world.loc,
+            geometry: floating_world,
+            output: Some("DP-1".to_string()),
+        });
+        entry.presentation_windowed = Some(maximized_world);
+        entry.presentation_output = Some(maximized_output);
+        entry.restore_presentation_output = Some(floating_output);
+
+        select_restore_presentation_endpoint(&mut entry);
+
+        assert_eq!(entry.presentation_windowed, Some(floating_world));
+        assert_eq!(entry.presentation_output, Some(floating_output));
     }
 
     #[test]

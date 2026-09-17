@@ -69,10 +69,11 @@ end
 ```
 
 There is no active-window count cap. Focused windows, fullscreen or
-fullscreen-pending windows, field-maximized windows, and windows in an
-interactive move/resize grab are hard-protected from decay. Changing between
-protected, inside-ring, and outside-ring status starts a fresh timer; stale
-time from an earlier status is never reused.
+fullscreen-pending windows, field-maximized windows, windows in an active Field
+arrangement, and windows in an interactive move/resize grab are hard-protected
+from decay. Undoing an arrangement starts a fresh timer for each still-eligible
+window. Changing between protected, inside-ring, and outside-ring status starts
+a fresh timer; stale time from an earlier status is never reused.
 
 Each output has its own camera-centered ellipse. Configure it inside that
 connector's `view.output` entry. An entry may contain both hardware settings
@@ -136,6 +137,8 @@ node:
   icon-size 0.72
   opacity 1.0
   background-colour "auto"
+  border-colour "#474d59"
+  border-colour-highlighted "#d65d26"
 end
 ```
 
@@ -146,8 +149,14 @@ Text renderer, including configured font family/weight suffixes, measured
 centering, contrast-aware text, edge flipping, and the old hover
 slide/grow/fade. See [Fonts](fonts.md) for global typography behavior.
 
-Node borders always use the unfocused window decoration colour, switching to
-the focused colour while highlighted.
+Collapsed nodes and cluster cores own their colours independently of window
+decorations. `border-colour` controls the idle ring and icon (`#474d59` by
+default); `border-colour-highlighted` controls hover, logical focus, join-ready
+feedback, and the highlighted core icon (`#d65d26` by default). American
+`color` spellings are accepted. `background-colour` accepts `auto`, `system`,
+`light`, `dark`, or a hex RGB colour. `auto` is Halley's deterministic local
+palette. `system` explicitly follows the XDG Settings portal appearance
+preference live and falls back to `auto` when no preference is available.
 
 Display policies accept `off`, `hover`, or `always`. Real application icons
 are resolved from desktop entries and icon themes in a background worker.
@@ -163,6 +172,14 @@ grab cancels the dwell and closes the hover UI. A grab keeps labels and
 previews suppressed until later pointer motion deliberately targets a node
 again.
 
+## Active cluster drop admission
+
+While a cluster workspace is open on an output, Mod+left-drag an ordinary Field
+window or a collapsed node into that output's work area and release it to add it
+to the open cluster. The drop may cross outputs. A collapsed node is restored
+before admission, then enters the cluster's current tiling or stacking layout
+using the same insertion and reflow behavior as an ordinary window.
+
 ## Cluster bloom joining
 
 Rest the pointer on a collapsed cluster core to open its member bloom. While
@@ -171,7 +188,8 @@ normal Field window against the core: the window docks at the same non-overlap
 distance used by `field.gap` instead of pushing the core away.
 
 Hold the window there for `clusters.join-dwell-ms`. When the dwell completes,
-the core's original border changes to the focused colour and thickens to five
+the core's original border changes to `border-colour-highlighted` and thickens
+to five
 pixels without changing its fill or icon. A light wash of that same colour
 marks the dragged window; releasing then adds the window to that cluster.
 Moving away, closing the bloom, changing outputs, cancelling the grab, or
@@ -211,8 +229,10 @@ Collapse starts at the window center and slides to the nearest legal location.
 A new or restored active window keeps its placement and relocates blocking
 nodes. An interactively dragged window is authoritative and pushes unpinned
 nodes; `halleyctl node move` remains a discrete legal-placement operation.
-Marker collision is screen-constant across camera zoom; transient labels and
-shadows never reserve space.
+Marker collision is screen-constant across camera zoom. As zoom-out grows a
+marker's footprint in Field space, unpinned ordinary nodes and collapsed
+cluster cores reflow together around each other and stationary active windows.
+Transient labels and shadows never reserve space.
 
 The same `field.gap` insets field-maximized windows from the usable output
 work area. See [Field behavior and maximize](field.md).

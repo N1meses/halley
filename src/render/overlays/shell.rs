@@ -17,8 +17,8 @@ pub struct OverlayRgb {
 }
 
 impl OverlayRgb {
-    pub fn tuple(self) -> (f32, f32, f32, f32) {
-        (self.r, self.g, self.b, self.a)
+    fn premultiplied_tuple(self) -> (f32, f32, f32, f32) {
+        (self.r * self.a, self.g * self.a, self.b * self.a, self.a)
     }
 
     pub fn bytes(self) -> [u8; 3] {
@@ -55,7 +55,6 @@ pub struct OverlayVisuals {
     pub border_px: f32,
     pub radius: f32,
 }
-
 impl OverlayVisuals {
     pub(crate) fn label_chrome(mut self) -> Self {
         self.border_px = 0.0;
@@ -91,21 +90,18 @@ const DARK_TEXT: OverlayRgb = OverlayRgb {
     b: 0.98,
     a: 1.0,
 };
+const HALLEY_ACCENT: OverlayRgb = OverlayRgb {
+    r: 0xd6 as f32 / 255.0,
+    g: 0x5d as f32 / 255.0,
+    b: 0x26 as f32 / 255.0,
+    a: 1.0,
+};
 
-pub fn resolve_visuals(
-    config: &halley_config::Overlays,
-    decorations: &halley_config::Decorations,
-) -> OverlayVisuals {
+pub fn resolve_visuals(config: &halley_config::Overlays) -> OverlayVisuals {
     let fill = resolve_fill(config.background_color);
     let text = resolve_text(config.text_color, fill);
     let error = resolve_error(config.error_color);
-    let border_color = decorations.border_color_focused;
-    let border = OverlayRgb {
-        r: border_color.r,
-        g: border_color.g,
-        b: border_color.b,
-        a: 1.0,
-    };
+    let border = resolve_border(config.border_color);
     OverlayVisuals {
         fill,
         text,
@@ -114,7 +110,7 @@ pub fn resolve_visuals(
         key_fill: fill.mix(text, 0.10),
         border,
         border_px: if config.borders {
-            decorations.border_width_px.max(0) as f32
+            config.border_size_px.max(0) as f32
         } else {
             0.0
         },
@@ -124,9 +120,9 @@ pub fn resolve_visuals(
 
 fn resolve_fill(mode: halley_config::OverlayColorMode) -> OverlayRgb {
     match mode {
-        halley_config::OverlayColorMode::Auto | halley_config::OverlayColorMode::Light => {
-            LIGHT_FILL
-        }
+        halley_config::OverlayColorMode::Auto
+        | halley_config::OverlayColorMode::System
+        | halley_config::OverlayColorMode::Light => LIGHT_FILL,
         halley_config::OverlayColorMode::Dark => DARK_FILL,
         halley_config::OverlayColorMode::Fixed { r, g, b, a } => OverlayRgb { r, g, b, a },
     }
@@ -134,7 +130,7 @@ fn resolve_fill(mode: halley_config::OverlayColorMode) -> OverlayRgb {
 
 fn resolve_text(mode: halley_config::OverlayColorMode, fill: OverlayRgb) -> OverlayRgb {
     match mode {
-        halley_config::OverlayColorMode::Auto => {
+        halley_config::OverlayColorMode::Auto | halley_config::OverlayColorMode::System => {
             if fill.luminance() < 0.45 {
                 DARK_TEXT
             } else {
@@ -151,6 +147,7 @@ fn resolve_error(mode: halley_config::OverlayColorMode) -> OverlayRgb {
     match mode {
         halley_config::OverlayColorMode::Fixed { r, g, b, a } => OverlayRgb { r, g, b, a },
         halley_config::OverlayColorMode::Auto
+        | halley_config::OverlayColorMode::System
         | halley_config::OverlayColorMode::Light
         | halley_config::OverlayColorMode::Dark => OverlayRgb {
             r: 0xfb as f32 / 255.0,
@@ -158,6 +155,16 @@ fn resolve_error(mode: halley_config::OverlayColorMode) -> OverlayRgb {
             b: 0x34 as f32 / 255.0,
             a: 1.0,
         },
+    }
+}
+
+fn resolve_border(mode: halley_config::OverlayColorMode) -> OverlayRgb {
+    match mode {
+        halley_config::OverlayColorMode::Fixed { r, g, b, a } => OverlayRgb { r, g, b, a },
+        halley_config::OverlayColorMode::Auto
+        | halley_config::OverlayColorMode::System
+        | halley_config::OverlayColorMode::Light
+        | halley_config::OverlayColorMode::Dark => HALLEY_ACCENT,
     }
 }
 
@@ -174,8 +181,11 @@ pub fn card_element(
         destination,
         OverlayCardStyle {
             content_radius: visuals.radius,
-            fill: fill.tuple(),
-            border: visuals.border.tuple(),
+            // Smithay composites GLES elements as premultiplied RGBA. The
+            // configured colours are straight alpha, so premultiply their RGB
+            // channels before the card shader applies its geometric mask.
+            fill: fill.premultiplied_tuple(),
+            border: visuals.border.premultiplied_tuple(),
             border_px: visuals.border_px,
             alpha,
         },
@@ -203,24 +213,39 @@ pub fn label_card_element(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn elements(
     renderer: &mut GlesRenderer,
     output_geometry: Rectangle<i32, Logical>,
     snapshot: crate::shell::overlay::OverlaySnapshot,
     config: &halley_config::Overlays,
-    decorations: &halley_config::Decorations,
     node_renderer: &mut NodeRenderer,
     ui_text: &mut UiTextRenderer,
 ) -> Result<Vec<SceneElement>, Box<dyn Error>> {
-    let visuals = resolve_visuals(config, decorations);
+    let visuals = resolve_visuals(config);
     let screen = Rectangle::<i32, Physical>::from_size(output_geometry.size.to_physical(1));
     let mut elements = Vec::new();
     if let Some(mix) = snapshot.exit_mix {
-        exit_elements(
+        confirmation_elements(
             renderer,
             screen,
             mix,
+            "Are you sure you want to leave?",
+            None,
+            "leave",
+            visuals,
+            node_renderer,
+            ui_text,
+            &mut elements,
+        )?;
+    }
+    if let Some(confirmation) = snapshot.confirmation {
+        confirmation_elements(
+            renderer,
+            screen,
+            1.0,
+            &confirmation.title,
+            Some(&confirmation.message),
+            confirmation.confirm_label,
             visuals,
             node_renderer,
             ui_text,
@@ -239,11 +264,22 @@ pub fn elements(
             &mut elements,
         )?;
     }
+    if let Some(indicator) = snapshot.cluster_indicator {
+        cluster_indicator_elements(
+            renderer,
+            screen,
+            indicator,
+            visuals,
+            node_renderer,
+            ui_text,
+            &mut elements,
+        )?;
+    }
     if config.zoom_indicator.enabled
         && let Some(zoom_indicator) = snapshot.zoom_indicator
     {
         let zoom_visuals =
-            resolve_zoom_indicator_visuals(config.zoom_indicator, visuals, decorations);
+            resolve_zoom_indicator_visuals(config.zoom_indicator, visuals, config.border_size_px);
         zoom_indicator_elements(
             renderer,
             screen,
@@ -259,24 +295,31 @@ pub fn elements(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn exit_elements(
+fn confirmation_elements(
     renderer: &mut GlesRenderer,
     screen: Rectangle<i32, Physical>,
     mix: f32,
+    title: &str,
+    message: Option<&str>,
+    confirm_label: &str,
     visuals: OverlayVisuals,
     node_renderer: &mut NodeRenderer,
     ui_text: &mut UiTextRenderer,
     elements: &mut Vec<SceneElement>,
 ) -> Result<(), Box<dyn Error>> {
-    const TITLE: &str = "Are you sure you want to leave?";
-    const ACTIONS: [(&str, &str); 2] = [("Enter", "leave"), ("Esc", "cancel")];
+    let actions = [("Enter", confirm_label), ("Esc", "cancel")];
     let title_size = ui_text
-        .measure(renderer, TITLE, visuals.text.bytes())?
+        .measure(renderer, title, visuals.text.bytes())?
+        .unwrap_or((0, 0).into());
+    let message_size = message
+        .map(|message| ui_text.measure(renderer, message, visuals.subtext.bytes()))
+        .transpose()?
+        .flatten()
         .unwrap_or((0, 0).into());
     let mut action_width = 0;
     let mut action_height = 0;
     let mut action_sizes = Vec::new();
-    for (key, label) in ACTIONS {
+    for (key, label) in actions {
         let key_size = ui_text
             .measure(renderer, key, visuals.text.bytes())?
             .unwrap_or((0, 0).into());
@@ -289,10 +332,11 @@ fn exit_elements(
         action_sizes.push((key, label, key_size, label_size, chip_width));
     }
     action_width = action_width.saturating_sub(22);
-    let card_width = (title_size.w.max(action_width) + 48)
+    let card_width = (title_size.w.max(message_size.w).max(action_width) + 48)
         .max(280)
         .min((screen.size.w - 36).max(1));
-    let card_height = title_size.h + action_height + 54;
+    let message_block_height = message.map_or(0, |_| message_size.h + 12);
+    let card_height = title_size.h + message_block_height + action_height + 54;
     let card = Rectangle::new(
         (
             screen.loc.x + (screen.size.w - card_width) / 2,
@@ -306,10 +350,21 @@ fn exit_elements(
     if let Some(text) = ui_text.element(
         renderer,
         (title_x, title_y).into(),
-        TITLE,
+        title,
         visuals.text.bytes(),
         mix,
     )? {
+        elements.push(SceneElement::UiText(text.element));
+    }
+    if let Some(message) = message
+        && let Some(text) = ui_text.element(
+            renderer,
+            (title_x, title_y + title_size.h + 12).into(),
+            message,
+            visuals.subtext.bytes(),
+            mix,
+        )?
+    {
         elements.push(SceneElement::UiText(text.element));
     }
     let mut x = card.loc.x + 24;
@@ -436,6 +491,58 @@ fn notification_elements(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn cluster_indicator_elements(
+    renderer: &mut GlesRenderer,
+    screen: Rectangle<i32, Physical>,
+    indicator: crate::shell::overlay::ClusterIndicatorSnapshot,
+    visuals: OverlayVisuals,
+    node_renderer: &mut NodeRenderer,
+    ui_text: &mut UiTextRenderer,
+    elements: &mut Vec<SceneElement>,
+) -> Result<(), Box<dyn Error>> {
+    let max_text_width = ((screen.size.w as f32 * 0.70).round() as i32 - 40).max(80);
+    let (label, text_size) = fit_middle(
+        renderer,
+        ui_text,
+        &indicator.label,
+        visuals.text.bytes(),
+        max_text_width,
+    )?;
+    let card_size =
+        smithay::utils::Size::<i32, Physical>::from((text_size.w + 40, text_size.h + 24));
+    let card = Rectangle::<i32, Physical>::new(
+        (
+            (screen.size.w - card_size.w) / 2,
+            (screen.size.h - card_size.h) / 2,
+        )
+            .into(),
+        card_size,
+    );
+    if let Some(text) = ui_text.element(
+        renderer,
+        (
+            card.loc.x + 20,
+            card.loc.y + (card.size.h - text_size.h) / 2,
+        )
+            .into(),
+        &label,
+        visuals.text.bytes(),
+        visuals.text.a * indicator.mix,
+    )? {
+        elements.push(SceneElement::UiText(text.element));
+    }
+    elements.push(SceneElement::NodeLabel(card_element(
+        renderer,
+        node_renderer,
+        card,
+        visuals,
+        visuals.fill,
+        0.97 * indicator.mix,
+    )?));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn zoom_indicator_elements(
     renderer: &mut GlesRenderer,
     screen: Rectangle<i32, Physical>,
@@ -499,7 +606,7 @@ fn zoom_indicator_elements(
 fn resolve_zoom_indicator_visuals(
     config: halley_config::ZoomIndicator,
     mut visuals: OverlayVisuals,
-    decorations: &halley_config::Decorations,
+    border_size_px: i32,
 ) -> OverlayVisuals {
     if let Some(mode) = config.background_color {
         visuals.fill = resolve_fill(mode);
@@ -507,9 +614,12 @@ fn resolve_zoom_indicator_visuals(
     if let Some(mode) = config.text_color {
         visuals.text = resolve_text(mode, visuals.fill);
     }
+    if let Some(mode) = config.border_color {
+        visuals.border = resolve_border(mode);
+    }
     if let Some(borders) = config.borders {
         visuals.border_px = if borders {
-            decorations.border_width_px.max(0) as f32
+            border_size_px.max(0) as f32
         } else {
             0.0
         };
@@ -589,10 +699,7 @@ mod tests {
 
     #[test]
     fn old_auto_palette_is_light_with_dark_text() {
-        let visuals = resolve_visuals(
-            &halley_config::Overlays::default(),
-            &halley_config::Decorations::default(),
-        );
+        let visuals = resolve_visuals(&halley_config::Overlays::default());
         assert_eq!(visuals.fill, LIGHT_FILL);
         assert_eq!(visuals.text, LIGHT_TEXT);
         assert_eq!(visuals.radius, 8.0);
@@ -604,18 +711,22 @@ mod tests {
             background_color: halley_config::OverlayColorMode::Dark,
             ..halley_config::Overlays::default()
         };
-        assert_eq!(
-            resolve_visuals(&config, &halley_config::Decorations::default()).text,
-            DARK_TEXT
-        );
+        assert_eq!(resolve_visuals(&config).text, DARK_TEXT);
+    }
+
+    #[test]
+    fn overlay_border_size_does_not_inherit_window_border_width() {
+        let config = halley_config::Overlays {
+            border_size_px: 7,
+            ..halley_config::Overlays::default()
+        };
+
+        assert_eq!(resolve_visuals(&config).border_px, 7.0);
     }
 
     #[test]
     fn internal_label_chrome_never_inherits_container_borders() {
-        let visuals = resolve_visuals(
-            &halley_config::Overlays::default(),
-            &halley_config::Decorations::default(),
-        );
+        let visuals = resolve_visuals(&halley_config::Overlays::default());
 
         assert!(visuals.border_px > 0.0);
         assert_eq!(visuals.label_chrome().border_px, 0.0);
@@ -629,9 +740,23 @@ mod tests {
     }
 
     #[test]
+    fn translucent_overlay_colours_are_premultiplied_for_smithay() {
+        let white_at_half_alpha = OverlayRgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 128.0 / 255.0,
+        };
+
+        assert_eq!(
+            white_at_half_alpha.premultiplied_tuple(),
+            (128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0,)
+        );
+    }
+
+    #[test]
     fn zoom_indicator_visual_overrides_are_independent() {
-        let decorations = halley_config::Decorations::default();
-        let shared = resolve_visuals(&halley_config::Overlays::default(), &decorations);
+        let shared = resolve_visuals(&halley_config::Overlays::default());
         let config = halley_config::ZoomIndicator {
             background_color: Some(halley_config::OverlayColorMode::Dark),
             text_color: Some(halley_config::OverlayColorMode::Auto),
@@ -640,7 +765,11 @@ mod tests {
             ..halley_config::ZoomIndicator::default()
         };
 
-        let visuals = resolve_zoom_indicator_visuals(config, shared, &decorations);
+        let visuals = resolve_zoom_indicator_visuals(
+            config,
+            shared,
+            halley_config::Overlays::default().border_size_px,
+        );
         assert_eq!(visuals.fill, DARK_FILL);
         assert_eq!(visuals.text, DARK_TEXT);
         assert_eq!(visuals.border_px, 0.0);
@@ -648,21 +777,39 @@ mod tests {
     }
 
     #[test]
+    fn zoom_indicator_border_override_uses_overlay_border_size() {
+        let shared_config = halley_config::Overlays {
+            borders: false,
+            border_size_px: 7,
+            ..halley_config::Overlays::default()
+        };
+        let shared = resolve_visuals(&shared_config);
+        let zoom = halley_config::ZoomIndicator {
+            borders: Some(true),
+            ..halley_config::ZoomIndicator::default()
+        };
+
+        assert_eq!(
+            resolve_zoom_indicator_visuals(zoom, shared, shared_config.border_size_px).border_px,
+            7.0
+        );
+    }
+
+    #[test]
     fn zoom_indicator_visual_defaults_inherit_shared_style() {
-        let decorations = halley_config::Decorations::default();
         let shared_config = halley_config::Overlays {
             background_color: halley_config::OverlayColorMode::Dark,
             radius_px: 14,
             borders: false,
             ..halley_config::Overlays::default()
         };
-        let shared = resolve_visuals(&shared_config, &decorations);
+        let shared = resolve_visuals(&shared_config);
 
         assert_eq!(
             resolve_zoom_indicator_visuals(
                 halley_config::ZoomIndicator::default(),
                 shared,
-                &decorations,
+                shared_config.border_size_px,
             )
             .fill,
             shared.fill
@@ -671,7 +818,7 @@ mod tests {
             resolve_zoom_indicator_visuals(
                 halley_config::ZoomIndicator::default(),
                 shared,
-                &decorations,
+                shared_config.border_size_px,
             )
             .radius,
             14.0

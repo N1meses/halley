@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use halley_config::FocusCycleDirection;
 use halley_core::field::NodeId;
-use smithay::wayland::seat::WaylandFocus;
 
 pub const OPEN_MS: u64 = 140;
 pub const STEP_MS: u64 = 130;
@@ -99,6 +98,23 @@ impl FocusCycleState {
         self.session
             .as_ref()
             .is_some_and(|session| session.closing_started_at.is_none())
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.session.is_some()
+    }
+
+    pub fn accepts_live_previews(&self) -> bool {
+        self.is_open()
+    }
+
+    pub fn contains_preview(&self, id: NodeId) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session
+                .visible_slots(VISIBLE_RADIUS)
+                .iter()
+                .any(|(_, preview)| *preview == id)
+        })
     }
 
     pub fn start_or_step(
@@ -225,10 +241,6 @@ fn ease_in_out_cubic(value: f32) -> f32 {
     }
 }
 
-fn target_needs_pointer_warp(origin_focus: Option<NodeId>, target: NodeId) -> bool {
-    origin_focus != Some(target)
-}
-
 pub fn start_or_step<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     direction: FocusCycleDirection,
@@ -242,6 +254,35 @@ pub fn start_or_step<D: crate::session::SessionDriver>(
         session.request_redraw();
     }
     changed
+}
+
+pub fn send_preview_frames(
+    state: &FocusCycleState,
+    nodes: &crate::nodes::NodesState,
+    output: &smithay::output::Output,
+    elapsed: Duration,
+    sequence: u32,
+) {
+    let Some(session) = state.session() else {
+        return;
+    };
+    for (_, id) in session.visible_slots(VISIBLE_RADIUS) {
+        let Some(record) = nodes.record(id).filter(|record| {
+            record.attached && !record.collapsed && record.output == output.name()
+        }) else {
+            continue;
+        };
+        record.window.send_frame(
+            output,
+            elapsed,
+            crate::wayland::frame_callbacks::FALLBACK_THROTTLE,
+            |surface, states| {
+                crate::wayland::frame_callbacks::callback_output(
+                    surface, states, output, sequence, false,
+                )
+            },
+        );
+    }
 }
 
 pub fn cancel<D: crate::session::SessionDriver>(session: &mut crate::session::Session<D>) -> bool {
@@ -259,11 +300,6 @@ pub fn commit<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     serial: smithay::utils::Serial,
 ) -> bool {
-    let origin_focus = session
-        .shell
-        .focus_cycle
-        .session()
-        .and_then(|cycle| cycle.origin_focus);
     let Some(target) = session
         .shell
         .focus_cycle
@@ -271,68 +307,18 @@ pub fn commit<D: crate::session::SessionDriver>(
     else {
         return false;
     };
-    let Some(record) = session.nodes.record(target).cloned() else {
-        session.request_redraw();
-        return true;
-    };
-    if record.collapsed {
-        let _ = crate::nodes::restore(session, target, serial);
-    } else {
-        crate::session::focus_window(session, &record.window, serial);
-    }
-    crate::nodes::reveal_for_focus_cycle(session, target);
-    if target_needs_pointer_warp(origin_focus, target) {
-        session.pending_pointer_warp = Some(record.surface);
-        let _ = finish_pending_pointer_warp(session);
-    } else {
-        // Wrapping Alt+Tab back to the already focused window is not a new
-        // focus placement. In particular, releasing and rebuilding a game's
-        // pointer lock here would restore its old anchor and visibly jump the
-        // cursor even though focus never actually changed.
-        session.pending_pointer_warp = None;
-    }
+    // The shared focus path commits keyboard/X focus before releasing the old
+    // pointer constraint, then centers the pointer on the selected output.
+    let _ = crate::nodes::focus_and_center_node(session, target, serial);
     session.request_redraw();
     true
 }
 
-pub fn finish_pending_pointer_warp<D: crate::session::SessionDriver>(
-    session: &mut crate::session::Session<D>,
-) -> bool {
-    let Some(surface) = session.pending_pointer_warp.clone() else {
-        return false;
-    };
-    let now = crate::frame_clock::monotonic_now();
-    if session.window_open_animations.is_animating(&surface, now) {
-        return false;
-    }
-    let window = session
-        .wayland
-        .space
-        .elements()
-        .find(|window| {
-            window
-                .wl_surface()
-                .is_some_and(|candidate| candidate.as_ref() == &surface)
-        })
-        .cloned();
-    session.pending_pointer_warp = None;
-    window.is_some_and(|window| crate::session::warp_pointer_to_window_center(session, &window))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Session, target_needs_pointer_warp};
+    use super::{FocusCycleState, Session};
     use halley_core::field::NodeId;
     use std::time::Duration;
-
-    #[test]
-    fn wrapping_back_to_the_origin_does_not_warp_the_pointer() {
-        let game = NodeId::new(7);
-
-        assert!(!target_needs_pointer_warp(Some(game), game));
-        assert!(target_needs_pointer_warp(Some(NodeId::new(8)), game));
-        assert!(target_needs_pointer_warp(None, game));
-    }
 
     #[test]
     fn visible_slots_do_not_duplicate_small_candidate_sets() {
@@ -350,6 +336,28 @@ mod tests {
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().any(|(_, id)| *id == NodeId::new(1)));
         assert!(slots.iter().any(|(_, id)| *id == NodeId::new(2)));
+    }
+
+    #[test]
+    fn all_visible_cards_are_live_preview_members() {
+        let state = FocusCycleState {
+            session: Some(Session {
+                candidates: (1..=7).map(NodeId::new).collect(),
+                preview_index: 3,
+                opened_at: Duration::ZERO,
+                step_from_visual_index: 3.0,
+                step_to_visual_index: 3.0,
+                step_started_at: Duration::ZERO,
+                closing_started_at: None,
+                origin_focus: Some(NodeId::new(1)),
+            }),
+        };
+
+        assert!(state.contains_preview(NodeId::new(4)));
+        assert!(state.contains_preview(NodeId::new(2)));
+        assert!(state.contains_preview(NodeId::new(6)));
+        assert!(!state.contains_preview(NodeId::new(1)));
+        assert!(!state.contains_preview(NodeId::new(7)));
     }
 
     #[test]
