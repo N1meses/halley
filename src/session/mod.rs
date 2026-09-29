@@ -13,8 +13,10 @@ use crate::wayland;
 
 mod arrange;
 mod autostart;
+mod basics;
 pub(crate) mod closing;
 mod cursor;
+mod decay_notice;
 mod focus;
 pub(crate) mod gesture;
 pub(crate) mod input;
@@ -36,6 +38,7 @@ pub(crate) mod trace;
 #[cfg(not(feature = "xwayland"))]
 #[path = "trace_disabled.rs"]
 pub(crate) mod trace;
+pub(crate) mod workspace;
 
 pub mod environment;
 pub mod tty;
@@ -628,12 +631,21 @@ pub(crate) fn dissolve_cluster<D: SessionDriver>(
         .clusters
         .core_node(cluster_id)
         .filter(|core| session.nodes.focused() == Some(*core));
+    let dissolving_core = session.clusters.core_node(cluster_id);
     let Some(dissolution) = session
         .clusters
         .dissolve_cluster(&mut session.nodes.field, cluster_id)
     else {
         return false;
     };
+    // The core node and its hidden members leave the free Field scene, so no
+    // remembered zoom home can be honoured for them any more.
+    if let Some(core) = dissolving_core {
+        session.nodes.commit_zoom_home(core);
+    }
+    for member in &dissolution.members {
+        session.nodes.commit_zoom_home(*member);
+    }
 
     for (member, geometry) in &dissolution.surface_restores {
         let Some((window, surface)) = session

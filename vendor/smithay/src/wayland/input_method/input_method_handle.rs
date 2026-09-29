@@ -21,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    INPUT_POPUP_SURFACE_ROLE, InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerState,
-    InputMethodPopupSurfaceUserData,
+    INPUT_POPUP_SURFACE_ROLE, InputMethodHandler, InputMethodKeyboardUserData,
+    InputMethodManagerState, InputMethodPopupSurfaceUserData,
     input_method_keyboard_grab::InputMethodKeyboardGrab,
     input_method_popup_surface::{PopupHandle, PopupParent, PopupSurface},
 };
@@ -32,6 +32,15 @@ pub(crate) struct InputMethod {
     pub instance: Option<Instance>,
     pub popup_handle: PopupHandle,
     pub keyboard_grab: InputMethodKeyboardGrab,
+    pending: PendingText,
+    suspended: bool,
+}
+
+#[derive(Default, Debug)]
+struct PendingText {
+    commit: Option<String>,
+    preedit: Option<(String, i32, i32)>,
+    delete: Option<(u32, u32)>,
 }
 
 #[derive(Debug)]
@@ -44,7 +53,7 @@ impl Instance {
     /// Send the done incrementing the serial.
     pub(crate) fn done(&mut self) {
         self.object.done();
-        self.serial += 1;
+        self.serial = self.serial.wrapping_add(1);
     }
 }
 
@@ -55,22 +64,71 @@ pub struct InputMethodHandle {
 }
 
 impl InputMethodHandle {
-    pub(super) fn add_instance(&self, instance: &ZwpInputMethodV2) {
+    pub(super) fn add_instance(&self, instance: &ZwpInputMethodV2) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(instance) = inner.instance.as_mut() {
-            instance.serial = 0;
-            instance.object.unavailable();
+        if inner.instance.is_some() {
+            instance.unavailable();
+            false
         } else {
             inner.instance = Some(Instance {
                 object: instance.clone(),
                 serial: 0,
             });
+            true
         }
     }
 
     /// Whether there's an active instance of input-method.
     pub(crate) fn has_instance(&self) -> bool {
-        self.inner.lock().unwrap().instance.is_some()
+        let inner = self.inner.lock().unwrap();
+        inner.instance.is_some() && !inner.suspended
+    }
+
+    /// Suspend input-method access during secure compositor input (such as a lock).
+    /// Existing protocol objects survive, but their grab is inactive and text-input
+    /// state is hidden until resumed. New grab objects can be created while suspended
+    /// without becoming active; this lets an IME survive a lock/unlock cycle.
+    pub fn set_suspended<D: SeatHandler + 'static>(&self, state: &mut D, suspended: bool) {
+        let object = {
+            let inner = self.inner.lock().unwrap();
+            if inner.suspended == suspended {
+                return;
+            }
+            inner
+                .instance
+                .as_ref()
+                .map(|instance| instance.object.clone())
+        };
+        if suspended {
+            self.deactivate_input_method(state);
+        }
+        self.inner.lock().unwrap().suspended = suspended;
+        let Some(object) = object else {
+            return;
+        };
+        let data = object.data::<InputMethodUserData<D>>().unwrap();
+        if suspended {
+            data.text_input_handle.leave();
+            let owns_grab = data
+                .keyboard_handle
+                .with_grab(|_, grab| grab.downcast_ref::<InputMethodKeyboardGrab>().is_some())
+                .unwrap_or(false);
+            if owns_grab {
+                data.keyboard_handle.unset_grab(state);
+            }
+        } else {
+            data.text_input_handle.enter();
+            if self.keyboard_grabbed() {
+                let grab = self.inner.lock().unwrap().keyboard_grab.clone();
+                data.keyboard_handle
+                    .set_grab(state, grab, SERIAL_COUNTER.next_serial());
+            }
+        }
+    }
+
+    /// Whether input-method access is suspended for secure compositor input.
+    pub fn is_suspended(&self) -> bool {
+        self.inner.lock().unwrap().suspended
     }
 
     /// Callback function to access the input method object
@@ -79,6 +137,9 @@ impl InputMethodHandle {
         F: FnOnce(&mut Instance),
     {
         let mut inner = self.inner.lock().unwrap();
+        if inner.suspended {
+            return;
+        }
         if let Some(instance) = inner.instance.as_mut() {
             f(instance);
         }
@@ -108,29 +169,34 @@ impl InputMethodHandle {
         let mut inner = self.inner.lock().unwrap();
         inner.popup_handle.rectangle = rect;
 
-        let mut popup_surface = match inner.popup_handle.surface.clone() {
-            Some(popup_surface) => popup_surface,
-            None => return,
-        };
-
-        popup_surface.set_text_input_rectangle(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
-
-        if let Some(instance) = &inner.instance {
-            let data = instance.object.data::<InputMethodUserData<D>>().unwrap();
-            (data.popup_repositioned)(state, popup_surface);
-        };
+        inner.popup_handle.surfaces.retain(PopupSurface::alive);
+        for mut popup_surface in inner.popup_handle.surfaces.clone() {
+            popup_surface.set_text_input_rectangle(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
+            if let Some(instance) = &inner.instance {
+                let data = instance.object.data::<InputMethodUserData<D>>().unwrap();
+                (data.popup_repositioned)(state, popup_surface);
+            }
+        }
     }
 
     /// Activate input method on the given surface.
-    pub(crate) fn activate_input_method<D: SeatHandler + 'static>(&self, state: &mut D, surface: &WlSurface) {
+    pub(crate) fn activate_input_method<D: SeatHandler + 'static>(
+        &self,
+        state: &mut D,
+        surface: &WlSurface,
+    ) {
         self.with_input_method(|im| {
+            im.pending = PendingText::default();
+            im.popup_handle.rectangle = Rectangle::default();
             if let Some(instance) = im.instance.as_ref() {
                 instance.object.activate();
-                if let Some(popup) = im.popup_handle.surface.as_mut() {
+                im.popup_handle.surfaces.retain(PopupSurface::alive);
+                for popup in &mut im.popup_handle.surfaces {
                     let data = instance.object.data::<InputMethodUserData<D>>().unwrap();
                     let location = (data.popup_geometry_callback)(state, surface);
                     // Remove old popup.
                     (data.dismiss_popup)(state, popup.clone());
+                    popup.set_text_input_rectangle(0, 0, 0, 0);
 
                     // Add a new one with updated parent.
                     let parent = PopupParent {
@@ -149,10 +215,12 @@ impl InputMethodHandle {
     /// The `done` is always send when deactivating IME.
     pub(crate) fn deactivate_input_method<D: SeatHandler + 'static>(&self, state: &mut D) {
         self.with_input_method(|im| {
+            im.pending = PendingText::default();
             if let Some(instance) = im.instance.as_mut() {
                 instance.object.deactivate();
                 instance.done();
-                if let Some(popup) = im.popup_handle.surface.as_mut() {
+                im.popup_handle.surfaces.retain(PopupSurface::alive);
+                for popup in &mut im.popup_handle.surfaces {
                     let data = instance.object.data::<InputMethodUserData<D>>().unwrap();
                     if popup.get_parent().is_some() {
                         (data.dismiss_popup)(state, popup.clone());
@@ -204,41 +272,84 @@ where
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, D>,
     ) {
+        let is_current = data
+            .handle
+            .inner
+            .lock()
+            .unwrap()
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.object == *seat);
+        if !is_current {
+            match request {
+                zwp_input_method_v2::Request::GetInputPopupSurface { id, .. } => {
+                    data_init.init(
+                        id,
+                        InputMethodPopupSurfaceUserData {
+                            alive_tracker: AliveTracker::default(),
+                        },
+                    );
+                }
+                zwp_input_method_v2::Request::GrabKeyboard { keyboard } => {
+                    data_init.init(
+                        keyboard,
+                        InputMethodKeyboardUserData {
+                            handle: InputMethodKeyboardGrab::default(),
+                            keyboard_handle: data.keyboard_handle.clone(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+        if data.handle.is_suspended()
+            && matches!(
+                request,
+                zwp_input_method_v2::Request::CommitString { .. }
+                    | zwp_input_method_v2::Request::SetPreeditString { .. }
+                    | zwp_input_method_v2::Request::DeleteSurroundingText { .. }
+                    | zwp_input_method_v2::Request::Commit { .. }
+            )
+        {
+            return;
+        }
         match request {
             zwp_input_method_v2::Request::CommitString { text } => {
-                data.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.commit_string(Some(text.clone()));
-                });
+                data.handle.inner.lock().unwrap().pending.commit = Some(text);
             }
             zwp_input_method_v2::Request::SetPreeditString {
                 text,
                 cursor_begin,
                 cursor_end,
             } => {
-                data.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.preedit_string(Some(text.clone()), cursor_begin, cursor_end);
-                });
+                data.handle.inner.lock().unwrap().pending.preedit =
+                    Some((text, cursor_begin, cursor_end));
             }
             zwp_input_method_v2::Request::DeleteSurroundingText {
                 before_length,
                 after_length,
             } => {
-                data.text_input_handle.with_active_text_input(|ti, _surface| {
-                    ti.delete_surrounding_text(before_length, after_length);
-                });
+                data.handle.inner.lock().unwrap().pending.delete =
+                    Some((before_length, after_length));
             }
-            zwp_input_method_v2::Request::Commit { serial } => {
-                let current_serial = data
-                    .handle
-                    .inner
-                    .lock()
-                    .unwrap()
-                    .instance
-                    .as_ref()
-                    .map(|i| i.serial)
-                    .unwrap_or(0);
-
-                data.text_input_handle.done(serial != current_serial);
+            zwp_input_method_v2::Request::Commit { serial: _ } => {
+                // Even a stale IME serial must apply the edits normally. The text-input
+                // done serial is the application's commit count, never a sentinel.
+                let pending = std::mem::take(&mut data.handle.inner.lock().unwrap().pending);
+                data.text_input_handle
+                    .with_active_text_input(|ti, _surface| {
+                        if let Some((before, after)) = pending.delete {
+                            ti.delete_surrounding_text(before, after);
+                        }
+                        if let Some(text) = &pending.commit {
+                            ti.commit_string(Some(text.clone()));
+                        }
+                        if let Some((text, begin, end)) = &pending.preedit {
+                            ti.preedit_string(Some(text.clone()), *begin, *end);
+                        }
+                    });
+                data.text_input_handle.done();
             }
             zwp_input_method_v2::Request::GetInputPopupSurface { id, surface } => {
                 if compositor::give_role(&surface, INPUT_POPUP_SURFACE_ROLE).is_err()
@@ -249,16 +360,15 @@ where
                     return;
                 }
 
-                let parent = match data.text_input_handle.focus().clone() {
-                    Some(parent) => {
-                        let location = state.parent_geometry(&parent);
-                        Some(PopupParent {
-                            surface: parent,
-                            location,
-                        })
-                    }
-                    None => None,
-                };
+                let mut parent = None;
+                if !data.handle.is_suspended() {
+                    data.text_input_handle.with_active_text_input(|_, surface| {
+                        parent = Some(PopupParent {
+                            surface: surface.clone(),
+                            location: state.parent_geometry(surface),
+                        });
+                    });
+                }
                 let mut input_method = data.handle.inner.lock().unwrap();
 
                 let instance = data_init.init(
@@ -268,19 +378,24 @@ where
                     },
                 );
                 let popup_rect = Arc::new(Mutex::new(input_method.popup_handle.rectangle));
-                let popup = PopupSurface::new(instance, surface, popup_rect, parent);
-                input_method.popup_handle.surface = Some(popup.clone());
+                let mut popup = PopupSurface::new(instance, surface, popup_rect, parent);
+                let rect = input_method.popup_handle.rectangle;
+                popup.set_text_input_rectangle(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
+                input_method.popup_handle.surfaces.retain(PopupSurface::alive);
+                input_method.popup_handle.surfaces.push(popup.clone());
                 if popup.get_parent().is_some() {
                     state.new_popup(popup);
                 }
             }
             zwp_input_method_v2::Request::GrabKeyboard { keyboard } => {
                 let input_method = data.handle.inner.lock().unwrap();
-                data.keyboard_handle.set_grab(
-                    state,
-                    input_method.keyboard_grab.clone(),
-                    SERIAL_COUNTER.next_serial(),
-                );
+                if !input_method.suspended {
+                    data.keyboard_handle.set_grab(
+                        state,
+                        input_method.keyboard_grab.clone(),
+                        SERIAL_COUNTER.next_serial(),
+                    );
+                }
                 let instance = data_init.init(
                     keyboard,
                     InputMethodKeyboardUserData {
@@ -321,12 +436,37 @@ where
     }
 
     fn destroyed(
-        _state: &mut D,
+        state: &mut D,
         _client: ClientId,
-        _input_method: &ZwpInputMethodV2,
+        input_method: &ZwpInputMethodV2,
         data: &InputMethodUserData<D>,
     ) {
-        data.handle.inner.lock().unwrap().instance = None;
-        data.text_input_handle.leave();
+        let is_current = data
+            .handle
+            .inner
+            .lock()
+            .unwrap()
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.object == *input_method);
+        if is_current {
+            data.handle.deactivate_input_method(state);
+            let grab = {
+                let mut inner = data.handle.inner.lock().unwrap();
+                inner.instance = None;
+                for popup in inner.popup_handle.surfaces.drain(..) {
+                    popup.surface_role
+                        .data::<InputMethodPopupSurfaceUserData>()
+                        .unwrap()
+                        .alive_tracker
+                        .destroy_notify();
+                }
+                inner.popup_handle.rectangle = Rectangle::default();
+                // Old child objects must not share the next IME's grab state.
+                std::mem::take(&mut inner.keyboard_grab)
+            };
+            grab.release(state, &data.keyboard_handle);
+            data.text_input_handle.leave();
+        }
     }
 }

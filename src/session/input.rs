@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 
 use smithay::backend::input::{
     Axis, ButtonState, Event, InputBackend, InputEvent, KeyState, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchEvent,
 };
 use smithay::desktop::{Space, Window};
 use smithay::input::keyboard::{FilterResult, Keysym};
@@ -70,6 +70,15 @@ fn drag_threshold_reached(press: Point<f64, Logical>, current: (f64, f64)) -> bo
     dx.hypot(dy) >= NODE_DRAG_THRESHOLD_PX
 }
 
+fn begin_cluster_core_direct_motion(
+    nodes: &mut crate::nodes::NodesState,
+    core: Option<halley_core::field::NodeId>,
+) {
+    if let Some(core) = core {
+        nodes.clear_direct_motion(core);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PendingWindowMoveMotion {
     Wait,
@@ -97,6 +106,57 @@ fn releases_pending_window_move(pending_button: u32, event_button: u32, released
 
 fn forward_pointer_button(intercepted: bool, finishing_client_move: bool) -> bool {
     !intercepted || finishing_client_move
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BasicsInputRouting {
+    Dismiss,
+    SuppressOwned,
+    Forward,
+}
+
+fn basics_pointer_button_routing(
+    accepts_input: bool,
+    button: u32,
+    state: ButtonState,
+    owned: &mut crate::input::SuppressedButtons,
+) -> BasicsInputRouting {
+    match state {
+        ButtonState::Pressed if accepts_input => {
+            owned.suppress(button);
+            BasicsInputRouting::Dismiss
+        }
+        ButtonState::Released if owned.release_is_suppressed(button) => {
+            BasicsInputRouting::SuppressOwned
+        }
+        _ => BasicsInputRouting::Forward,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BasicsTouchPhase {
+    Down,
+    Motion,
+    Up,
+}
+
+fn basics_touch_routing(
+    accepts_input: bool,
+    slot: smithay::backend::input::TouchSlot,
+    phase: BasicsTouchPhase,
+    owned: &mut crate::input::SuppressedReleases<smithay::backend::input::TouchSlot>,
+) -> BasicsInputRouting {
+    match phase {
+        BasicsTouchPhase::Down if accepts_input => {
+            owned.suppress(slot);
+            BasicsInputRouting::Dismiss
+        }
+        BasicsTouchPhase::Motion if owned.contains(slot) => BasicsInputRouting::SuppressOwned,
+        BasicsTouchPhase::Up if owned.release_is_suppressed(slot) => {
+            BasicsInputRouting::SuppressOwned
+        }
+        _ => BasicsInputRouting::Forward,
+    }
 }
 
 fn outside_lift_press_dismisses(
@@ -1522,6 +1582,8 @@ where
         ),
         InputEvent::DeviceRemoved { .. } => {
             session.interactions.steam_close_pressed = None;
+            session.interactions.basics_buttons.clear();
+            session.interactions.basics_touches.clear();
             None
         }
         _ => None,
@@ -1563,6 +1625,48 @@ where
             _ => {}
         }
         return;
+    }
+    // The basics card is not modal. It owns only the press/touch stream that
+    // dismisses it; card visibility continues through the fade, but ownership
+    // does not extend to a new press or touch during that fade.
+    let basics_routing = match event {
+        InputEvent::PointerButton { event } => basics_pointer_button_routing(
+            session.shell.overlays.basics_card_accepts_input(),
+            event.button_code(),
+            event.state(),
+            &mut session.interactions.basics_buttons,
+        ),
+        InputEvent::TouchDown { event } => basics_touch_routing(
+            session.shell.overlays.basics_card_accepts_input(),
+            event.slot(),
+            BasicsTouchPhase::Down,
+            &mut session.interactions.basics_touches,
+        ),
+        InputEvent::TouchMotion { event } => basics_touch_routing(
+            false,
+            event.slot(),
+            BasicsTouchPhase::Motion,
+            &mut session.interactions.basics_touches,
+        ),
+        InputEvent::TouchUp { event } => basics_touch_routing(
+            false,
+            event.slot(),
+            BasicsTouchPhase::Up,
+            &mut session.interactions.basics_touches,
+        ),
+        InputEvent::TouchCancel { .. } => {
+            session.interactions.basics_touches.clear();
+            BasicsInputRouting::Forward
+        }
+        _ => BasicsInputRouting::Forward,
+    };
+    match basics_routing {
+        BasicsInputRouting::Dismiss => {
+            session.dismiss_basics_card();
+            return;
+        }
+        BasicsInputRouting::SuppressOwned => return,
+        BasicsInputRouting::Forward => {}
     }
     if super::touch::handle(session, event) || super::gesture::handle(session, event) {
         return;
@@ -2029,10 +2133,11 @@ where
                 .core_node(*id)
                 .is_none_or(|core| !crate::session::node_user_pinned(session, core))
         {
-            session.interactions.grab = crate::input::grab::Grab::MoveClusterCore {
-                id: *id,
-                screen_offset: *screen_offset,
-            };
+            let id = *id;
+            let screen_offset = *screen_offset;
+            begin_cluster_core_direct_motion(&mut session.nodes, session.clusters.core_node(id));
+            session.interactions.grab =
+                crate::input::grab::Grab::MoveClusterCore { id, screen_offset };
             session.cursor.set_override(
                 crate::cursor::OverrideSource::Grab,
                 Some(smithay::input::pointer::CursorIcon::Grabbing),
@@ -2472,6 +2577,11 @@ where
             );
         }
         super::pointer::finish_frame(session, &pointer_handle);
+        // Keep shell hover cursors and landmarks from replacing the client's
+        // cursor while its implicit grab owns pointer delivery.
+        if super::pointer::client_click_grab_active(session) {
+            return;
+        }
         if let Some(route) = route.as_ref() {
             super::focus::update_hover(session, route, SERIAL_COUNTER.next_serial());
         }
@@ -3260,6 +3370,10 @@ where
                     .core_node(id)
                     .is_none_or(|core| !crate::session::node_user_pinned(session, core))
                 {
+                    begin_cluster_core_direct_motion(
+                        &mut session.nodes,
+                        session.clusters.core_node(id),
+                    );
                     session.interactions.grab =
                         crate::input::grab::Grab::MoveClusterCore { id, screen_offset };
                     session.cursor.set_override(
@@ -3711,6 +3825,7 @@ where
             ) {
                 super::closing::start_steam_client_close_control(session, &window);
             }
+            let had_click_grab = super::pointer::client_click_grab_active(session);
             pointer_handle.button(
                 session,
                 &ButtonEvent {
@@ -3720,6 +3835,11 @@ where
                     state,
                 },
             );
+            if had_click_grab && !super::pointer::client_click_grab_active(session) {
+                // The last release goes to the owner, then normal hit-testing
+                // resumes even if the physical pointer stops moving.
+                super::pointer::route_for_motion(session, time);
+            }
         }
         super::pointer::finish_frame(session, &pointer_handle);
     }
@@ -3886,19 +4006,24 @@ mod tests {
     use std::time::Duration;
 
     use halley_core::field::Vec2;
-    use smithay::backend::input::{ButtonState, KeyState};
+    use smithay::backend::input::{ButtonState, KeyState, TouchSlot};
+    use smithay::input::keyboard::Keysym;
     use smithay::utils::{Logical, Point, Rectangle, Size};
 
     use super::actions::{cluster_blocks_zoom, window_action_output};
-    use super::keyboard::{ModalKeyRouting, modal_key_routing};
-    use super::{BTN_LEFT, BTN_RIGHT, PendingWindowMoveMotion};
+    use super::keyboard::{
+        BasicsKeyRouting, ModalKeyRouting, basics_key_routing, modal_key_routing,
+    };
     use super::{
-        activation_shows_cluster_indicator, bloom_drag_handoff, collapsed_node_drop_origin,
-        drag_threshold_reached, forward_pointer_button, outside_lift_press_dismisses,
-        pending_window_move_motion, plain_background_press_dismisses_bloom,
-        pointer_move_falls_back_to_field_pan, preferred_cluster_navigation_focus,
-        releases_pending_window_move, sampled_drag_velocity, shortcut_policy_allows_bindings,
-        stacking_cycle_direction, typing_abandons_bloom,
+        BTN_LEFT, BTN_RIGHT, BasicsInputRouting, BasicsTouchPhase, PendingWindowMoveMotion,
+    };
+    use super::{
+        activation_shows_cluster_indicator, begin_cluster_core_direct_motion, bloom_drag_handoff,
+        collapsed_node_drop_origin, drag_threshold_reached, forward_pointer_button,
+        outside_lift_press_dismisses, pending_window_move_motion,
+        plain_background_press_dismisses_bloom, pointer_move_falls_back_to_field_pan,
+        preferred_cluster_navigation_focus, releases_pending_window_move, sampled_drag_velocity,
+        shortcut_policy_allows_bindings, stacking_cycle_direction, typing_abandons_bloom,
     };
     // Model the real two-phase dispatch: consume pending state before interception,
     // then call the forwarding hook only for events delivered to the client.
@@ -4074,6 +4199,26 @@ mod tests {
 
         assert!(!drag_threshold_reached(press, (403.0, 254.0)));
         assert!(drag_threshold_reached(press, (408.0, 250.0)));
+    }
+
+    #[test]
+    fn cluster_core_drag_start_commits_its_zoom_displacement() {
+        let mut nodes = crate::nodes::NodesState::new(&halley_config::RuntimeConfig::default());
+        let core = nodes.field.spawn_surface(
+            "cluster-core",
+            Vec2 { x: 180.0, y: 120.0 },
+            Vec2 { x: 48.0, y: 48.0 },
+        );
+        assert!(
+            nodes
+                .field
+                .set_state(core, halley_core::field::NodeState::Core)
+        );
+        nodes.remember_zoom_home(core, Vec2 { x: 100.0, y: 120.0 });
+
+        begin_cluster_core_direct_motion(&mut nodes, Some(core));
+
+        assert_eq!(nodes.zoom_home(core), None);
     }
 
     #[test]
@@ -4294,6 +4439,95 @@ mod tests {
         assert_eq!(
             preferred_cluster_navigation_focus(None, Some(stale_logical)),
             Some(stale_logical)
+        );
+    }
+
+    #[test]
+    fn basics_pointer_dismissal_owns_only_its_press_and_release() {
+        let mut owned = crate::input::SuppressedButtons::default();
+
+        assert_eq!(
+            super::basics_pointer_button_routing(true, BTN_LEFT, ButtonState::Pressed, &mut owned),
+            BasicsInputRouting::Dismiss
+        );
+        assert_eq!(
+            super::basics_pointer_button_routing(
+                false,
+                BTN_RIGHT,
+                ButtonState::Pressed,
+                &mut owned
+            ),
+            BasicsInputRouting::Forward,
+            "a new press during the dismissal fade reaches its target"
+        );
+        assert_eq!(
+            super::basics_pointer_button_routing(
+                false,
+                BTN_LEFT,
+                ButtonState::Released,
+                &mut owned
+            ),
+            BasicsInputRouting::SuppressOwned,
+            "the release paired with the dismissing press stays suppressed"
+        );
+        assert_eq!(
+            super::basics_pointer_button_routing(
+                false,
+                BTN_RIGHT,
+                ButtonState::Released,
+                &mut owned
+            ),
+            BasicsInputRouting::Forward
+        );
+    }
+
+    #[test]
+    fn basics_touch_dismissal_owns_only_its_touch_stream() {
+        let dismissing = TouchSlot::from(Some(1));
+        let next = TouchSlot::from(Some(2));
+        let mut owned = crate::input::SuppressedReleases::default();
+
+        assert_eq!(
+            super::basics_touch_routing(true, dismissing, BasicsTouchPhase::Down, &mut owned),
+            BasicsInputRouting::Dismiss
+        );
+        assert_eq!(
+            super::basics_touch_routing(false, next, BasicsTouchPhase::Down, &mut owned),
+            BasicsInputRouting::Forward,
+            "a new touch during the dismissal fade reaches its target"
+        );
+        assert_eq!(
+            super::basics_touch_routing(false, dismissing, BasicsTouchPhase::Motion, &mut owned),
+            BasicsInputRouting::SuppressOwned
+        );
+        assert_eq!(
+            super::basics_touch_routing(false, dismissing, BasicsTouchPhase::Up, &mut owned),
+            BasicsInputRouting::SuppressOwned
+        );
+        assert_eq!(
+            super::basics_touch_routing(false, next, BasicsTouchPhase::Up, &mut owned),
+            BasicsInputRouting::Forward
+        );
+    }
+
+    #[test]
+    fn basics_card_only_intercepts_its_dismissal_keys() {
+        assert_eq!(
+            basics_key_routing(true, KeyState::Pressed, Some(Keysym::Return)),
+            BasicsKeyRouting::Dismiss
+        );
+        assert_eq!(
+            basics_key_routing(true, KeyState::Pressed, Some(Keysym::Escape)),
+            BasicsKeyRouting::Dismiss
+        );
+        assert_eq!(
+            basics_key_routing(true, KeyState::Pressed, Some(Keysym::d)),
+            BasicsKeyRouting::EvaluateNormally,
+            "non-dismissal presses must reach compositor keybind matching"
+        );
+        assert_eq!(
+            basics_key_routing(true, KeyState::Released, Some(Keysym::Return)),
+            BasicsKeyRouting::EvaluateNormally
         );
     }
 

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Advertise the staging `ext-workspace-v1` global, so taskbars, docks, and
+  scripts can enumerate Halley's clusters per output and activate or deactivate
+  them. One workspace group is published per mapped output, clusters stay
+  visible while collapsed, and requests are applied atomically at `commit` so a
+  re-sent "activate" cannot close the workspace it highlights. See
+  `docs/ext-workspace-v1.md`.
 - Advertise `zwp_text_input_manager_v3` and `zwp_input_method_manager_v2` so
   Wayland IMEs (fcitx/ibus) can compose into native apps. X11 apps are unchanged.
 - Allow modifier-dragging standalone X11 normal/utility pop-outs in screen
@@ -42,6 +48,25 @@ All notable changes to this project will be documented in this file.
   window rectangle. The shader replaces scale and fade. Node collapse stays on
   the CPU path. A missing or invalid shader is logged once and the configured
   type draws instead. See `docs/window-shaders.md`.
+- Show a one-time **Halley basics** card on a freshly generated configuration's
+  first native session: the Field-first mental model plus only the five
+  essential operations (`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange,
+  `Mod+N` collapse/restore, `Mod+O` Apogee). It reuses the compositor-owned
+  overlay styling, is non-modal (only `Enter`, `Escape`, and the first pointer
+  press or touch are captured), and records its dismissal in
+  `$XDG_STATE_HOME/halley/state.rune`. Existing configurations, explicitly
+  selected paths, and nested `--winit` sessions never show it automatically.
+  Reopen it any time from Halley Lift's new **Show Halley basics** action or with
+  `halleyctl basics`. See `docs/overlays.md`.
+- Explain the first automatic decay collapse once, in a non-modal notice:
+  `<Application> was collapsed into a node. Click the node or press Mod+N to
+  restore it.` The name is the collapsed window's title, falling back to its
+  application id and then to a generic `A window` sentence. The notice takes no
+  keyboard or pointer input, opens no modal, and changes no focus; it is
+  recorded in `$XDG_STATE_HOME/halley/state.rune`, so it appears at most once
+  per installation rather than once per application or session. Manual `Mod+N`
+  collapse, titlebar minimize, and IPC collapse never trigger it. See
+  `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
 - Apply window-rule `opacity` to client content and popups only. Titlebars,
@@ -59,8 +84,19 @@ All notable changes to this project will be documented in this file.
   Collapsed nodes reserve their full restored decorated-window bounds while
   panning, so opening them afterward remains completely in view.
 - Update the README's Discord community invite.
-- Seed fresh and example configs with six empty numbered workspaces on each of
-  the two sample outputs, without launching applications.
+- Start fresh and example configurations on an empty Field instead of
+  pre-creating numbered cluster workspaces. Explicit startup-cluster
+  declarations remain supported, and existing user configurations are
+  unchanged.
+- Make Halley Lift the default `Super+D` launcher in a freshly generated
+  configuration, and keep Fuzzel documented as the commented alternative.
+  Existing configurations are never rewritten, so users who already bind
+  Fuzzel or any other launcher keep their binding.
+- Make automatic decay conservative in a freshly generated configuration: 600
+  seconds (10 minutes) outside the focus ring and 5,400 seconds (90 minutes)
+  inside it, instead of 180 and 1,800. The longer delays are not a migration —
+  an existing configuration keeps the values it states, and one that omits the
+  `decay:` section keeps Halley's built-in 180/1,800-second behavior.
 - Keep clusters and their core identity after the final member closes so named
   empty workspaces remain available for later windows.
 - Add `decorations.titlebars.text-size` so window-title text can use a size
@@ -69,11 +105,85 @@ All notable changes to this project will be documented in this file.
 - Drive close custom shaders with linear wall-clock progress instead of the
   CPU shrink/fade ease-in-out cubic, so the effect starts on the first frame
   instead of holding near zero.
+- Use a high-priority GL context for the TTY renderer so compositor frames are
+  not queued behind busy client GPU work, as Niri and Hyprland do. Earlier
+  releases kept normal EGL priority as the default and exposed the aggressive
+  path only through `HALLEY_TTY_HIGH_PRIORITY_EGL=1`, which Halley no longer
+  reads; that opt-in existed because high-priority EGL previously caused AMD
+  game flicker and stutter, so this default needs re-validation on the target
+  AMD system before release.
 - Refresh the codebase for current Rust Clippy guidance and clear the warning
   baseline without changing compositor behavior.
+- Refine the user-facing documentation around the normal Field loop. The README
+  now opens with launch → position and overlap → arrange → collapse → retrieve →
+  clusters only when deliberately configured, and the generated-config comments,
+  quick-start material, and subsystem docs follow the same order: `Mod+A` is
+  reversible cleanup rather than a persistent tiling mode, `Mod+N` and clickable
+  nodes are introduced before automatic decay, clusters stay out of first-run
+  training for 0.8.0, and numbered workspaces are no longer presented as
+  Halley's default organization model.
+- Document Halley's five retrieval mechanisms consistently across `halleyctl`
+  help text, the README, and the subsystem docs: `Mod+Arrow` is nearby spatial
+  navigation, `Alt+Tab` is recent-work navigation, Bearings retrieves offscreen
+  spatial work, Apogee is the visual inventory across monitors, and Lift is
+  direct search by application, node, cluster, or action. All five remain
+  available; the documentation now states their hierarchy instead of implying
+  they compete.
 
 ### Fixed
-
+- Reverse the landmark displacement that camera zoom-out causes. The first
+  zoom step that moves a collapsed node or cluster core remembers its pre-zoom
+  home, further zoom-out reflows from the displayed position without replacing
+  that home, and zoom-in returns each landmark toward it while active windows
+  and pinned landmarks stay put. Dragging a displaced landmark, pushing one in
+  a drag's collision chain, pinning, output transfer, discrete IPC movement,
+  collapse/restore, and ordinary placement reflow still rebase the position
+  permanently, so no pushed neighbor snaps back later.
+- Keep ordinary client click-drags in the grabbed surface's coordinate space
+  across windows, panels, output cameras, and moving subsurfaces/popups. Preserve
+  the client cursor while held and restore normal pointer routing immediately
+  after the last button release.
+- Keep input-method-v2 candidate popups hidden until text input is enabled,
+  send the current caret rectangle when each popup is created, and update all
+  live candidate surfaces. Destroyed IMEs no longer leave popups to be revived
+  by a replacement IME.
+- Release input-method-v2 keyboard grabs when their IME is destroyed, and keep
+  stale grab objects from releasing a replacement grab after reconnection.
+- Bound IPC connections and request deadlines, release disconnected subscribers
+  and capture buffers, and enforce per-connection/global DMA-BUF quotas and
+  ownership. Close received descriptors even when ancillary data is truncated.
+- Deny raw Wayland screen capture, clipboard data control, virtual keyboards,
+  and input-method registration by default. Grant each capability separately
+  to explicitly approved executable identities at connection admission.
+- Authenticate portal backend calls against the frontend bus owner and executable
+  file identity (including across mount namespaces),
+  pin requests and sessions to their creator, enforce application ownership, and
+  bound session allocation. Remove completed request objects.
+- Require explicit approval of a unique D-Bus connection for accessibility
+  keyboard monitoring; owning the public Orca bus name no longer grants access.
+- Revert the dedicated synchronized DPMS wake modeset after reports of black
+  screens following suspend. Restore wake through normal frame submission;
+  slow secondary-monitor wake on AMD remains under investigation.
+- Read gamma-control files on a bounded worker instead of the compositor thread.
+  Reject pipes and incorrectly sized files without waiting for EOF, and discard
+  pending results after a control is destroyed or its output is disabled.
+- Safely drain surface-creation requests on rejected session locks, including
+  requests pipelined before rejection reaches the client. Rejected lock surfaces
+  remain inert and cannot reserve outputs, replace the real lock, or crash the
+  compositor through uninitialized protocol objects.
+- Isolate lock-screen input from ordinary clients: suspend IME keyboard grabs
+  and text state until unlock, retire existing client grabs, and reject popup,
+  XWayland, and virtual-keyboard input paths while locked. Existing IMEs resume
+  after unlock without requiring a restart.
+- Respect layer-shell keyboard interactivity when grabbing popup menus. Waybar
+  tray menus keep their pointer grab without taking keyboard focus from the
+  current app or restoring it to a non-interactive panel after selection.
+- Correct text-input-v3 and input-method-v2 state handling: buffer composition
+  until the IME commits, report the application's actual commit count, and reset
+  pending state and caret geometry when switching text fields. Avoid duplicate
+  focus events, release destroyed active text-input objects, and reject competing
+  IMEs without disrupting the active one. Add socket-level protocol regressions
+  for composition, focus changes, object lifecycle, and IME reconnection.
 - Keep a field-maximized window (Firefox session restore) from snapping to
   its windowed size when `Mod+F` takes over. Compositor fullscreen no longer
   relocates or un-maximizes the client first, leftover Maximized no longer
@@ -163,6 +273,16 @@ All notable changes to this project will be documented in this file.
   changing keyboard focus or their internal stacking order, so nearby Field
   windows outside the arrangement remain underneath instead of covering or
   intercepting the mosaic.
+- Accept a state-only client commit as a valid fullscreen exit endpoint when a
+  restored session leaves fullscreen at the same window size, instead of waiting
+  for a repaint the client is not going to send. A state-only commit still never
+  approves a resize with the previous buffer.
+- Withhold a newly committed DMA-BUF from composited state until every plane's
+  readiness fence has signalled, so an unfinished implicit-sync buffer is never
+  imported or sampled. The compositor event loop keeps servicing other clients
+  while the buffer is pending, and a buffer whose readiness source cannot be
+  registered is committed normally with a logged warning rather than leaving the
+  surface blocked forever.
 
 ## [v0.7.0] - 2026-08-31
 

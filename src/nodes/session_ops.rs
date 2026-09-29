@@ -28,7 +28,6 @@ fn reconcile_landmarks_inner<D: crate::session::SessionDriver>(
                 .map(|node| (record.id, record.output.clone(), node.pos))
         })
         .collect::<Vec<_>>();
-    let now = crate::frame_clock::monotonic_now();
     for (id, output, current) in candidates {
         let scale = session
             .cameras
@@ -56,12 +55,15 @@ fn reconcile_landmarks_inner<D: crate::session::SessionDriver>(
         if destination == current {
             continue;
         }
-        if let Some(node) = session.nodes.field.node_mut(id) {
-            node.pos = destination;
-        }
-        session
-            .nodes
-            .start_landmark_slide(id, current, destination, now);
+        // Placement reflow is a real move, not a reversible zoom offset: the
+        // shared path commits this landmark's pre-zoom home as it applies.
+        apply_landmark_move(
+            session,
+            id,
+            destination,
+            LandmarkMovement::Persistent,
+            &output,
+        );
     }
 }
 
@@ -167,10 +169,107 @@ fn dynamics_bodies_at_scale<D: crate::session::SessionDriver>(
     bodies
 }
 
+/// Where a landmark move came from. Camera zoom may be reverted while the
+/// presented footprint shrinks again; anything physical or user-driven rebases
+/// the landmark permanently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LandmarkMovement {
+    ZoomTemporary,
+    Persistent,
+}
+
+fn landmark_moved(origin: Vec2, destination: Vec2) -> bool {
+    (destination.x - origin.x).abs() > dynamics::LANDMARK_POSITION_EPSILON
+        || (destination.y - origin.y).abs() > dynamics::LANDMARK_POSITION_EPSILON
+}
+
+/// Applies one landmark destination to both cluster metadata and the Field
+/// scene, preserving the slide animation and retargeting it from the position
+/// actually on screen. Temporary zoom movement remembers the pre-zoom home on
+/// the first displacement; persistent movement discards it, so anything a
+/// physical or user-driven move touches is rebased together.
+fn apply_landmark_move<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    id: NodeId,
+    destination: Vec2,
+    movement: LandmarkMovement,
+    output: &str,
+) -> bool {
+    let now = crate::frame_clock::monotonic_now();
+    if let Some(cluster) = session.clusters.cluster_for_core(id) {
+        let Some((current, core_output)) = session
+            .clusters
+            .metadata(cluster)
+            .map(|metadata| (metadata.core_position, metadata.output.clone()))
+        else {
+            return false;
+        };
+        if !landmark_moved(destination, current) {
+            return false;
+        }
+        let from = session.nodes.landmark_position(id, current, now);
+        if !session
+            .clusters
+            .move_core(cluster, &core_output, destination)
+        {
+            return false;
+        }
+        if movement == LandmarkMovement::ZoomTemporary {
+            session.nodes.remember_zoom_home(id, current);
+        } else {
+            session.nodes.commit_zoom_home(id);
+        }
+        if let Some(node) = session.nodes.field.node_mut(id) {
+            node.pos = destination;
+        }
+        session.nodes.physics_velocity.remove(&id);
+        session
+            .nodes
+            .start_landmark_slide(id, from, destination, now);
+        return true;
+    }
+
+    let Some((current, collapsed, attached, node_output)) =
+        session.nodes.record(id).and_then(|record| {
+            session.nodes.field.node(id).map(|node| {
+                (
+                    node.pos,
+                    record.collapsed,
+                    record.attached,
+                    record.output.clone(),
+                )
+            })
+        })
+    else {
+        return false;
+    };
+    if !collapsed || !attached || node_output != output {
+        return false;
+    }
+    if !landmark_moved(destination, current) {
+        return false;
+    }
+    if movement == LandmarkMovement::ZoomTemporary {
+        session.nodes.remember_zoom_home(id, current);
+    } else {
+        session.nodes.commit_zoom_home(id);
+    }
+    let from = session.nodes.landmark_position(id, current, now);
+    if let Some(node) = session.nodes.field.node_mut(id) {
+        node.pos = destination;
+    }
+    session.nodes.physics_velocity.remove(&id);
+    session
+        .nodes
+        .start_landmark_slide(id, from, destination, now);
+    true
+}
+
 /// Reconcile the fixed-pixel footprint of collapsed landmarks at a newly
-/// presented zoom scale. This runs only while zooming out: active windows are
+/// presented zoom scale. This is the zoom-out direction: active windows are
 /// stationary blockers, while ordinary nodes and collapsed cluster cores move
-/// together under the same collision policy.
+/// together under the same collision policy. The first displacement of each
+/// landmark remembers its pre-zoom home so zooming back in can revert it.
 pub(crate) fn reconcile_landmarks_for_zoom<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     output: &str,
@@ -181,75 +280,98 @@ pub(crate) fn reconcile_landmarks_for_zoom<D: crate::session::SessionDriver>(
         .filter(|body| body.output == output)
         .collect::<Vec<_>>();
     let positions = dynamics::solve_zoom_reflow(&bodies);
-    let now = crate::frame_clock::monotonic_now();
+    let mut targets = positions.into_iter().collect::<Vec<_>>();
+    targets.sort_by_key(|(id, _)| id.as_u64());
     let mut changed = false;
-
-    for (id, destination) in positions {
-        if let Some(cluster) = session.clusters.cluster_for_core(id) {
-            let Some((current, core_output)) = session
-                .clusters
-                .metadata(cluster)
-                .map(|metadata| (metadata.core_position, metadata.output.clone()))
-            else {
-                continue;
-            };
-            if (destination.x - current.x).abs() <= 0.001
-                && (destination.y - current.y).abs() <= 0.001
-            {
-                continue;
-            }
-            let from = session.nodes.landmark_position(id, current, now);
-            if !session
-                .clusters
-                .move_core(cluster, &core_output, destination)
-            {
-                continue;
-            }
-            if let Some(node) = session.nodes.field.node_mut(id) {
-                node.pos = destination;
-            }
-            session.nodes.physics_velocity.remove(&id);
-            session
-                .nodes
-                .start_landmark_slide(id, from, destination, now);
-            changed = true;
-            continue;
-        }
-
-        let Some((current, collapsed, attached, node_output)) =
-            session.nodes.record(id).and_then(|record| {
-                session.nodes.field.node(id).map(|node| {
-                    (
-                        node.pos,
-                        record.collapsed,
-                        record.attached,
-                        record.output.clone(),
-                    )
-                })
-            })
-        else {
-            continue;
-        };
-        if !collapsed
-            || !attached
-            || node_output != output
-            || ((destination.x - current.x).abs() <= 0.001
-                && (destination.y - current.y).abs() <= 0.001)
-        {
-            continue;
-        }
-        let from = session.nodes.landmark_position(id, current, now);
-        if let Some(node) = session.nodes.field.node_mut(id) {
-            node.pos = destination;
-        }
-        session.nodes.physics_velocity.remove(&id);
-        session
-            .nodes
-            .start_landmark_slide(id, from, destination, now);
-        changed = true;
+    for (id, destination) in targets {
+        changed |= apply_landmark_move(
+            session,
+            id,
+            destination,
+            LandmarkMovement::ZoomTemporary,
+            output,
+        );
     }
-
+    session.nodes.retire_zoom_homes_without_field_node();
     changed
+}
+
+/// Returns temporarily displaced landmarks toward their remembered pre-zoom
+/// homes as the presented footprint grows again. This is the zoom-in direction
+/// of the same reconciliation: a home is forgotten once its landmark reaches
+/// it, and a still-blocked landmark keeps its home for a later attempt.
+pub(crate) fn restore_landmarks_for_zoom<D: crate::session::SessionDriver>(
+    session: &mut crate::session::Session<D>,
+    output: &str,
+    scale: f32,
+) -> bool {
+    let bodies = dynamics_bodies_at_scale(session, Some((output, scale)))
+        .into_iter()
+        .filter(|body| body.output == output)
+        .collect::<Vec<_>>();
+    let homes = bodies
+        .iter()
+        .filter_map(|body| session.nodes.zoom_home(body.id).map(|home| (body.id, home)))
+        .collect::<HashMap<_, _>>();
+    if homes.is_empty() {
+        return false;
+    }
+    let positions = dynamics::solve_zoom_return(&bodies, &homes);
+    let mut targets = positions
+        .into_iter()
+        .filter(|(id, _)| homes.contains_key(id))
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|(id, _)| id.as_u64());
+    let mut changed = false;
+    for (id, destination) in targets {
+        let home = homes[&id];
+        if !landmark_moved(destination, home) {
+            // The landmark is home again, so the temporary displacement is over.
+            changed |=
+                apply_landmark_move(session, id, home, LandmarkMovement::ZoomTemporary, output);
+            session.nodes.commit_zoom_home(id);
+            continue;
+        }
+        changed |= apply_landmark_move(
+            session,
+            id,
+            destination,
+            LandmarkMovement::ZoomTemporary,
+            output,
+        );
+    }
+    session.nodes.retire_zoom_homes_without_field_node();
+    changed
+}
+
+fn apply_cluster_core_dynamics_positions(
+    nodes: &mut NodesState,
+    clusters: &mut crate::clusters::ClusterSystem,
+    positions: &HashMap<NodeId, Vec2>,
+) -> HashSet<String> {
+    let core_changes = positions
+        .iter()
+        .filter_map(|(id, position)| {
+            let cluster = clusters.cluster_for_core(*id)?;
+            let metadata = clusters.metadata(cluster)?;
+            ((position.x - metadata.core_position.x).abs() > 0.001
+                || (position.y - metadata.core_position.y).abs() > 0.001)
+                .then(|| (cluster, *id, *position, metadata.output.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut outputs = HashSet::new();
+    for (cluster, core, position, output) in core_changes {
+        if clusters.move_core(cluster, &output, position) {
+            if let Some(node) = nodes.field.node_mut(core) {
+                node.pos = position;
+            }
+            // Physics and rigid moves are physical truth: whatever they move,
+            // including a collision-chain neighbour, is no longer a zoom offset.
+            nodes.commit_zoom_home(core);
+            outputs.insert(output);
+        }
+    }
+    outputs
 }
 
 pub(super) fn apply_dynamics_positions<D: crate::session::SessionDriver>(
@@ -257,26 +379,16 @@ pub(super) fn apply_dynamics_positions<D: crate::session::SessionDriver>(
     positions: HashMap<NodeId, Vec2>,
     authority: Option<NodeId>,
 ) -> HashSet<String> {
-    let core_changes = positions
+    let changes = positions
         .iter()
         .filter_map(|(id, position)| {
-            let cluster = session.clusters.cluster_for_core(*id)?;
-            let metadata = session.clusters.metadata(cluster)?;
-            ((position.x - metadata.core_position.x).abs() > 0.001
-                || (position.y - metadata.core_position.y).abs() > 0.001)
-                .then(|| (cluster, *id, *position, metadata.output.clone()))
-        })
-        .collect::<Vec<_>>();
-    let changes = positions
-        .into_iter()
-        .filter_map(|(id, position)| {
-            let record = session.nodes.record(id)?;
-            let current = session.nodes.field.node(id)?.pos;
+            let record = session.nodes.record(*id)?;
+            let current = session.nodes.field.node(*id)?.pos;
             ((position.x - current.x).abs() > 0.001 || (position.y - current.y).abs() > 0.001).then(
                 || {
                     (
-                        id,
-                        position,
+                        *id,
+                        *position,
                         record.collapsed,
                         record.output.clone(),
                         record.window.clone(),
@@ -286,17 +398,14 @@ pub(super) fn apply_dynamics_positions<D: crate::session::SessionDriver>(
             )
         })
         .collect::<Vec<_>>();
-    let mut outputs = HashSet::new();
-    for (cluster, core, position, output) in core_changes {
-        if session.clusters.move_core(cluster, &output, position) {
-            if let Some(node) = session.nodes.field.node_mut(core) {
-                node.pos = position;
-            }
-            outputs.insert(output);
-        }
-    }
+    let mut outputs = apply_cluster_core_dynamics_positions(
+        &mut session.nodes,
+        &mut session.clusters,
+        &positions,
+    );
     for (id, position, collapsed, output, window, size) in changes {
         outputs.insert(output);
+        session.nodes.commit_zoom_home(id);
         if let Some(node) = session.nodes.field.node_mut(id) {
             node.pos = position;
         }
@@ -372,6 +481,11 @@ pub(crate) fn resolve_new_cluster_core<D: crate::session::SessionDriver>(
     let Some(core) = session.clusters.core_node(cluster) else {
         return false;
     };
+    // Members leave the free Field scene as the core takes over, so a home
+    // remembered for one of them can no longer be honoured.
+    for member in session.clusters.member_ids(cluster) {
+        session.nodes.commit_zoom_home(member);
+    }
     let Some(origin) = session
         .clusters
         .metadata(cluster)
@@ -744,6 +858,9 @@ fn collapse_inner<D: crate::session::SessionDriver>(
         node.pos = node_position;
         node.intrinsic_size = vec_size(geometry);
     }
+    // Collapsing places a landmark for real; any remembered zoom home for this
+    // node belonged to a different, now superseded position.
+    session.nodes.commit_zoom_home(id);
     if let Some(record) = session.nodes.record_mut(id) {
         record.geometry = geometry;
         record.collapsed_stack_index = Some(stack_index);
@@ -772,6 +889,9 @@ fn collapse_inner<D: crate::session::SessionDriver>(
     }
     crate::session::sync_keyboard_focus(session, serial);
     crate::session::reconcile_pointer_constraints(session);
+    // Automatic decay and manual `Mod+N` share this seam; the collapse trigger
+    // decides whether this one explains itself. See `session::decay_notice`.
+    session.note_collapse(decay, &record.title, record.app_id.as_deref());
     session.request_redraw();
     true
 }
@@ -857,6 +977,9 @@ fn restore_with_centering<D: crate::session::SessionDriver>(
     if let Some(record) = session.nodes.record_mut(id) {
         record.collapsed_stack_index = None;
     }
+    // The window is now placed at the displayed center, so that position is
+    // real rather than a reversible zoom offset.
+    session.nodes.commit_zoom_home(id);
     reconcile_landmarks(session, Some(&record.output));
     crate::session::closing::mapped(session, &record.surface);
     crate::window::focus_and_raise(&mut session.wayland, &record.window);
@@ -1369,8 +1492,85 @@ pub fn tick_decay<D: crate::session::SessionDriver>(
 
 #[cfg(test)]
 mod close_tests {
-    use super::{collapse_allowed, hard_protected_from_decay, preferred_close_candidate};
-    use halley_core::field::NodeId;
+    use super::{
+        apply_cluster_core_dynamics_positions, collapse_allowed, dynamics,
+        hard_protected_from_decay, preferred_close_candidate,
+    };
+    use halley_core::cluster::layout::ClusterWorkspaceLayoutKind;
+    use halley_core::field::{NodeId, Vec2};
+
+    #[test]
+    fn core_drag_commits_zoom_homes_for_core_and_physically_pushed_neighbour() {
+        let config = halley_config::RuntimeConfig::default();
+        let mut nodes = crate::nodes::NodesState::new(&config);
+        let mut clusters =
+            crate::clusters::ClusterSystem::new(config.clusters, config.animations.cluster);
+        let first_member = nodes.field.spawn_surface(
+            "first-member",
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 200.0, y: 150.0 },
+        );
+        let neighbour_member = nodes.field.spawn_surface(
+            "neighbour-member",
+            Vec2 { x: 100.0, y: 0.0 },
+            Vec2 { x: 200.0, y: 150.0 },
+        );
+        let first = clusters
+            .create_collapsed_cluster(
+                &mut nodes.field,
+                "first".into(),
+                "DP-1".into(),
+                ClusterWorkspaceLayoutKind::Tiling,
+                vec![first_member],
+                Vec2 { x: 0.0, y: 0.0 },
+            )
+            .expect("first cluster");
+        let neighbour = clusters
+            .create_collapsed_cluster(
+                &mut nodes.field,
+                "neighbour".into(),
+                "DP-1".into(),
+                ClusterWorkspaceLayoutKind::Tiling,
+                vec![neighbour_member],
+                Vec2 { x: 100.0, y: 0.0 },
+            )
+            .expect("neighbour cluster");
+        let core = clusters.core_node(first).expect("first core");
+        let neighbour_core = clusters.core_node(neighbour).expect("neighbour core");
+        nodes.remember_zoom_home(core, Vec2 { x: -20.0, y: 0.0 });
+        nodes.remember_zoom_home(neighbour_core, Vec2 { x: 80.0, y: 0.0 });
+
+        let extent = crate::clusters::CORE_DIAMETER_PX * 0.5;
+        let bodies = [
+            (core, Vec2 { x: 0.0, y: 0.0 }),
+            (neighbour_core, Vec2 { x: 100.0, y: 0.0 }),
+        ]
+        .into_iter()
+        .map(|(id, pos)| dynamics::Body {
+            id,
+            kind: dynamics::BodyKind::Node,
+            pos,
+            extents: dynamics::CollisionExtents::symmetric(Vec2 {
+                x: extent,
+                y: extent,
+            }),
+            gap: 0.0,
+            pinned: false,
+            output: "DP-1".into(),
+        })
+        .collect();
+
+        // This matches the rigid core-drag seam: solve the swept collision chain,
+        // then apply every changed core through cluster metadata and NodesState.
+        let positions = dynamics::solve_static_swept(bodies, core, Vec2 { x: 100.0, y: 0.0 });
+        let outputs = apply_cluster_core_dynamics_positions(&mut nodes, &mut clusters, &positions);
+
+        assert_eq!(outputs, std::collections::HashSet::from(["DP-1".into()]));
+        assert!(clusters.metadata(first).unwrap().core_position.x > 0.0);
+        assert!(clusters.metadata(neighbour).unwrap().core_position.x > 100.0);
+        assert_eq!(nodes.zoom_home(core), None);
+        assert_eq!(nodes.zoom_home(neighbour_core), None);
+    }
 
     #[test]
     fn arranged_windows_are_hard_protected_from_decay() {

@@ -12,6 +12,11 @@ drops behind every window that was above it, a middle window stays between its
 neighbors, and a front window drops in front. The emerging marker shares that
 depth instead of jumping to a global node overlay.
 
+Collapse and restore are the deliberate half of the Field loop: `Mod+N`
+collapses the focused window on purpose, and one click on the collapsed marker
+brings it back. [Automatic decay](#automatic-decay) is the separate conservative
+half, and it only reaches work you genuinely left behind.
+
 Click a collapsed marker once to restore and focus its window. This is one
 atomic action: Halley does not first center the camera, leave the marker
 collapsed, and require a second click. `$var.mod+n` runs the same state toggle
@@ -63,10 +68,29 @@ An unfocused active window becomes a node after its eligibility timer expires:
 ```rune
 decay:
   enabled true
-  outside-delay-seconds 180
-  inside-delay-seconds 1800
+  outside-delay-seconds 600
+  inside-delay-seconds 5400
 end
 ```
+
+`outside-delay-seconds` counts from the moment a window becomes ineligible
+while it sits outside its output's focus ring; `inside-delay-seconds` counts the
+same way for a window still inside the ring. These 10-minute and 90-minute
+values are what Halley writes into a **newly generated** configuration, so
+genuinely abandoned work survives an ordinary interruption. Decay is not
+migrated: an existing configuration keeps the values it states, and one that
+omits the `decay:` section keeps Halley's built-in 180-second and
+1800-second behavior.
+
+The first automatic collapse explains itself once, in a non-modal notice:
+`<Application> was collapsed into a node. Click the node or press Mod+N to
+restore it.` The application name is the window title, falling back to the
+application id and then to a generic "A window" sentence. The notice never takes
+keyboard or pointer input and never changes focus, and it is recorded in user
+state (`$XDG_STATE_HOME/halley/state.rune`), so no later collapse — for another
+application or in another session — explains anything again. Manual `Mod+N`
+collapse is your own deliberate action, is visible as it animates, and never
+triggers the notice.
 
 There is no active-window count cap. Focused windows, fullscreen or
 fullscreen-pending windows, field-maximized windows, windows in an active Field
@@ -233,6 +257,23 @@ Marker collision is screen-constant across camera zoom. As zoom-out grows a
 marker's footprint in Field space, unpinned ordinary nodes and collapsed
 cluster cores reflow together around each other and stationary active windows.
 Transient labels and shadows never reserve space.
+
+That zoom reflow is reversible. The first time a zoom step moves a landmark,
+Halley remembers the position it left behind as its pre-zoom home. Further
+zoom-out keeps reflowing from where the marker is displayed without replacing
+that home, and zooming back in returns the landmark toward it as the shrinking
+footprint makes room, sliding from the position actually on screen. Active
+windows and pinned landmarks stay where they are, so a landmark whose home is
+still blocked waits at the closest legal point and finishes the trip on a later
+zoom step.
+
+Direct manipulation is permanent. Dragging a displaced landmark discards its
+home immediately, and every landmark a drag physically pushes in the collision
+chain discards its home too, so nothing snaps back after a push. Pinning a
+landmark, transferring it to another monitor, moving it with `halleyctl node
+move`, collapsing or restoring its window, and ordinary placement reflow all
+commit the displayed position the same way. Zoom memory is per monitor and
+lasts only for the running session.
 
 The same `field.gap` insets field-maximized windows from the usable output
 work area. See [Field behavior and maximize](field.md).

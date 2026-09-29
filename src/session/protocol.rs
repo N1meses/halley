@@ -12,10 +12,18 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::wp::linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1;
+use smithay::reexports::wayland_protocols::ext::workspace::v1::server::{
+    ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
+    ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
+    ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
+};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Client, Display, Resource};
+use smithay::reexports::wayland_server::{
+    Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource,
+};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::tablet_manager::TabletSeatHandler;
@@ -69,11 +77,11 @@ use smithay::{
     delegate_pointer_constraints, delegate_primary_selection, delegate_relative_pointer,
     delegate_pointer_gestures, delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
     delegate_text_input_manager,
-    delegate_virtual_keyboard_manager,
     delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use super::state::{Session, SessionDriver};
+use crate::wayland::ext_workspace::{self, GroupData, WorkspaceData};
 use crate::wayland::{self, ClientState};
 
 const XDG_ACTIVATION_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -93,11 +101,14 @@ pub fn init_wayland_listener<D: SessionDriver>(
     event_loop
         .handle()
         .insert_source(listening_socket, move |client_stream, _, session| {
-            if let Err(err) = session
-                .wayland
-                .display_handle
-                .insert_client(client_stream, Arc::new(ClientState::default()))
-            {
+            let permissions = crate::wayland::permissions::Permissions::for_socket(&client_stream);
+            if let Err(err) = session.wayland.display_handle.insert_client(
+                client_stream,
+                Arc::new(ClientState {
+                    permissions,
+                    ..Default::default()
+                }),
+            ) {
                 eventline::warn!("failed to insert new wayland client: {err}");
             }
         })
@@ -153,17 +164,38 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
                 super::closing::capture_native_toplevel_before_unmap(session, surface);
             }
 
-            if session.drm_syncobj_state.is_none() {
-                return;
-            }
-            let acquire_point = with_states(surface, |states| {
-                let opted_in = states
+            let explicit_sync = with_states(surface, |states| {
+                states
                     .data_map
                     .get::<RefCell<Option<WpLinuxDrmSyncobjSurfaceV1>>>()
-                    .is_some_and(|surface| surface.borrow().is_some());
-                if !opted_in {
-                    return None;
+                    .is_some_and(|surface| surface.borrow().is_some())
+            });
+            if !explicit_sync {
+                // Defer implicit-sync buffers too. Importing/sampling an unfinished
+                // client buffer can otherwise stall the compositor's render queue.
+                let dmabuf = with_states(surface, |states| {
+                    let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                    match attributes.pending().buffer.as_ref() {
+                        Some(BufferAssignment::NewBuffer(buffer)) => {
+                            smithay::wayland::dmabuf::get_dmabuf(buffer).cloned().ok()
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(dmabuf) = dmabuf
+                    && let Some(client) = surface.client()
+                    && let Some(blocker) =
+                        wayland::dmabuf::defer_until_readable(&dmabuf, |source| {
+                            session.driver.register_dmabuf_source(client, source)
+                        })
+                {
+                    smithay::wayland::compositor::add_blocker(surface, blocker);
                 }
+                return;
+            }
+            // Explicit-sync surfaces must never also wait on implicit fences.
+            // The protocol implementation validates missing acquire points.
+            let acquire_point = with_states(surface, |states| {
                 states
                     .cached_state
                     .get::<DrmSyncobjCachedState>()
@@ -1004,11 +1036,28 @@ impl<D: SessionDriver> XdgShellHandler for Session<D> {
     }
 
     fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        if self.session_lock.active() {
+            surface.send_popup_done();
+            return;
+        }
         let seat = Seat::<Self>::from_resource(&seat).expect("popup grab used an unknown wl_seat");
         let grab =
             wayland::popup::begin_grab(&mut self.wayland.popup_manager, &seat, surface, serial);
         if let Some(grab) = grab {
-            self.popup_grab = wayland::popup::install_grab(self, &seat, grab, serial);
+            let parent_accepts_keyboard_focus = grab
+                .pointer_grab_start_data()
+                .focus
+                .as_ref()
+                .is_none_or(|(root, _)| {
+                    wayland::popup::parent_accepts_keyboard_focus(&self.wayland, root)
+                });
+            self.popup_grab = wayland::popup::install_grab(
+                self,
+                &seat,
+                grab,
+                serial,
+                parent_accepts_keyboard_focus,
+            );
         }
     }
 }
@@ -1206,7 +1255,156 @@ impl<D: SessionDriver> IdleNotifierHandler for Session<D> {
     }
 }
 
-impl<D: SessionDriver> OutputHandler for Session<D> {}
+impl<D: SessionDriver> OutputHandler for Session<D> {
+    /// A `wl_output` bound after the workspace manager must still learn which
+    /// existing workspace group already owns that output.
+    fn output_bound(&mut self, output: Output, wl_output: WlOutput) {
+        if let Some(client) = wl_output.client() {
+            self.wayland
+                .ext_workspace_state
+                .output_bound(&client, &output, &wl_output);
+        }
+    }
+}
+
+impl<D: SessionDriver> GlobalDispatch<ExtWorkspaceManagerV1, (), Session<D>> for Session<D> {
+    fn bind(
+        session: &mut Session<D>,
+        display: &DisplayHandle,
+        client: &Client,
+        resource: New<ExtWorkspaceManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Session<D>>,
+    ) {
+        // The snapshot is materialised before the protocol state is borrowed
+        // mutably, so advertising on bind never holds a borrow of the model.
+        let snapshot = super::workspace::snapshot(session);
+        ext_workspace::init_manager::<Session<D>>(
+            &mut session.wayland.ext_workspace_state,
+            display,
+            client,
+            resource,
+            data_init,
+            &snapshot,
+        );
+    }
+}
+
+impl<D: SessionDriver> Dispatch<ExtWorkspaceManagerV1, (), Session<D>> for Session<D> {
+    fn request(
+        session: &mut Session<D>,
+        client: &Client,
+        manager: &ExtWorkspaceManagerV1,
+        request: ext_workspace_manager_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Session<D>>,
+    ) {
+        // A stopped manager has no binding left, and the protocol forbids
+        // requests after `stop`; ignore rather than raise a compositor error.
+        let Some(binding) = session
+            .wayland
+            .ext_workspace_state
+            .binding_of(&client.id(), manager)
+        else {
+            return;
+        };
+        let plan = ext_workspace::manager_request(
+            &mut session.wayland.ext_workspace_state,
+            binding,
+            request,
+            |id| {
+                session
+                    .clusters
+                    .metadata(id)
+                    .map(|metadata| metadata.output.clone())
+            },
+            |output| session.clusters.active_on(output),
+        );
+        if let Some(plan) = plan {
+            super::workspace::apply_transaction(session, plan);
+        }
+    }
+
+    fn destroyed(
+        session: &mut Session<D>,
+        client: smithay::reexports::wayland_server::backend::ClientId,
+        manager: &ExtWorkspaceManagerV1,
+        _data: &(),
+    ) {
+        // Also runs for every object of a client that disconnects.
+        if let Some(binding) = session
+            .wayland
+            .ext_workspace_state
+            .binding_of(&client, manager)
+        {
+            session.wayland.ext_workspace_state.remove_binding(binding);
+        }
+    }
+}
+
+impl<D: SessionDriver> Dispatch<ExtWorkspaceGroupHandleV1, GroupData, Session<D>> for Session<D> {
+    fn request(
+        session: &mut Session<D>,
+        _client: &Client,
+        handle: &ExtWorkspaceGroupHandleV1,
+        request: ext_workspace_group_handle_v1::Request,
+        data: &GroupData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Session<D>>,
+    ) {
+        ext_workspace::group_request(
+            &mut session.wayland.ext_workspace_state,
+            data.binding,
+            handle,
+            request,
+        );
+    }
+
+    fn destroyed(
+        session: &mut Session<D>,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        handle: &ExtWorkspaceGroupHandleV1,
+        data: &GroupData,
+    ) {
+        session
+            .wayland
+            .ext_workspace_state
+            .group_destroyed(data.binding, handle);
+    }
+}
+
+impl<D: SessionDriver> Dispatch<ExtWorkspaceHandleV1, WorkspaceData, Session<D>> for Session<D> {
+    fn request(
+        session: &mut Session<D>,
+        _client: &Client,
+        handle: &ExtWorkspaceHandleV1,
+        request: ext_workspace_handle_v1::Request,
+        data: &WorkspaceData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Session<D>>,
+    ) {
+        ext_workspace::workspace_request(
+            &mut session.wayland.ext_workspace_state,
+            data.binding,
+            handle,
+            data.cluster,
+            request,
+        );
+    }
+
+    fn destroyed(
+        session: &mut Session<D>,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        handle: &ExtWorkspaceHandleV1,
+        data: &WorkspaceData,
+    ) {
+        session
+            .wayland
+            .ext_workspace_state
+            .workspace_destroyed(data.binding, handle);
+    }
+}
 
 impl<D: SessionDriver> FractionalScaleHandler for Session<D> {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
@@ -1374,7 +1572,6 @@ delegate_presentation!(@<D: SessionDriver> Session<D>);
 delegate_relative_pointer!(@<D: SessionDriver> Session<D>);
 delegate_pointer_constraints!(@<D: SessionDriver> Session<D>);
 delegate_pointer_gestures!(@<D: SessionDriver> Session<D>);
-delegate_virtual_keyboard_manager!(@<D: SessionDriver> Session<D>);
 delegate_text_input_manager!(@<D: SessionDriver> Session<D>);
 delegate_input_method_manager!(@<D: SessionDriver> Session<D>);
 delegate_keyboard_shortcuts_inhibit!(@<D: SessionDriver> Session<D>);

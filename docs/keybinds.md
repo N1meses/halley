@@ -278,6 +278,13 @@ focus or pointer position. `Mod+O` opens or closes
 the multi-monitor Apogee overview. Apogee stops trapping keys as soon as its
 close transition begins.
 
+The five retrieval layers are meant to be used together, and they are described
+in the same order everywhere: `Mod+Arrow` walks to the nearest window or node
+for nearby spatial navigation, `Alt+Tab` navigates recent work, Bearings
+retrieves offscreen spatial work, `Mod+O` Apogee is the visual inventory across
+monitors, and `Mod+D` Lift searches directly by application, node, cluster, or
+action. None of them replaces another.
+
 The default `Mod+A` `arrange-visible` action reorganizes ordinary Field
 windows whose centers are inside the active output's current visible work area.
 It excludes collapsed or detached windows, cluster members, pinned windows,
@@ -287,10 +294,11 @@ and two smaller regions; four use a 2×2 grid; larger sets use balanced,
 near-square rows. Halley assigns windows to regions by minimum total travel, so
 their approximate spatial order is preserved.
 
-Arrangement is one-shot placement, not a layout mode: it creates no tiling tree
-or relationship, and every resulting window remains independently movable and
-resizable. While its restore transaction is active, its windows are protected
-from automatic decay. Pressing `Mod+A` again restores the exact geometry/output
+Arrangement is reversible cleanup rather than a layout mode: it creates no
+tiling tree, no relationship, and no persistent layout state, and every
+resulting window remains independently movable and resizable. While its restore
+transaction is active, its windows are protected from automatic decay. Pressing
+`Mod+A` again restores the exact geometry/output
 snapshot captured by that output's arrangement. The restore transaction is
 recorded before clients are configured, so an immediate or mid-animation second
 press reverses reliably without waiting for clients to commit. `undo-arrange` remains
@@ -303,9 +311,28 @@ available built-in terminal in this order:
 `terminator`, `mate-terminal`, `qterminal`, `lxterminal`, then `xterm`.
 To choose an exact terminal instead, bind its command directly—for example,
 `"$var.mod+t" "kitty"`.
+The default `$var.mod+d` binding launches `halley-lift`, Halley's bundled search
+and action launcher. Lift searches applications, running nodes, clusters,
+compositor actions, and config files in one field, and its `term` mode runs a
+terminal command line. Any other launcher works the same way, because a
+non-built-in action string is a command line: replace the binding with
+`"$var.mod+d" "fuzzel"` to use Fuzzel instead. Freshly generated configs ship
+the Lift binding and keep Fuzzel as a comment. Existing 0.6-or-newer configs keep
+their own launcher binding during routine structural migration. The explicit
+migration of an incompatible pre-0.6 config instead backs it up and replaces it
+with the current default config.
 The interactive screenshot menu and its area, screen, and window selectors
 force the compositor cursor visible even if a client or inactivity policy had
 hidden it.
+A freshly generated configuration's first native session also shows the one-time
+basics card: the Field-first mental model and only the five essential chords
+(`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange, `Mod+N` collapse/restore,
+`Mod+O` Apogee). It appears on that first native session only, captures just
+`Enter`, `Escape`, and the first pointer press or touch, and records the
+dismissal so it never reappears automatically. Reopen it by hand from Lift's
+**Show Halley basics** action or `halleyctl basics`. See
+[Compositor overlays](overlays.md) for the card itself and the user-state file
+that remembers the dismissal.
 `quit` opens Halley's modal exit confirmation instead of stopping the
 compositor immediately. Enter confirms and Escape cancels while preserving
 the focused client beneath it. Its appearance is configured in

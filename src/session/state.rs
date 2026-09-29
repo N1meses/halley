@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufSource};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::input::{Seat, SeatState};
@@ -42,7 +42,7 @@ use crate::cursor::CursorManager;
 use crate::input::Keyboard;
 use crate::input::pointer::Pointer;
 use crate::presentation::camera::OutputCameras;
-use crate::wayland::{ClientState, WaylandState};
+use crate::wayland::WaylandState;
 
 /// Rendering and buffer-import mechanics supplied by a session backend.
 pub trait RenderDriver: 'static {
@@ -59,6 +59,7 @@ pub trait RenderDriver: 'static {
         sync: SyncPoint,
         completion: Box<dyn FnOnce() + 'static>,
     ) -> Result<(), String>;
+    fn register_dmabuf_source(&mut self, client: Client, source: DmabufSource) -> bool;
     fn register_drm_syncobj_source(
         &mut self,
         _client: Client,
@@ -117,6 +118,8 @@ pub struct Session<D: SessionDriver> {
     pub(super) launch_environment: super::environment::LaunchEnvironment,
     pub(super) autostart: super::autostart::Autostart,
     pub(super) startup_clusters: super::startup_clusters::StartupClusters,
+    /// One-time onboarding state, persisted outside the configuration.
+    pub(super) user_state: super::basics::UserState,
     pub pointer: Pointer,
     pub cursor: CursorManager,
     pub(crate) cursor_policy: super::cursor::Policy<D>,
@@ -203,7 +206,12 @@ impl<D: SessionDriver> Session<D> {
         let ext_data_control_state = DataControlState::new::<Self, _>(
             &display_handle,
             Some(&primary_selection_state),
-            |_| true,
+            |client| {
+                crate::wayland::permissions::allowed(
+                    client,
+                    crate::wayland::permissions::Capability::Clipboard,
+                )
+            },
         );
 
         WaylandState::new(
@@ -224,11 +232,17 @@ impl<D: SessionDriver> Session<D> {
             PointerGesturesState::new::<Self>(&display_handle),
             CursorShapeManagerState::new::<Self>(&display_handle),
             VirtualKeyboardManagerState::new::<Self, _>(&display_handle, |client| {
-                client.get_data::<ClientState>().is_some()
+                crate::wayland::permissions::allowed(
+                    client,
+                    crate::wayland::permissions::Capability::VirtualKeyboard,
+                )
             }),
             TextInputManagerState::new::<Self>(&display_handle),
             InputMethodManagerState::new::<Self, _>(&display_handle, |client| {
-                client.get_data::<ClientState>().is_some()
+                crate::wayland::permissions::allowed(
+                    client,
+                    crate::wayland::permissions::Capability::InputMethod,
+                )
             }),
             KeyboardShortcutsInhibitState::new::<Self>(&display_handle),
             ShmState::new::<Self>(&display_handle, vec![]),
@@ -243,6 +257,7 @@ impl<D: SessionDriver> Session<D> {
             DataDeviceState::new::<Self>(&display_handle),
             primary_selection_state,
             ext_data_control_state,
+            crate::wayland::ext_workspace::State::new::<Self>(&display_handle),
         )
     }
 
@@ -358,6 +373,96 @@ impl<D: SessionDriver> Session<D> {
         super::gesture::cancel_all(self);
         super::touch::cancel_all(self);
         self.request_redraw();
+    }
+
+    /// Records that this startup wrote the configuration file, so the first
+    /// native session can offer the one-time basics card. Existing configs and
+    /// explicitly selected paths never reach this path.
+    pub fn record_fresh_config(&mut self, fresh: bool) {
+        let Some(config_path) = self.config_path.clone() else {
+            return;
+        };
+        if fresh {
+            self.user_state.record_fresh_config(&config_path);
+        }
+    }
+
+    /// Shows the one-time basics card automatically when Halley generated this
+    /// configuration and this is its first successful native session. Nested
+    /// sessions never call this, and `first_run_eligible` refuses a nested
+    /// backend even if one did.
+    pub fn initialize_basics_card(&mut self) {
+        let Some(config_path) = self.config_path.clone() else {
+            return;
+        };
+        let eligible = super::basics::first_run_eligible(
+            D::BACKEND_KIND == crate::input::keybinds::BackendKind::Tty,
+            self.user_state.basics_card_pending_for(&config_path),
+            self.user_state.basics_card_dismissed(),
+        );
+        if eligible {
+            self.show_basics_card();
+        }
+    }
+
+    /// Shows (or reopens) the basics card without touching the one-time
+    /// automatic state. Used by the manual Lift action, `halleyctl basics`, and
+    /// the first-run path.
+    pub fn show_basics_card(&mut self) -> bool {
+        let output = self.notification_output_name();
+        let modifier = super::basics::modifier_label(self.keyboard.effective_mod).to_string();
+        if !self.shell.overlays.show_basics_card(
+            output.clone(),
+            modifier,
+            crate::frame_clock::monotonic_now(),
+        ) {
+            return false;
+        }
+        eventline::info!("basics: showing the Halley basics card on {output}");
+        self.request_redraw();
+        true
+    }
+
+    /// Dismisses the basics card and remembers that it was dismissed, so it is
+    /// never offered automatically again.
+    pub fn dismiss_basics_card(&mut self) -> bool {
+        if !self
+            .shell
+            .overlays
+            .dismiss_basics_card(crate::frame_clock::monotonic_now())
+        {
+            return false;
+        }
+        self.user_state.dismiss_basics_card();
+        self.request_redraw();
+        true
+    }
+
+    /// Shows the one-time explanation for an automatic decay collapse.
+    ///
+    /// Both the automatic and the manual collapse paths share one seam, so this
+    /// is called for every collapse and the trigger decides: a manual `Mod+N`
+    /// collapse is silent, because the user performed it deliberately and saw
+    /// it happen. An automatic collapse explains itself once per user state,
+    /// not once per application or session, and only as an ordinary non-modal
+    /// notification that takes no input.
+    pub fn note_collapse(&mut self, decay: bool, title: &str, app_id: Option<&str>) -> bool {
+        let trigger = super::decay_notice::CollapseTrigger::for_decay(decay);
+        if !super::decay_notice::explanation_due(trigger, self.user_state.decay_notice_shown()) {
+            return false;
+        }
+        let output = self.notification_output_name();
+        let message = super::decay_notice::collapsed_into_node_message(title, app_id);
+        self.shell.overlays.show_decay_notice(
+            output.clone(),
+            message,
+            self.settings.overlays.notifications.success_duration_ms,
+            crate::frame_clock::monotonic_now(),
+        );
+        self.user_state.record_decay_notice_shown();
+        eventline::info!("decay: explaining the first automatic collapse on {output}");
+        self.request_redraw();
+        true
     }
 
     pub fn cancel_exit_confirmation(&mut self) {

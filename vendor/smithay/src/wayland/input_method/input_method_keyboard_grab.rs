@@ -36,6 +36,26 @@ pub struct InputMethodKeyboardGrab {
     pub(crate) inner: Arc<Mutex<InputMethodKeyboard>>,
 }
 
+impl InputMethodKeyboardGrab {
+    /// Release only this IME's compositor grab; a newer or unrelated grab survives.
+    pub(super) fn release<D: SeatHandler + 'static>(
+        &self,
+        state: &mut D,
+        keyboard: &KeyboardHandle<D>,
+    ) {
+        self.inner.lock().unwrap().grab = None;
+        let owns_grab = keyboard
+            .with_grab(|_, grab| {
+                grab.downcast_ref::<Self>()
+                    .is_some_and(|grab| Arc::ptr_eq(&grab.inner, &self.inner))
+            })
+            .unwrap_or(false);
+        if owns_grab {
+            keyboard.unset_grab(state);
+        }
+    }
+}
+
 impl<D> KeyboardGrab<D> for InputMethodKeyboardGrab
 where
     D: SeatHandler + 'static,
@@ -100,17 +120,20 @@ impl<D: SeatHandler> fmt::Debug for InputMethodKeyboardUserData<D> {
     }
 }
 
-impl<D: SeatHandler + 'static> Dispatch<ZwpInputMethodKeyboardGrabV2, InputMethodKeyboardUserData<D>, D>
+impl<D: SeatHandler + 'static>
+    Dispatch<ZwpInputMethodKeyboardGrabV2, InputMethodKeyboardUserData<D>, D>
     for InputMethodManagerState
 {
     fn destroyed(
         state: &mut D,
         _client: ClientId,
-        _object: &ZwpInputMethodKeyboardGrabV2,
+        object: &ZwpInputMethodKeyboardGrabV2,
         data: &InputMethodKeyboardUserData<D>,
     ) {
-        data.handle.inner.lock().unwrap().grab = None;
-        data.keyboard_handle.unset_grab(state);
+        let is_current = data.handle.inner.lock().unwrap().grab.as_ref() == Some(object);
+        if is_current {
+            data.handle.release(state, &data.keyboard_handle);
+        }
     }
 
     fn request(

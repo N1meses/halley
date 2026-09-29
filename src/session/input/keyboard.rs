@@ -31,6 +31,31 @@ enum KeyboardOutcome {
     ClusterComposerMove(crate::shell::cluster_composer::Direction),
     ClusterCharacter(char),
     ClusterIntercept,
+    BasicsDismiss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BasicsKeyRouting {
+    Dismiss,
+    EvaluateNormally,
+}
+
+pub(super) fn basics_key_routing(
+    accepts_input: bool,
+    state: KeyState,
+    sym: Option<Keysym>,
+) -> BasicsKeyRouting {
+    if accepts_input
+        && state == KeyState::Pressed
+        && matches!(
+            sym,
+            Some(Keysym::Return | Keysym::KP_Enter | Keysym::Escape)
+        )
+    {
+        BasicsKeyRouting::Dismiss
+    } else {
+        BasicsKeyRouting::EvaluateNormally
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +162,17 @@ pub(super) fn handle<D, B>(
                     }
                     _ => FilterResult::Intercept(KeyboardOutcome::ClusterDeleteIntercept),
                 };
+            }
+            // The card is a one-time primer, not a modal. Intercept only its
+            // dismissal keys; all other keys continue through modal checks and
+            // the compositor keybind matcher below.
+            if basics_key_routing(
+                data.shell.overlays.basics_card_accepts_input(),
+                state,
+                handle.raw_latin_sym_or_raw_current_sym(),
+            ) == BasicsKeyRouting::Dismiss
+            {
+                return FilterResult::Intercept(KeyboardOutcome::BasicsDismiss);
             }
             if data.clusters.accepts_modal_input() {
                 if state == KeyState::Released {
@@ -364,6 +400,10 @@ pub(super) fn handle<D, B>(
             if state == KeyState::Pressed {
                 session.interactions.suppressed_keys.suppress(keycode);
             }
+        }
+        Some(KeyboardOutcome::BasicsDismiss) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            session.dismiss_basics_card();
         }
         Some(KeyboardOutcome::Action(bind)) => {
             session.interactions.suppressed_keys.suppress(keycode);

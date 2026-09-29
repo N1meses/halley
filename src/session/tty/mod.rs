@@ -103,7 +103,30 @@ impl super::RenderDriver for TtyDriver {
         &mut self,
         f: impl FnOnce(&mut smithay::backend::renderer::gles::GlesRenderer) -> T,
     ) -> T {
-        f(self.backend.renderer())
+        self.backend.with_renderer(f)
+    }
+
+    fn register_dmabuf_source(
+        &mut self,
+        client: smithay::reexports::wayland_server::Client,
+        source: smithay::backend::allocator::dmabuf::DmabufSource,
+    ) -> bool {
+        self.loop_handle
+            .insert_source(source, move |_, _, app| {
+                let dh = app.wayland.display_handle.clone();
+                smithay::wayland::compositor::CompositorHandler::client_compositor_state(
+                    app, &client,
+                )
+                .blocker_cleared(app, &dh);
+                Ok(())
+            })
+            .map(|_| true)
+            .unwrap_or_else(|err| {
+                eventline::warn!(
+                    "implicit sync: failed to register buffer readiness source: {err}"
+                );
+                false
+            })
     }
 
     fn schedule_render_completion(
@@ -275,7 +298,9 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     let initial = crate::config::load_initial(explicit_config_path);
     let config_path = initial.path;
     let runtime_config = initial.config;
-    let (backend, session_notifier, drm_notifier) = match TtyBackend::new(&runtime_config.outputs) {
+    let fresh_config = initial.fresh;
+    let (backend, session_notifier, drm_notifiers) = match TtyBackend::new(&runtime_config.outputs)
+    {
         Ok(parts) => parts,
         Err(err) => {
             eventline::error!("TtyBackend::new() failed: {err}");
@@ -397,6 +422,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         launch_environment,
         autostart: super::autostart::Autostart::enabled(),
         startup_clusters: super::startup_clusters::StartupClusters::default(),
+        user_state: super::basics::UserState::load(),
         pointer: Pointer::new((100.0, 100.0)),
         cursor: CursorManager::new(&runtime_config.cursor),
         cursor_policy: super::cursor::Policy::new(&runtime_config.cursor, loop_handle.clone()),
@@ -480,6 +506,10 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         true,
     );
     app.initialize_config_notification();
+    // The one-time basics card is offered only by a native session, and only
+    // when Halley itself generated this configuration.
+    app.record_fresh_config(fresh_config);
+    app.initialize_basics_card();
 
     let socket_name = super::protocol::init_wayland_listener(display, &mut event_loop);
     app.wayland_display = Some(socket_name.clone());
@@ -491,11 +521,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         app.run_autostart_once();
     }
 
-    if let Err(err) =
-        crate::ipc::init_ipc_listener(&event_loop.handle(), |app: &mut TtyApp, request| {
+    if let Err(err) = crate::ipc::init_ipc_listener(
+        &event_loop.handle(),
+        |app: &mut TtyApp, request| {
             crate::ipc::handle_request(app, request);
-        })
-    {
+        },
+        |app, client_id| {
+            app.screencast.disconnect(client_id);
+            app.api_subscriptions.disconnect(client_id);
+        },
+    ) {
         eventline::error!("ipc: failed to start listener: {err}");
     }
 
@@ -505,6 +540,10 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     ) {
         Ok(encoder) => app.screenshot_encoder = Some(encoder),
         Err(err) => eventline::error!("screenshot: failed to start encoder: {err}"),
+    }
+    if let Err(err) = crate::wayland::wlr_gamma_control::init_reader(&mut app, &event_loop.handle())
+    {
+        eventline::error!("gamma: failed to start reader: {err}");
     }
     super::environment::notify_ready();
     if let Some(path) = config_path {
@@ -658,13 +697,15 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         })
         .expect("failed to insert session notifier");
 
-    event_loop
-        .handle()
-        .insert_source(drm_notifier, |event, metadata, app| match event {
-            DrmEvent::VBlank(crtc) => on_vblank(app, crtc, metadata.as_ref()),
-            DrmEvent::Error(err) => eventline::error!("drm event: error {err:?}"),
-        })
-        .expect("failed to insert drm notifier");
+    for (gpu_index, drm_notifier) in drm_notifiers.into_iter().enumerate() {
+        event_loop
+            .handle()
+            .insert_source(drm_notifier, move |event, metadata, app| match event {
+                DrmEvent::VBlank(crtc) => on_vblank(app, gpu_index, crtc, metadata.as_ref()),
+                DrmEvent::Error(err) => eventline::error!("drm event: error {err:?}"),
+            })
+            .expect("failed to insert drm notifier");
+    }
 
     eventline::info!("session ready: outputs active; use the configured Quit chord to exit");
     event_loop
@@ -673,6 +714,9 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 redraw_queued_outputs(app, &loop_handle);
             }
             crate::ipc::publish_api_events(app);
+            // Every cluster mutation in this iteration is published here rather
+            // than at each mutation site.
+            super::workspace::sync_ext_workspace(app);
             let _ = app.wayland.display_handle.flush_clients();
         })
         .expect("event loop run failed");
@@ -686,8 +730,13 @@ fn presentation_time(metadata: Option<&DrmEventMetadata>) -> Option<Duration> {
     }
 }
 
-fn on_vblank(app: &mut TtyApp, crtc: crtc::Handle, metadata: Option<&DrmEventMetadata>) {
-    let Some(output) = app.driver.backend.output_for_crtc(crtc).cloned() else {
+fn on_vblank(
+    app: &mut TtyApp,
+    gpu_index: usize,
+    crtc: crtc::Handle,
+    metadata: Option<&DrmEventMetadata>,
+) {
+    let Some(output) = app.driver.backend.output_for_crtc(gpu_index, crtc).cloned() else {
         eventline::warn!("vblank received for unknown CRTC {crtc:?}");
         return;
     };
@@ -719,7 +768,7 @@ fn on_vblank(app: &mut TtyApp, crtc: crtc::Handle, metadata: Option<&DrmEventMet
                 if let Some(state) = app.driver.output_frames.get_mut(&delayed_output) {
                     state.vblank_throttle_timer_fired();
                 }
-                complete_vblank(app, crtc, &delayed_output, presented, sequence);
+                complete_vblank(app, gpu_index, crtc, &delayed_output, presented, sequence);
                 TimeoutAction::Drop
             }) {
             Ok(token) => {
@@ -735,17 +784,19 @@ fn on_vblank(app: &mut TtyApp, crtc: crtc::Handle, metadata: Option<&DrmEventMet
         }
     }
 
-    complete_vblank(app, crtc, &output, presented, sequence);
+    complete_vblank(app, gpu_index, crtc, &output, presented, sequence);
 }
 
 fn complete_vblank(
     app: &mut TtyApp,
+    gpu_index: usize,
     crtc: crtc::Handle,
     output: &Output,
     presented: Option<Duration>,
     sequence: u64,
 ) {
-    let (submission, acknowledge_failed) = match app.driver.backend.frame_submitted(crtc) {
+    let (submission, acknowledge_failed) = match app.driver.backend.frame_submitted(gpu_index, crtc)
+    {
         Ok(submission) => (submission, false),
         Err(err) => {
             eventline::warn!(
@@ -1116,8 +1167,12 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
     let camera_animating = zoom_tick.is_some_and(|(animating, _)| animating);
     let edge_pan_animating = super::input::grabbed_window_edge_pan_active_on(app, &output.name());
     if let Some((before, after)) = zoom_tick.and_then(|(_, scales)| scales) {
-        if after < before && app.clusters.active_on(&output.name()).is_none() {
-            crate::nodes::reconcile_landmarks_for_zoom(app, &output.name(), after);
+        if app.clusters.active_on(&output.name()).is_none() {
+            if after < before {
+                crate::nodes::reconcile_landmarks_for_zoom(app, &output.name(), after);
+            } else {
+                crate::nodes::restore_landmarks_for_zoom(app, &output.name(), after);
+            }
         }
         app.shell.overlays.show_zoom_indicator(
             &output.name(),

@@ -30,6 +30,65 @@ presentation, native embedded XWayland, and a typed public API.
 
 ---
 
+## Start here: the normal Field loop
+
+Halley is Field-first. Applications open onto the Field, you position them as
+you work, and you clean up when the visible Field becomes cluttered. The whole
+daily workflow is one loop:
+
+> Launch freely → position and overlap naturally → arrange when the visible
+> Field becomes messy → collapse work intentionally → retrieve it spatially →
+> use clusters later only when deliberately configured.
+
+1. **Launch freely.** `Super+D` opens Halley Lift, so whatever you start lands
+   directly on the Field.
+2. **Position and overlap naturally.** `Super+Left-drag` moves a window, and
+   ordinary windows are free to overlap instead of being solved into slots.
+3. **Arrange when the visible Field becomes messy.** `Super+A` gathers the
+   visible windows into a balanced mosaic and remembers the geometry each one
+   came from.
+4. **Collapse work intentionally.** `Super+N` collapses the focused window into
+   its clickable node — the marker that keeps the window's place on the Field —
+   and restores it again.
+5. **Retrieve it spatially.** `Super+Arrow` walks to the nearest window or node;
+   the retrieval layers below cover recent work, offscreen work, and everything
+   open across your monitors.
+6. **Use clusters later, only when deliberately configured.** A cluster is an
+   optional named context, not the way Halley expects you to organize windows.
+
+`Super+A` and `Super+N` are ordinary reversible actions, not modes. `Super+A` is
+reversible cleanup: it creates no tiling tree, no relationship, and no
+persistent layout mode, every window stays independently movable, and pressing
+it again restores the exact saved geometry. `Super+N` is a manual collapse you
+can see happen, and a collapsed node is restored by clicking it or by pressing
+`Super+N` on it again; automatic decay is a separate, conservative safety net
+for genuinely abandoned work, described in
+[nodes and decay](docs/nodes.md).
+
+Halley does not start you on numbered workspaces. Each monitor owns its own
+Field and applications live on it. Clusters and their numbered slots exist for
+people who deliberately declare or create them, and the 0.8.0 first-run card
+teaches no cluster controls at all.
+
+### Retrieval
+
+Halley keeps five retrieval mechanisms because they answer five different
+questions. They are layers, not replacements for each other.
+
+| Mechanism | Binding | Question it answers |
+|---|---|---|
+| Directional focus | `Super+Arrow` | Nearby spatial navigation — which window or node is next in this direction? |
+| Focus carousel | `Alt+Tab` / `Alt+Shift+Tab` | Recent-work navigation — what did I just come from? |
+| Bearings | `Super+Z` hold / `Super+Shift+Z` toggle | Offscreen spatial retrieval — where did work go beyond this monitor's view? |
+| Apogee | `Super+O` | Visual inventory across monitors — what is open on every display? |
+| Halley Lift | `Super+D` | Direct search by application, node, cluster, or compositor action — what is this called? |
+
+The escalation is deliberate: the arrows move one step, `Alt+Tab` recalls recent
+work, Bearings and Apogee show where things are, and Lift finds something by
+name.
+
+---
+
 ## Support Halley
 
 Halley will continue receiving updates, fixes, protocol work, and polish. The
@@ -87,11 +146,58 @@ camera. Its dimensions and offset are configurable per output. Windows outside
 that ring become candidates for timer-driven decay rather than disappearing
 because an arbitrary global window count was exceeded.
 
+Decay is conservative and optional. A newly generated config waits 10 minutes
+outside the focus ring and 90 minutes inside it before an unfocused window
+becomes a node; existing configs keep their own values, and a config without a
+`decay:` section keeps Halley's shorter built-in delays. The first automatic
+collapse explains itself once — `<Application> was collapsed into a node. Click
+the node or press Mod+N to restore it.` — in a non-modal notice that never takes
+input, and `Mod+N` collapses and restores windows by hand at any time.
+
+A fresh Halley session begins on this empty Field. A newly generated config
+declares no startup clusters, so applications you launch open directly into the
+Field. Clusters are optional named contexts you add deliberately, either by
+declaring startup clusters in `autostart` or by creating them at runtime.
+
+---
+
+## First Run
+
+A newly generated configuration's first native session shows one compositor-owned
+**Halley basics** card: the Field-first mental model, plus only the five
+operations it depends on.
+
+- `Super+D` — launch or search with Lift.
+- `Super+Left-drag` — move a window.
+- `Super+A` — arrange visible windows, or restore their saved geometry.
+- `Super+N` — collapse or restore a window.
+- `Super+O` — see everything in Apogee.
+
+The card names your configured `mod` key, so a nested `halley --winit` session
+shows `Alt+D` where a native session shows `Super+D`. It is a primer rather than
+a tutorial: it lists no zoom, Bearings, Trail, pinning, or cluster layouts, it
+never dims or blocks the desktop, and only its own dismissal keys are captured.
+`Enter`, `Escape`, or a click closes it for good. Clusters stay out of first-run
+training for 0.8.0 — the card names no cluster action, core, or layout — so you
+only meet clusters when you deliberately configure them.
+
+It appears only for a configuration Halley generated itself. Existing
+configurations, nested `halley --winit` sessions, and explicitly selected
+`-c PATH` files never show it automatically. Dismissal is remembered in
+`$XDG_STATE_HOME/halley/state.rune`, falling back to
+`~/.local/state/halley/state.rune`; that file is user state, not configuration,
+is never migrated, and is safe to delete. Reopen the card whenever you like from
+Halley Lift's **Show Halley basics** action or with `halleyctl basics`.
+
 ---
 
 ## Clusters
 
-Clusters are deliberate workspaces assembled from ordinary windows.
+Clusters come last in the Field loop, and only when you deliberately configure
+them. A runtime-created cluster is a named context assembled from windows that
+are already on the Field; nothing creates a cluster implicitly, and a session
+without clusters is a complete Halley session. You can instead declare a
+startup cluster explicitly under `autostart`.
 
 Enter cluster mode to open the Cluster Composer on the selected monitor.
 Eligible windows and collapsed nodes animate into a stable, non-overlapping
@@ -125,7 +231,7 @@ unchanged Field.
 | **Trail** | Per-output recent-focus navigation and remote inspection |
 | **Bearings** | Directional overlays and offscreen navigation |
 | **Apogee** | Multi-monitor overview and live previews |
-| **Lift** | Bundled search and action launcher |
+| **Lift** | Bundled search and action launcher, bound to `Super+D` in fresh configs |
 | **Capture** | Native menu, region, screen, and window screenshots plus portal screencasting |
 | **IPC/API** | Persistent typed clients, capability discovery, subscriptions, and `halleyctl` |
 | **XWayland** | Native embedded XWayland and compositor-owned X11 window management |
@@ -224,24 +330,24 @@ swipe, and hold actions.
 | Basic | `Super+Q` | Close the focused window |
 | Basic | `Super+F` | Toggle fullscreen |
 | Basic | `Super+M` | Toggle Field maximize |
-| Basic | `Super+N` | Toggle live/collapsed state |
+| Basic | `Super+N` | Collapse the focused window into its node, or restore it (a collapsed node also restores on click) |
 | Basic | `Super+P` | Pin or unpin the focused window |
-| Overview | `Super+O` | Toggle Apogee |
-| Focus | `Alt+Tab` / `Alt+Shift+Tab` | Cycle focus forward/backward |
-| Focus | `Super+Arrow` | Directional focus in the active context |
+| Overview | `Super+O` | Toggle Apogee, the visual inventory across monitors |
+| Focus | `Alt+Tab` / `Alt+Shift+Tab` | Recent-work navigation: cycle the focus carousel forward/backward |
+| Focus | `Super+Arrow` | Nearby spatial navigation: directional focus in the active context |
 | Focus | `Super+H` | Center the last-focused Field window |
 | Trail | `Super+,` / `Super+.` | Previous/next Trail entry |
 | Monitor | `Super+Shift+Arrow` | Focus an adjacent monitor |
 | Move | `Super+Alt+Arrow` | Move the focused Field node |
 | Resize/Tile | `Super+Ctrl+Arrow` | Resize in the Field or swap in a tiling cluster |
-| Arrange | `Super+A` | Toggle visible Field windows between a mosaic and their saved geometry |
+| Arrange | `Super+A` | Reversible cleanup: gather visible Field windows into a mosaic, or press again to restore their saved geometry |
 | Clusters | `Super+Shift+C` | Enter cluster creation mode |
 | Clusters | `Super+L` | Cycle cluster layout |
 | Clusters | `Super+V` | Toggle the focused cluster member floating |
 | Clusters | `Super+0..9` | Open a per-monitor cluster slot |
-| Bearings | `Super+Z` / `Super+Shift+Z` | Hold or toggle Bearings |
+| Bearings | `Super+Z` / `Super+Shift+Z` | Offscreen retrieval: hold or toggle Bearings |
 | Launch | `Super+T` | Open the first supported terminal |
-| Launch | `Super+D` | Open Fuzzel (Halley Lift is a commented alternative) |
+| Launch | `Super+D` | Open Halley Lift to search applications, nodes, clusters, and compositor actions (Fuzzel is a commented alternative) |
 | Reload | `Super+Shift+R` | Reload the selected configuration |
 | Zoom | `Super+-` / `Super+=` / `Super+Shift+0` | Zoom out, in, or reset |
 | Pointer | `Super+Left Mouse` | Move a window |
@@ -249,10 +355,35 @@ swipe, and hold actions.
 | Pointer | `Left Mouse` on empty Field | Pan the Field |
 | Screenshot | `Print` | Open native capture |
 
+A few rows carry the framing from the loop above. `Super+A` is reversible
+cleanup rather than a tiling mode: it writes no layout, no relationship, and no
+persistent mode, and a second press restores each window's saved geometry.
+`Super+N` collapses the focused window into its clickable node and restores it
+again, while automatic decay is a separate conservative timer for genuinely
+abandoned work. `Alt+Tab`, `Super+Arrow`, Bearings, Apogee, and Lift are the
+five retrieval layers described in [Retrieval](#retrieval). The cluster rows act
+only on clusters you declared or created yourself.
+
 The same chord may be assigned distinct actions in `field`, `cluster`, `tile`,
 and `stack` scopes. Left/right Super, Alt, Ctrl, and Shift can be matched
 independently. Compositor move, resize, and pan grabs are ordinary remappable
 bindings rather than hardcoded mouse policy.
+
+`Super+D` opens Halley Lift, the bundled search and action launcher documented
+in [`halley-lift/README.md`](halley-lift/README.md). It searches applications,
+running nodes, clusters, compositor actions, and config files from one field,
+and it can run terminal commands. Prefer a separate launcher? Any non-built-in
+action string is a command line, so replacing one line is enough:
+
+```rune
+"$var.mod+d" "fuzzel"
+```
+
+Existing 0.6-or-newer configurations keep whatever launcher they already bind.
+Only a newly generated config defaults to Halley Lift, and routine structural
+migration does not rewrite a launcher binding. Migrating an incompatible
+pre-0.6 config is the exception: after making a timestamped backup, Halley
+replaces that file with the current default config.
 
 ---
 
@@ -265,18 +396,22 @@ On first launch Halley creates
 an existing config, and configs need no version marker. Optional compatibility
 updates are explicit and structurally detected: use `halleyctl config migrate
 --dry-run` to inspect them before running `halleyctl config migrate`. Migration
-adds only a finite set of known missing bindings or sections, skips conflicting
-custom chords, validates the complete candidate, writes atomically, and retains
-a timestamped backup. A gathered root reports that the file owning the affected
-section must be migrated directly rather than guessing where to write.
+adds only a finite set of known missing bindings or sections to compatible
+0.6-or-newer configs, skips conflicting custom chords, validates the complete
+candidate, writes atomically, and retains a timestamped backup. An incompatible
+pre-0.6 config is instead backed up and replaced with the current default. A
+gathered root reports that the file owning the affected section must be migrated
+directly rather than guessing where to write.
 
 Pass `-c PATH` or `--config PATH` to select another file. Valid edits reload as
 one atomic snapshot; invalid edits leave the last valid runtime state active.
 Nested Rune `gather` dependencies are watched recursively, including missing
 dependencies that are created after startup.
 
-The `autostart` section can also declare persistent named clusters using compact
-command arrays, including empty `members []` declarations. See
+A freshly generated config declares no startup clusters, so windows begin on the
+empty Field. The optional `autostart` section can still declare persistent named
+clusters using compact command arrays, including empty `members []`
+declarations. See
 [startup clusters](docs/clusters.md#startup-clusters) for syntax, launch
 attribution, output placement, and restart behavior.
 

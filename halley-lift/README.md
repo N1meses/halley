@@ -14,6 +14,32 @@ You can also seed an initial query:
 halley-lift cluster release
 ```
 
+## Launching From Halley
+
+A freshly generated Halley config binds `Mod+D` to `halley-lift`, so Lift is the
+default front door for launching applications and for retrieving work that is
+already running. Halley launches it as an ordinary command line with the session
+environment, so no arguments or environment variables are required and the whole
+integration is one line in the `keybinds` section.
+
+Startup never rewrites an existing configuration, and routine structural
+migration preserves launcher bindings in 0.6-or-newer configs. (Explicitly
+migrating an incompatible pre-0.6 config backs it up and installs the current
+default.) Keep exactly one launcher on `Mod+D`. To use the bundled launcher:
+
+```rune
+"$var.mod+d" "halley-lift"
+```
+
+To use Fuzzel, replace that line with:
+
+```rune
+"$var.mod+d" "fuzzel"
+```
+
+Halley owns that keybind and Lift owns its own window and appearance in
+`lift.rune`, so the two configurations stay independent.
+
 ## Search Prefixes
 
 Lift searches everything by default. Prefixing the query with a provider name filters results without changing the search text into a badge.
@@ -58,6 +84,18 @@ Cluster Draft: release · 3 selected
 At that point Lift opens Halley's existing Cluster Finalize popup with a name hint and selected running node IDs. Staged apps are launched only during this handoff, and the compositor auto-selects matching newly appearing nodes while that finalize prompt is active.
 
 Lift does not directly persist clusters. The finalize popup owns naming, confirmation, and final creation.
+
+## Compositor Actions
+
+The `action` provider exposes compositor-owned actions:
+
+- **Reload Halley config** — reload the selected configuration immediately.
+- **Show Halley basics** — reopen Halley's one-time basics card, which names the
+  Field-first mental model and the five essential chords. The card is offered
+  automatically once to a freshly generated configuration's first native
+  session; this action always works, whether or not that card was already
+  dismissed, so it doubles as the development path for inspecting the card in a
+  nested `halley --winit` session.
 
 ## Pins
 

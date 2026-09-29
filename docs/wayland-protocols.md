@@ -1,7 +1,7 @@
 # Wayland protocol support
 
 Halley advertises `zwp_text_input_manager_v3` version 1 and
-`zwp_input_method_manager_v2` version 1. Native Wayland clients bind
+`zwp_input_method_manager_v2` version 1 (`input-method-unstable-v2`). Native Wayland clients bind
 text-input to send surrounding text and receive preedit and committed
 composition. Input-method is restricted to ordinary compositor clients
 (the same `ClientState` filter as virtual-keyboard), so fcitx and ibus
@@ -10,6 +10,21 @@ focus: a `WlSurface` enter/leave updates text-input automatically, IME
 candidate windows track the focused parent through the existing popup
 tree, and an IME keyboard grab is not replaced by an xdg-popup grab.
 X11 applications keep using X11 IME and do not participate in this pair.
+This is interface version 1 of the v3 protocol; the newer interface-version-2
+requests and events are not advertised.
+
+Halley's vendored Smithay buffers IME edits until commit, uses each text-input
+object's commit count for `done`, resets pending state on enable and focus loss,
+and rejects additional IMEs without disturbing the active one. Candidate popups
+are visible only while a text input is enabled; all live popups receive caret
+updates, including the current rectangle at creation. Destroying an IME releases
+its keyboard grab and removes its popups. Old keyboard objects cannot release a
+replacement grab. Socket-level
+regressions in `tests/text_input_protocol.rs` exercise these transitions with
+real Wayland requests and events. Run them with
+`cargo test -p halley --test text_input_protocol`. These tests validate protocol
+handling; candidate-window rendering and toolkit integration still require a
+live IME session.
 
 Halley advertises `ext_background_effect_manager_v1` version 1 with the blur
 capability. A committed `set_blur_region` is clipped to the requesting
@@ -98,8 +113,16 @@ and commits a DMA-BUF with acquire and release points. The acquire point
 blocks only that surface transaction without stalling the compositor event
 loop; Smithay signals the release point when the compositor drops its final
 reference to the buffer. The nested winit backend never advertises this
-hardware protocol, and ordinary implicit-sync clients retain the existing
-commit and render path.
+hardware protocol, and a surface that opts into explicit sync never also waits
+on implicit fences.
+
+Implicit-sync clients are covered separately. A newly committed DMA-BUF whose
+planes are not yet readable is withheld from composited state until every
+plane's readiness fence has signalled, so an unfinished buffer is never
+imported or sampled and the compositor's event loop keeps running while it is
+pending. If the readiness source cannot be registered, the buffer is committed
+normally with a logged warning instead of installing a blocker that could never
+be cleared, which would freeze the surface permanently.
 
 Halley advertises `zwlr_output_manager_v1` version 4 as a writable output
 management interface. Every request is validated as one complete, one-head-
@@ -136,3 +159,11 @@ They are independent: data-control, idle notification/inhibition, presentation
 timing, output control, capture, and blur do not require one another, and
 clients that do not bind them follow Halley's existing rendering, clipboard,
 and input paths.
+
+To test input-method-v2, start the newly installed Halley in a fresh compositor
+session, run a Wayland-capable IME, and focus a native Wayland text-input-v3
+application. Check preedit, candidate selection, committed text, moving between
+fields, and restarting the IME. An already running compositor keeps its old
+protocol implementation until it is restarted. `wayland-info` should list
+`zwp_input_method_manager_v2` at version 1; the `v2` in the interface name is the
+protocol generation, not the advertised interface version.

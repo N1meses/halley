@@ -181,9 +181,17 @@ impl ProviderIndex {
         }
 
         results.retain(|result| mode_allows(ctx.mode, &result.kind));
+        let empty_general = ctx.mode == LiftMode::General && ctx.query_lower.is_empty();
         results.sort_by(|a, b| {
             b.is_field_pinned
                 .cmp(&a.is_field_pinned)
+                .then_with(|| {
+                    if empty_general {
+                        provider_rank(&a.kind).cmp(&provider_rank(&b.kind))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| b.score.total_cmp(&a.score))
                 .then_with(|| a.section.cmp(&b.section))
                 .then_with(|| a.title.cmp(&b.title))
@@ -437,12 +445,20 @@ fn create_cluster_result(_query: &str) -> LiftResult {
 }
 
 fn search_actions(ctx: &SearchContext) -> Vec<LiftResult> {
-    let actions = [(
-        "reload-config",
-        "Reload Halley config",
-        "Compositor action",
-        LiftAction::ReloadConfig,
-    )];
+    let actions = [
+        (
+            "reload-config",
+            "Reload Halley config",
+            "Compositor action",
+            LiftAction::ReloadConfig,
+        ),
+        (
+            "show-halley-basics",
+            "Show Halley basics",
+            "Compositor action",
+            LiftAction::ShowBasics,
+        ),
+    ];
     actions
         .into_iter()
         .filter_map(|(_id, title, subtitle, action)| {
@@ -511,6 +527,10 @@ pub fn activate_result(index: &ProviderIndex, result: &LiftResult) -> Result<(),
         LiftAction::ReloadConfig => index
             .client()?
             .reload_config()
+            .map_err(|error| error.to_string()),
+        LiftAction::ShowBasics => index
+            .client()?
+            .show_basics()
             .map_err(|error| error.to_string()),
         LiftAction::OpenConfig { path } => launch_editor(path, index.terminal.as_str()),
         LiftAction::CreateCluster => Ok(()),
@@ -669,6 +689,18 @@ impl ProviderIndex {
         self.client
             .as_deref()
             .ok_or_else(|| "Halley compositor API is unavailable".into())
+    }
+}
+
+fn provider_rank(kind: &LiftResultKind) -> u8 {
+    match kind {
+        LiftResultKind::App => 0,
+        LiftResultKind::Node => 1,
+        LiftResultKind::Cluster => 2,
+        LiftResultKind::Action => 3,
+        LiftResultKind::Config => 4,
+        LiftResultKind::CreateCluster => 5,
+        LiftResultKind::Term => 6,
     }
 }
 
@@ -959,6 +991,212 @@ exec '\''/bin/zsh'\'' -i'"#
             results
                 .iter()
                 .any(|result| result.section == "Running Nodes")
+        );
+    }
+
+    fn provider_index_with_every_provider() -> ProviderIndex {
+        ProviderIndex {
+            apps: vec![app("kitty", "Kitty", "kitty", "kitty")],
+            nodes: vec![CachedNode {
+                id: 7,
+                title: "notes.txt - editor".into(),
+                subtitle: "editor on DP-1".into(),
+                search_text: "notes.txt - editor editor DP-1".to_ascii_lowercase(),
+                pinned: false,
+            }],
+            clusters: vec![CachedCluster {
+                id: 3,
+                title: "Release".into(),
+                subtitle: "2 members on DP-1".into(),
+                search_text: "release 3 DP-1".to_ascii_lowercase(),
+            }],
+            live_loaded: true,
+            live_rx: None,
+            live_wake: None,
+            terminal: "kitty -e".into(),
+            terminal_icon_name: None,
+            client: None,
+        }
+    }
+
+    /// Milestone 2: a fresh `Mod+D` press must make launching *and* retrieval
+    /// immediately understandable. An empty query is exactly what Lift computes
+    /// on open, so every documented provider stays represented, with the plain
+    /// General-mode section names and their launch/open hints.
+    #[test]
+    fn empty_general_query_keeps_every_provider_available() {
+        let index = provider_index_with_every_provider();
+        let results = index.search(&SearchContext {
+            mode: LiftMode::General,
+            query: String::new(),
+            query_lower: String::new(),
+            max_results: 40,
+            draft_count: 0,
+        });
+
+        for (kind, section) in [
+            (LiftResultKind::App, "Applications"),
+            (LiftResultKind::Node, "Nodes"),
+            (LiftResultKind::Cluster, "Existing Clusters"),
+            (LiftResultKind::Action, "Actions"),
+            (LiftResultKind::Config, "Config"),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.kind == kind)
+                .unwrap_or_else(|| panic!("a fresh search must still offer {kind:?}"));
+            assert_eq!(
+                result.section, section,
+                "{kind:?} keeps its General section"
+            );
+        }
+
+        let app_result = results
+            .iter()
+            .find(|result| result.kind == LiftResultKind::App)
+            .expect("application provider");
+        assert_eq!(app_result.shortcut_hint.as_deref(), Some("Enter launch"));
+        let node_result = results
+            .iter()
+            .find(|result| result.kind == LiftResultKind::Node)
+            .expect("node provider");
+        assert_eq!(node_result.shortcut_hint.as_deref(), Some("Enter open"));
+
+        let placeholder = LiftConfig::default().placeholder;
+        for provider in ["apps", "nodes", "clusters", "actions"] {
+            assert!(
+                placeholder.contains(provider),
+                "the default empty state must name the {provider} provider: {placeholder:?}"
+            );
+        }
+    }
+
+    /// The default result cap must not let cluster score bonuses hide the
+    /// primary application-launch provider on a fresh `Mod+D` press.
+    #[test]
+    fn empty_general_query_orders_providers_before_default_truncation() {
+        let mut index = provider_index_with_every_provider();
+        index.apps = (0..8)
+            .map(|idx| {
+                app(
+                    format!("app-{idx}").as_str(),
+                    format!("App {idx}").as_str(),
+                    "true",
+                    "application-x-executable",
+                )
+            })
+            .collect();
+        index.nodes = (0..3)
+            .map(|idx| CachedNode {
+                id: idx,
+                title: format!("Node {idx}"),
+                subtitle: "window on DP-1".into(),
+                search_text: format!("node {idx}"),
+                pinned: false,
+            })
+            .collect();
+        index.clusters = (0..4)
+            .map(|idx| CachedCluster {
+                id: idx,
+                title: format!("Cluster {idx}"),
+                subtitle: "2 members on DP-1".into(),
+                search_text: format!("cluster {idx}"),
+            })
+            .collect();
+
+        let results = index.search(&SearchContext {
+            mode: LiftMode::General,
+            query: String::new(),
+            query_lower: String::new(),
+            max_results: LiftConfig::default().max_results,
+            draft_count: 0,
+        });
+
+        assert_eq!(results.len(), 12);
+        assert!(
+            results[..8]
+                .iter()
+                .all(|result| result.kind == LiftResultKind::App),
+            "applications must lead the default empty state: {results:#?}"
+        );
+        assert!(
+            results[8..11]
+                .iter()
+                .all(|result| result.kind == LiftResultKind::Node),
+            "running nodes must follow applications: {results:#?}"
+        );
+        assert_eq!(
+            results[11].kind,
+            LiftResultKind::Cluster,
+            "advanced providers follow application launch and node retrieval"
+        );
+    }
+
+    /// The documented prefixes keep their provider reachable and do not leak
+    /// unrelated results: `app`, `node`, `cluster`, `action`, `config`, `term`.
+    #[test]
+    fn documented_modes_keep_each_provider_reachable() {
+        let index = provider_index_with_every_provider();
+        for (mode, kind) in [
+            (LiftMode::Apps, LiftResultKind::App),
+            (LiftMode::Nodes, LiftResultKind::Node),
+            (LiftMode::Clusters, LiftResultKind::Cluster),
+            (LiftMode::Actions, LiftResultKind::Action),
+            (LiftMode::Config, LiftResultKind::Config),
+            (LiftMode::Term, LiftResultKind::Term),
+        ] {
+            let results = index.search(&SearchContext {
+                mode,
+                query: String::new(),
+                query_lower: String::new(),
+                max_results: 40,
+                draft_count: 0,
+            });
+            assert!(
+                results.iter().any(|result| result.kind == kind),
+                "{mode:?} must still offer its {kind:?} provider"
+            );
+            assert!(
+                results.iter().all(|result| mode_allows(mode, &result.kind)),
+                "{mode:?} must not leak unrelated providers"
+            );
+        }
+    }
+
+    /// Milestone 3: the one-time basics card can always be reopened by hand
+    /// from Lift, with a self-describing action title.
+    #[test]
+    fn actions_provider_offers_the_manual_basics_card_reopen() {
+        let index = provider_index_with_every_provider();
+        let results = index.search(&SearchContext {
+            mode: LiftMode::Actions,
+            query: "halley basics".into(),
+            query_lower: "halley basics".into(),
+            max_results: 40,
+            draft_count: 0,
+        });
+
+        let basics = results
+            .iter()
+            .find(|result| matches!(result.action, LiftAction::ShowBasics))
+            .expect("the actions provider offers Show Halley basics");
+        assert_eq!(basics.title, "Show Halley basics");
+        assert_eq!(basics.kind, LiftResultKind::Action);
+        assert_eq!(basics.section, "Actions");
+        assert_eq!(basics.shortcut_hint.as_deref(), Some("Enter"));
+
+        // The existing compositor actions stay offered.
+        let reload = index.search(&SearchContext {
+            mode: LiftMode::Actions,
+            query: "reload".into(),
+            query_lower: "reload".into(),
+            max_results: 40,
+            draft_count: 0,
+        });
+        assert!(
+            reload
+                .iter()
+                .any(|result| matches!(result.action, LiftAction::ReloadConfig))
         );
     }
 

@@ -1,9 +1,13 @@
 # Clusters
 
-A cluster is a persistent named workspace represented by one core in the Field.
-Opening the core presents its members in either tiling or stacking layout. A
-cluster remains valid when it has no members: closing the final member leaves
-its name, slot, layout, and core available for later use.
+A cluster is an optional, persistent named workspace represented by one core in
+the Field, and it is the last step of the Field loop: you create one deliberately
+from windows that are already on the Field when a group of work is worth naming.
+A session without any cluster is a complete Halley session, and a freshly
+generated configuration declares none. Opening the core presents its members in
+either tiling or stacking layout. A cluster remains valid when it has no
+members: closing the final member leaves its name, slot, layout, and core
+available for later use.
 
 Opening or selecting an empty cluster briefly shows a centered `name · layout`
 label so the otherwise blank workspace remains identifiable. A populated
@@ -17,7 +21,10 @@ position with the least overlap.
 
 During zoom-out, unpinned collapsed cores and ordinary nodes reflow together
 when their screen-constant collision footprints would overlap each other or an
-active window. Pinned landmarks remain fixed.
+active window. Pinned landmarks remain fixed. A core displaced this way keeps a
+pre-zoom home and returns to it as the footprint shrinks again on zoom-in,
+unless a drag, a physical push, or a cluster operation rebases the core's
+position first.
 
 ## Deleting a workspace
 
@@ -70,11 +77,16 @@ Fields:
 At most ten clusters can occupy an output. Startup cores are arranged as a
 centered row near the top of each output, in declaration order.
 
-A freshly bootstrapped config and both shipped config examples declare twelve
-empty numbered workspaces: `1` through `6` initially on the sample `DP-1`
-output, and `7` through `12` on `DP-2`. They launch no applications. Replace
-the sample connector names, rename the workspaces, or remove declarations to
-match the machine. Existing user configs are never rewritten by bootstrap.
+A freshly bootstrapped config declares no startup clusters, and neither shipped
+config example declares any either. A new session therefore begins on an empty
+Field: windows you launch open directly into it. Numbered cluster slots are an
+opt-in way to revisit named workspaces later, not Halley's default way to
+organize windows.
+Startup clusters are opt-in — add `autostart.cluster` declarations like the ones
+above only when you want an output to begin with a named core. Existing user
+configs are never rewritten by bootstrap, so a config that already declares
+startup clusters keeps creating those cores at session startup exactly as
+before.
 
 ### Launch attribution
 
