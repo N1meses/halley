@@ -122,6 +122,26 @@ mod tests {
     }
 
     #[test]
+    fn continuous_samples_keep_the_displayed_rate_live_when_frame_cadence_changes() {
+        let mut state = DebugFpsOverlay::default();
+        state.sample("DP-1", Duration::ZERO);
+        for tick in 1..=50 {
+            state.sample("DP-1", Duration::from_millis(tick * 10));
+        }
+        assert_eq!(fps_label(state.samplers["DP-1"].fps), "100 FPS");
+        for tick in 1..=12 {
+            assert_eq!(
+                state.sample("DP-1", Duration::from_millis(500 + tick * 20)),
+                100.0
+            );
+        }
+        assert_eq!(
+            fps_label(state.sample("DP-1", Duration::from_millis(760))),
+            "50 FPS"
+        );
+    }
+
+    #[test]
     fn label_rounds_and_clamps_extreme_values() {
         assert_eq!(fps_label(59.6), "60 FPS");
         assert_eq!(fps_label(-5.0), "0 FPS");
