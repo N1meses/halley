@@ -10,6 +10,7 @@ use smithay::backend::renderer::{ContextId, DebugFlags, Frame, RendererSuper, Te
 use smithay::utils::user_data::UserDataMap;
 
 use super::*;
+use crate::session::tty::FrameDemand;
 
 const RED: Color32F = Color32F::new(1.0, 0.0, 0.0, 1.0);
 const GREEN: Color32F = Color32F::new(0.0, 1.0, 0.0, 1.0);
@@ -298,6 +299,122 @@ fn unchanged_scene_skips_composition_and_transfer_for_repeated_pointer_redraws()
     }
     assert_eq!(renderer.frames, 2);
     assert_eq!(target.pixel(15, 15), RED);
+}
+
+#[test]
+fn fps_samples_redraw_only_changed_chip_pixels_on_primary_and_secondary_outputs() {
+    let fps = FrameDemand::new(false, true);
+    assert!(fps.keep_redrawing);
+    let mut renderer = RasterRenderer::default();
+    let (mut frame, texture) = compose(&mut renderer);
+    let mut primary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+    let mut secondary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+    let mut primary = RasterTexture::new((100, 80));
+    let mut secondary = RasterTexture::new((100, 80));
+    let chip_ids: [Id; 5] = std::array::from_fn(|_| Id::new());
+    let background = solid(&Id::new(), (0, 0, 100, 80), 0, RED);
+    for tick in 0..=100 {
+        // The live number changes at quarter-second intervals; scene samples
+        // continue at 100 Hz even while its pixels are unchanged.
+        let commit = tick / 25;
+        let color = if commit % 2 == 0 { WHITE } else { GREEN };
+        let scene = [
+            solid(&chip_ids[commit], (5, 5, 20, 8), 0, color),
+            background.clone(),
+        ];
+        let age = usize::from(tick != 0 && !fps.force_full_repaint);
+        let primary_damage = primary_tracker
+            .render_output(&mut renderer, &mut primary, age, &scene, Color32F::BLACK)
+            .unwrap()
+            .damage
+            .cloned()
+            .unwrap_or_default();
+        frame
+            .render(
+                &mut renderer,
+                &scene,
+                Color32F::BLACK,
+                fps.force_full_repaint,
+            )
+            .unwrap();
+        let secondary_damage = present(
+            &mut renderer,
+            &mut secondary_tracker,
+            &mut secondary,
+            &frame,
+            age,
+        );
+        for damage in [&primary_damage, &secondary_damage] {
+            if tick == 0 {
+                assert_eq!(damage.as_slice(), [Rectangle::from_size((100, 80).into())]);
+            } else if tick % 25 == 0 {
+                assert!(!damage.is_empty());
+                assert!(
+                    damage
+                        .iter()
+                        .all(|rect| rect.size.w * rect.size.h < 100 * 80)
+                );
+            } else {
+                assert!(damage.is_empty());
+            }
+        }
+        assert_eq!(primary.pixel(5, 5), color);
+        assert_eq!(secondary.pixel(5, 5), color);
+        assert_eq!(secondary.pixel(50, 50), RED);
+        assert_eq!(*primary.pixels.borrow(), *texture.pixels.borrow());
+        assert_eq!(*primary.pixels.borrow(), *secondary.pixels.borrow());
+    }
+    // Five changed scenes, one primary render and two cross-GPU stages each.
+    assert_eq!(renderer.frames, 15);
+}
+
+#[test]
+fn scene_animation_with_or_without_fps_still_forces_full_primary_and_secondary_repaints() {
+    for fps_visible in [false, true] {
+        let animation = FrameDemand::new(true, fps_visible);
+        assert!(animation.keep_redrawing);
+        let mut renderer = RasterRenderer::default();
+        let (mut frame, texture) = compose(&mut renderer);
+        let mut primary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+        let mut secondary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+        let mut primary = RasterTexture::new((100, 80));
+        let mut secondary = RasterTexture::new((100, 80));
+        let animated = Id::new();
+        for x in [5, 10, 10, 15] {
+            let scene = [solid(&animated, (x, 5, 5, 5), 0, WHITE)];
+            let age = usize::from(!animation.force_full_repaint);
+            let damage = primary_tracker
+                .render_output(&mut renderer, &mut primary, age, &scene, Color32F::BLACK)
+                .unwrap()
+                .damage
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(damage, [Rectangle::from_size((100, 80).into())]);
+            frame
+                .render(
+                    &mut renderer,
+                    &scene,
+                    Color32F::BLACK,
+                    animation.force_full_repaint,
+                )
+                .unwrap();
+            assert_eq!(
+                present(
+                    &mut renderer,
+                    &mut secondary_tracker,
+                    &mut secondary,
+                    &frame,
+                    age
+                ),
+                [Rectangle::from_size((100, 80).into())]
+            );
+            assert_eq!(*primary.pixels.borrow(), *texture.pixels.borrow());
+            assert_eq!(*primary.pixels.borrow(), *secondary.pixels.borrow());
+            assert_eq!(secondary.pixel(x, 5), WHITE);
+        }
+        assert_eq!(secondary.pixel(5, 5), Color32F::BLACK);
+        assert_eq!(renderer.frames, 12);
+    }
 }
 
 #[test]
@@ -739,4 +856,109 @@ fn framebuffer_effect_recaptures_when_background_changes_and_reuses_when_static(
     }
     assert_eq!(*captures.borrow(), [RED, GREEN]);
     assert_eq!(renderer.frames, 2);
+}
+
+#[test]
+fn fps_selective_damage_preserves_effect_capture_on_primary_and_secondary_outputs() {
+    let fps = FrameDemand::new(false, true);
+    let mut renderer = RasterRenderer::default();
+    let (mut frame, texture) = compose(&mut renderer);
+    let mut primary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+    let mut secondary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+    let mut primary = RasterTexture::new((100, 80));
+    let mut secondary = RasterTexture::new((100, 80));
+    let primary_captures = Rc::new(RefCell::new(Vec::new()));
+    let secondary_captures = Rc::new(RefCell::new(Vec::new()));
+    let chip = Id::new();
+    let effect = Id::new();
+    let patch = Id::new();
+    let background = Id::new();
+    for (tick, (chip_commit, patch_commit, color)) in [
+        (0, 0, RED),
+        (0, 0, RED),
+        (1, 0, RED),
+        (1, 1, GREEN),
+        (1, 1, GREEN),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let scene = |captures: Rc<RefCell<Vec<Color32F>>>| {
+            vec![
+                EffectElement {
+                    solid: solid(
+                        &chip,
+                        (2, 2, 10, 5),
+                        chip_commit,
+                        if chip_commit == 0 { WHITE } else { GREEN },
+                    ),
+                    captures: None,
+                },
+                EffectElement {
+                    solid: solid(
+                        &effect,
+                        (10, 10, 20, 20),
+                        0,
+                        Color32F::new(0.0, 0.0, 0.0, 0.5),
+                    ),
+                    captures: Some(captures),
+                },
+                EffectElement {
+                    solid: solid(&patch, (10, 10, 20, 20), patch_commit, color),
+                    captures: None,
+                },
+                EffectElement {
+                    solid: solid(&background, (0, 0, 100, 80), 0, RED),
+                    captures: None,
+                },
+            ]
+        };
+        let age = usize::from(tick != 0 && !fps.force_full_repaint);
+        let damage = primary_tracker
+            .render_output(
+                &mut renderer,
+                &mut primary,
+                age,
+                &scene(primary_captures.clone()),
+                Color32F::BLACK,
+            )
+            .unwrap()
+            .damage
+            .cloned()
+            .unwrap_or_default();
+        frame
+            .render(
+                &mut renderer,
+                &scene(secondary_captures.clone()),
+                Color32F::BLACK,
+                fps.force_full_repaint,
+            )
+            .unwrap();
+        let transfer = present(
+            &mut renderer,
+            &mut secondary_tracker,
+            &mut secondary,
+            &frame,
+            age,
+        );
+        if tick != 0 {
+            assert!(
+                damage
+                    .iter()
+                    .all(|rect| rect.size.w * rect.size.h < 100 * 80)
+            );
+            assert!(
+                transfer
+                    .iter()
+                    .all(|rect| rect.size.w * rect.size.h < 100 * 80)
+            );
+        }
+        assert_eq!(*primary.pixels.borrow(), *texture.pixels.borrow());
+        assert_eq!(*primary.pixels.borrow(), *secondary.pixels.borrow());
+    }
+    assert_eq!(*primary_captures.borrow(), [RED, GREEN]);
+    assert_eq!(*secondary_captures.borrow(), [RED, GREEN]);
+    assert_eq!(secondary.pixel(15, 15), Color32F::new(0.0, 0.5, 0.0, 1.0));
+    assert_eq!(secondary.pixel(50, 50), RED);
+    assert_eq!(renderer.frames, 9);
 }

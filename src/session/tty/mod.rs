@@ -36,6 +36,7 @@ use crate::render::{
 };
 use crate::wayland;
 
+pub(crate) use self::frame::FrameDemand;
 use self::frame::{EstimatedVblankTimer, OutputFrameState, VblankAction};
 use super::RenderDriver as _;
 
@@ -1279,7 +1280,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         app.cursor_policy
             .schedule_animation(output, next_cursor_frame);
     }
-    let mut animating = camera_animating
+    let scene_animating = camera_animating
         || edge_pan_animating
         || fullscreen_camera_changed
         || window_animating
@@ -1293,8 +1294,11 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         || overlay_animating
         || cluster_animating
         || fullscreen_animating
-        || maximize_animating
-        || app.settings.debug.overlay_fps && !app.session_lock.active();
+        || maximize_animating;
+    let mut frame_demand = FrameDemand::new(
+        scene_animating,
+        app.settings.debug.overlay_fps && !app.session_lock.active(),
+    );
     if pointer_is_on_output {
         let time = app.start_time.elapsed().as_millis() as u32;
         if cluster_camera_changed || fullscreen_animating || maximize_animating || arrange_animating
@@ -1319,7 +1323,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             frame: FrameContext {
                 target_presentation_time,
                 vrr_auto_eligible,
-                force_full_repaint: animating,
+                force_full_repaint: frame_demand.force_full_repaint,
                 clear: CLEAR_COLOR,
             },
             desktop: DesktopContext {
@@ -1374,12 +1378,12 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             RenderOutcome::new(RenderStatus::Skipped, None)
         }
     };
-    animating |= app.render.node_renderer.has_pending_icons();
+    frame_demand.keep_redrawing |= app.render.node_renderer.has_pending_icons();
     if app.window_animations.cleanup(target_presentation_time) {
         // The frame just composed can still scale a lagging pre-configure
         // client buffer into the arrangement endpoint. Owe one live-geometry
         // frame after retiring that endpoint so it cannot stay latched.
-        animating = true;
+        frame_demand.keep_redrawing = true;
         super::pointer::update_client_state(app, app.start_time.elapsed().as_millis() as u32);
     }
     app.render
@@ -1393,7 +1397,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         // the scene this frame rendered is the last one drawn from those
         // textures. One more frame is owed to swap back to the live surfaces;
         // without it the swap waits on unrelated damage and lands as a pop.
-        animating = true;
+        frame_demand.keep_redrawing = true;
         super::sync_keyboard_focus(app, smithay::utils::SERIAL_COUNTER.next_serial());
         super::pointer::update_client_state(app, app.start_time.elapsed().as_millis() as u32);
     }
@@ -1424,7 +1428,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             .get_mut(output)
             .expect("rendered output has frame state");
         state.advance_frame_callback_sequence();
-        if let Some(token) = state.frame_submitted(animating) {
+        if let Some(token) = state.frame_submitted(frame_demand.keep_redrawing) {
             loop_handle.remove(token);
         }
         // The compositor has latched every client buffer used by this frame.
@@ -1436,7 +1440,13 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         return;
     }
 
-    queue_estimated_vblank_timer(app, output, animating, loop_handle);
+    queue_estimated_vblank_timer(
+        app,
+        output,
+        frame_demand.keep_redrawing,
+        outcome.element_states().is_some(),
+        loop_handle,
+    );
 }
 
 fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
@@ -1489,7 +1499,8 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
 fn queue_estimated_vblank_timer(
     app: &mut TtyApp,
     output: &Output,
-    animating: bool,
+    keep_redrawing: bool,
+    scene_ready: bool,
     loop_handle: &LoopHandle<'_, TtyApp>,
 ) {
     let state = app
@@ -1498,7 +1509,9 @@ fn queue_estimated_vblank_timer(
         .get_mut(output)
         .expect("estimated-vblank output has frame state");
     let now = crate::frame_clock::monotonic_now();
-    let EstimatedVblankTimer::ArmAfter(delay) = state.frame_skipped(animating, now) else {
+    let EstimatedVblankTimer::ArmAfter(delay) =
+        state.frame_skipped(keep_redrawing, scene_ready, now)
+    else {
         return;
     };
     let output = output.clone();
