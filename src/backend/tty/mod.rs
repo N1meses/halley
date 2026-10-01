@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use std::error::Error;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
+mod composition;
 mod dmabuf;
 mod gamma;
 mod output;
@@ -20,16 +20,13 @@ use smithay::backend::drm::{
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::renderer::ImportDma;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
-use smithay::backend::renderer::element::{
-    Element, Kind, RenderElement, RenderElementPresentationState, RenderElementState,
-    RenderElementStates, UnderlyingStorage,
-};
+use smithay::backend::renderer::element::texture::TextureRenderElement;
+use smithay::backend::renderer::element::{Element, Kind, UnderlyingStorage};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
 use smithay::backend::renderer::utils::{DamageSet, OpaqueRegions};
-use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer, RendererSuper, Texture};
+use smithay::backend::renderer::{Offscreen, RendererSuper};
 use smithay::backend::session::Session;
 use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
 use smithay::backend::udev;
@@ -37,10 +34,11 @@ use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::reexports::drm::control::{Mode, connector, crtc};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::DeviceFd;
+use smithay::utils::Scale;
 use smithay::utils::user_data::UserDataMap;
-use smithay::utils::{Rectangle, Scale};
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
+use self::composition::ComposedFrame;
 use self::output::{
     OutputState as HardwareOutputState, connector_name, connector_output_info, default_mode,
     drm_output_mode, output_diff, output_target,
@@ -219,61 +217,6 @@ impl<'render> smithay::backend::renderer::element::RenderElement<TtyMultiRendere
     }
 }
 
-/// Recreate the per-scene element states while a secondary output is fed by a
-/// single composed texture. `DrmOutput::render_frame` can only report the
-/// synthetic texture element in that path, but presentation and DMA-BUF
-/// feedback still need the original Wayland surface ids and visibility.
-fn scene_element_states<E: Element>(
-    elements: &[E],
-    scale: Scale<f64>,
-    damage: Rectangle<i32, smithay::utils::Physical>,
-) -> RenderElementStates {
-    let mut states = RenderElementStates::default();
-    let mut opaque_regions = Vec::new();
-
-    for element in elements {
-        let geometry = element.geometry(scale);
-        let visible_regions = geometry.subtract_rects(opaque_regions.iter().copied());
-        if visible_regions.is_empty() {
-            states.states.insert(
-                element.id().clone(),
-                RenderElementState {
-                    visible_area: 0,
-                    presentation_state: RenderElementPresentationState::Skipped,
-                    needs_capture: false,
-                },
-            );
-            continue;
-        }
-
-        let visible_area = visible_regions
-            .iter()
-            .filter_map(|region| region.intersection(damage))
-            .map(|region| {
-                (region.size.w.max(0) as usize).saturating_mul(region.size.h.max(0) as usize)
-            })
-            .sum();
-        states.states.insert(
-            element.id().clone(),
-            RenderElementState {
-                visible_area,
-                presentation_state: if visible_area == 0 {
-                    RenderElementPresentationState::Skipped
-                } else {
-                    RenderElementPresentationState::Rendering { reason: None }
-                },
-                needs_capture: false,
-            },
-        );
-        opaque_regions.extend(element.opaque_regions(scale).into_iter().map(|mut region| {
-            region.loc += geometry.loc;
-            region
-        }));
-    }
-
-    states
-}
-
 fn composed_texture_sizes(
     mode_size: smithay::utils::Size<i32, smithay::utils::Buffer>,
     transform: smithay::utils::Transform,
@@ -331,6 +274,8 @@ struct DrmOutputEntry {
     dpms_enabled: bool,
     enabled: bool,
     gamma: gamma::GammaState,
+    // Retained composition belongs to this output's lifetime, not its name.
+    composed_frame: Option<ComposedFrame<smithay::backend::renderer::gles::GlesTexture>>,
 }
 
 #[derive(Debug)]
@@ -381,7 +326,6 @@ pub struct TtyBackend {
     ipc_output_info: Vec<halley_ipc::OutputInfo>,
     primary_render_node: DrmNode,
     primary_formats: FormatSet,
-    composed_frame_cache: HashMap<String, smithay::backend::renderer::gles::GlesTexture>,
 }
 
 impl TtyBackend {
@@ -574,6 +518,7 @@ impl TtyBackend {
                                     dpms_enabled: true,
                                     enabled: true,
                                     gamma,
+                                    composed_frame: None,
                                 });
                             }
                             Err(err) => {
@@ -659,7 +604,6 @@ impl TtyBackend {
             ipc_output_info,
             primary_render_node,
             primary_formats,
-            composed_frame_cache: HashMap::new(),
         };
         Ok((backend, session_notifier, drm_notifiers))
     }
@@ -1281,6 +1225,7 @@ impl TtyBackend {
         // without this, a stale `pending` would permanently block that
         // output from rendering again (its VBlank is never coming).
         for entry in &mut self.drm_outputs {
+            entry.composed_frame = None;
             entry.pending = false;
             entry.direct_scanout_active = None;
             entry.vrr_failure_warned_for = None;
@@ -1518,105 +1463,39 @@ impl Renderable for TtyBackend {
             // this texture to the secondary GPU's scanout buffer.
             let (texture_size, logical_size) =
                 composed_texture_sizes(mode_size, entry_output.current_transform(), output_scale);
-            let physical_size = smithay::utils::Size::<i32, smithay::utils::Physical>::from((
-                texture_size.w,
-                texture_size.h,
-            ));
-            let texture = {
+            let (element_states, element) = {
                 let mut renderer = self
                     .gpu_manager
                     .single_renderer(&self.primary_render_node)
                     .map_err(|err| format!("primary renderer unavailable: {err:?}"))?;
-                let output_name = entry_output.name();
-                let needs_new = self
-                    .composed_frame_cache
-                    .get(&output_name)
-                    .is_none_or(|texture| texture.size() != texture_size);
+                let entry = &mut self.drm_outputs[entry_index];
+                let needs_new = entry.composed_frame.as_ref().is_none_or(|frame| {
+                    !frame.matches(texture_size, output_scale, entry_output.current_transform())
+                });
                 if needs_new {
                     let texture = <GlesRenderer as Offscreen<
                         smithay::backend::renderer::gles::GlesTexture,
                     >>::create_buffer(
                         renderer.as_mut(), Fourcc::Abgr8888, texture_size
                     )?;
-                    self.composed_frame_cache
-                        .insert(output_name.clone(), texture);
+                    entry.composed_frame = Some(ComposedFrame::new(
+                        renderer.as_mut(),
+                        texture,
+                        output_scale,
+                        entry_output.current_transform(),
+                    ));
                 }
-                self.composed_frame_cache
-                    .get(&output_name)
-                    .cloned()
-                    .ok_or_else(|| "cross-GPU composition texture disappeared".to_string())?
-            };
-            {
-                let mut renderer = self
-                    .gpu_manager
-                    .single_renderer(&self.primary_render_node)
-                    .map_err(|err| format!("primary renderer unavailable: {err:?}"))?;
-                let mut texture = texture.clone();
-                let gles = renderer.as_mut();
-                let mut target = gles.bind(&mut texture)?;
-                let mut frame = gles.render(
-                    &mut target,
-                    physical_size,
-                    smithay::utils::Transform::Normal,
-                )?;
-                let damage = [
-                    smithay::utils::Rectangle::<i32, smithay::utils::Physical>::from_size(
-                        physical_size,
-                    ),
-                ];
-                frame.clear(clear, &damage)?;
-                let effect_cache = UserDataMap::new();
-                for element in elements.iter().rev() {
-                    let geometry = element.geometry(output_scale);
-                    let Some(visible) = geometry.intersection(damage[0]) else {
-                        continue;
-                    };
-                    let local_damage = [Rectangle::new(visible.loc - geometry.loc, visible.size)];
-                    let cache = if element.is_framebuffer_effect() {
-                        element.capture_framebuffer(
-                            &mut frame,
-                            element.src(),
-                            geometry,
-                            &effect_cache,
-                        )?;
-                        Some(&effect_cache)
-                    } else {
-                        None
-                    };
-                    element.draw(
-                        &mut frame,
-                        element.src(),
-                        geometry,
-                        &local_damage,
-                        &[],
-                        cache,
-                    )?;
-                }
-                let _ = frame.finish()?;
-            }
-            let element_states =
-                scene_element_states(&elements, output_scale, Rectangle::from_size(physical_size));
-            let texture_buffer = {
-                let mut renderer = self
-                    .gpu_manager
-                    .single_renderer(&self.primary_render_node)
-                    .map_err(|err| format!("primary renderer unavailable: {err:?}"))?;
-                TextureBuffer::from_texture(
-                    renderer.as_mut(),
-                    texture,
-                    1,
-                    smithay::utils::Transform::Normal,
-                    Some(Vec::new()),
+                let frame = entry
+                    .composed_frame
+                    .as_mut()
+                    .expect("secondary output composition was initialized");
+                let states =
+                    frame.render(renderer.as_mut(), &elements, clear, force_full_repaint)?;
+                (
+                    states,
+                    PrimaryGpuTextureElement(frame.element(logical_size)),
                 )
             };
-            let element = PrimaryGpuTextureElement(TextureRenderElement::from_texture_buffer(
-                (0.0, 0.0),
-                &texture_buffer,
-                Some(1.0),
-                Some(Rectangle::from_size(physical_size).to_f64().to_logical(1.0)),
-                Some(logical_size),
-                Kind::Unspecified,
-            ));
             let mut renderer = self
                 .gpu_manager
                 .renderer(
@@ -1626,14 +1505,22 @@ impl Renderable for TtyBackend {
                 )
                 .map_err(|err| format!("multi-GPU renderer unavailable: {err:?}"))?;
             let elements = [element];
-            let result = self.drm_outputs[entry_index]
+            let result = match self.drm_outputs[entry_index]
                 .drm_output
                 .render_frame::<_, PrimaryGpuTextureElement>(
                     &mut renderer,
                     &elements,
                     clear,
                     FrameFlags::empty(),
-                )?;
+                ) {
+                Ok(result) => result,
+                Err(err) => {
+                    self.drm_outputs[entry_index]
+                        .drm_output
+                        .with_compositor(|compositor| compositor.reset_buffer_ages());
+                    return Err(err.into());
+                }
+            };
             if result.needs_sync()
                 && let PrimaryPlaneElement::Swapchain(element) = &result.primary_element
                 && let Err(err) = element.sync.wait()
@@ -1660,14 +1547,23 @@ impl Renderable for TtyBackend {
             &element_states,
         );
         let variable_refresh = self.drm_outputs[entry_index].vrr_active;
-        self.drm_outputs[entry_index]
+        if let Err(err) = self.drm_outputs[entry_index]
             .drm_output
             .queue_frame(FrameSubmission {
                 target_presentation_time,
                 presentation_feedback,
                 session_lock_generation,
                 variable_refresh,
-            })?;
+            })
+        {
+            // Rendering advanced the output's damage history, but this
+            // frame never reached scanout. Repaint the next swapchain slot
+            // even if the retained scene has not changed again.
+            self.drm_outputs[entry_index]
+                .drm_output
+                .with_compositor(|compositor| compositor.reset_buffer_ages());
+            return Err(err.into());
+        }
         self.drm_outputs[entry_index].pending = true;
         set_entry_direct_scanout(&mut self.drm_outputs[entry_index], direct_scanout);
         Ok(RenderOutcome::new(
@@ -1880,49 +1776,8 @@ mod dpms_tests {
 
 #[cfg(test)]
 mod cross_gpu_composition_tests {
-    use super::{composed_texture_sizes, scene_element_states};
-    use smithay::backend::renderer::Color32F;
-    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-    use smithay::backend::renderer::element::{Element, Kind, RenderElementPresentationState};
-    use smithay::utils::{Rectangle, Scale};
-
-    #[test]
-    fn composed_states_keep_front_element_and_skip_occluded_surface() {
-        let front = SolidColorRenderElement::new(
-            smithay::backend::renderer::element::Id::new(),
-            Rectangle::new((0, 0).into(), (100, 100).into()),
-            0,
-            Color32F::new(1.0, 1.0, 1.0, 1.0),
-            Kind::Unspecified,
-        );
-        let back = SolidColorRenderElement::new(
-            smithay::backend::renderer::element::Id::new(),
-            Rectangle::new((0, 0).into(), (100, 100).into()),
-            0,
-            Color32F::new(0.0, 0.0, 0.0, 1.0),
-            Kind::Unspecified,
-        );
-        let front_id = front.id().clone();
-        let back_id = back.id().clone();
-        let states = scene_element_states(
-            &[front, back],
-            Scale::from(1.0),
-            Rectangle::from_size((100, 100).into()),
-        );
-
-        let front_state = states.element_render_state(front_id).unwrap();
-        assert_eq!(front_state.visible_area, 10_000);
-        assert_eq!(
-            front_state.presentation_state,
-            RenderElementPresentationState::Rendering { reason: None }
-        );
-        let back_state = states.element_render_state(back_id).unwrap();
-        assert_eq!(back_state.visible_area, 0);
-        assert_eq!(
-            back_state.presentation_state,
-            RenderElementPresentationState::Skipped
-        );
-    }
+    use super::composed_texture_sizes;
+    use smithay::utils::Scale;
 
     #[test]
     fn composed_texture_geometry_accounts_for_fractional_scale_and_rotation() {
