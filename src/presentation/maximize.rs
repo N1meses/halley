@@ -539,19 +539,13 @@ impl FieldMaximizeManager {
         if !target_repaint_ready {
             return false;
         }
-        let (geometry, outgoing_size, location) = if entry.desired {
-            (
-                entry.target_rect,
-                entry.restore_geometry.size,
-                entry.target_rect.loc,
-            )
-        } else {
-            (
-                entry.restore_geometry,
-                entry.target_rect.size,
-                entry.restore_geometry.loc,
-            )
-        };
+        let (geometry, outgoing_size) = maximize_resize_endpoints(
+            entry.desired,
+            entry.restore_geometry,
+            entry.target_rect,
+            entry.presentation_windowed,
+        );
+        let location = geometry.loc;
         let Some(observed_size) =
             accepted_resize_buffer_size(buffer_size, geometry.size, outgoing_size)
         else {
@@ -680,6 +674,26 @@ fn authoritative_restore(
 
 fn owns_client_geometry(desired: bool, active: bool) -> bool {
     active || desired
+}
+
+fn maximize_resize_endpoints(
+    desired: bool,
+    restore_geometry: Rectangle<i32, Logical>,
+    target_rect: Rectangle<i32, Logical>,
+    presentation_windowed: Option<Rectangle<i32, Logical>>,
+) -> (Rectangle<i32, Logical>, Size<i32, Logical>) {
+    if desired {
+        // Fullscreen hands maximize a different source from the canonical
+        // windowed restore. Reject that actual outgoing size until Firefox
+        // commits its restored frame, rather than adopting fullscreen size
+        // as a client constraint at the inset maximized location.
+        (
+            target_rect,
+            presentation_windowed.unwrap_or(restore_geometry).size,
+        )
+    } else {
+        (restore_geometry, target_rect.size)
+    }
 }
 
 fn accepted_resize_buffer_size(
@@ -840,6 +854,83 @@ mod tests {
             accepted_resize_buffer_size(Some(constrained), target, outgoing),
             Some(constrained),
         );
+    }
+
+    #[test]
+    fn fullscreen_exit_does_not_adopt_fullscreen_size_at_maximized_location() {
+        let maximized = Rectangle::new((20, 70).into(), (2520, 1350).into());
+        let fullscreen = Rectangle::new((0, 0).into(), (2560, 1440).into());
+        // A lone tile may equal maximize, but smaller tiles in multi-window
+        // clusters have the same fault. Neither is the actual outgoing frame.
+        for tile in [
+            maximized,
+            Rectangle::new((1040, 70).into(), (1500, 1350).into()),
+            Rectangle::new((780, 420).into(), (1000, 665).into()),
+        ] {
+            let (target, outgoing) =
+                maximize_resize_endpoints(true, tile, maximized, Some(fullscreen));
+            assert_eq!(
+                accepted_resize_buffer_size(Some(fullscreen.size), target.size, outgoing),
+                None,
+                "an early maximized-state commit with the old fullscreen frame must not settle",
+            );
+            let restored_size =
+                accepted_resize_buffer_size(Some(maximized.size), target.size, outgoing).unwrap();
+            let restored = Rectangle::new(target.loc, restored_size);
+            assert_eq!(restored, maximized);
+            let presentation = FieldMaximizePresentation {
+                progress: 1.0,
+                transition_completion: 1.0,
+                windowed_rect: fullscreen,
+                windowed_output_rect: Some(fullscreen.to_physical(1)),
+                target_rect: restored.to_physical(1),
+            };
+            assert_eq!(
+                presentation.client_rect(fullscreen.to_physical(1)),
+                maximized.to_physical(1),
+                "exit ends at the inset maximized rectangle without shifting a fullscreen-sized client",
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_maximize_still_accepts_same_size_and_client_constraints() {
+        let tile = Rectangle::new((20, 70).into(), (2520, 1350).into());
+        let (target, outgoing) = maximize_resize_endpoints(true, tile, tile, None);
+        assert_eq!(
+            accepted_resize_buffer_size(Some(tile.size), target.size, outgoing),
+            Some(tile.size),
+        );
+
+        let floating = Rectangle::new((100, 90).into(), (800, 600).into());
+        let (target, outgoing) = maximize_resize_endpoints(true, floating, tile, None);
+        assert_eq!(
+            accepted_resize_buffer_size(Some(floating.size), target.size, outgoing),
+            None,
+        );
+        let constrained = (2400, 1300).into();
+        assert_eq!(
+            accepted_resize_buffer_size(Some(constrained), target.size, outgoing),
+            Some(constrained),
+        );
+    }
+
+    #[test]
+    fn unmaximize_after_fullscreen_uses_the_maximized_source_and_original_restore() {
+        let floating = Rectangle::new((100, 90).into(), (800, 600).into());
+        let maximized = Rectangle::new((20, 70).into(), (2520, 1350).into());
+        let fullscreen = Rectangle::new((0, 0).into(), (2560, 1440).into());
+        let (target, outgoing) =
+            maximize_resize_endpoints(false, floating, maximized, Some(fullscreen));
+        assert_eq!(
+            accepted_resize_buffer_size(Some(maximized.size), target.size, outgoing),
+            None,
+        );
+        let restored = Rectangle::new(
+            target.loc,
+            accepted_resize_buffer_size(Some(floating.size), target.size, outgoing).unwrap(),
+        );
+        assert_eq!(restored, floating);
     }
 
     #[test]
