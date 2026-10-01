@@ -260,8 +260,8 @@ impl FullscreenTextureTransitions {
     /// subsurfaces have retired the outgoing allocation. The root size and xdg
     /// geometry are correct at that point, but a surface-tree snapshot is
     /// still mostly the old fullscreen texture. Classify the complete extent
-    /// against both endpoints and keep holding the outgoing snapshot until it
-    /// is closer to the configured target than to the outgoing window.
+    /// in client coordinates, accounting for decoration margins, and keep
+    /// holding the outgoing snapshot until its tree matches the target.
     pub fn prepare_target(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -487,7 +487,7 @@ pub(crate) fn snapshot_matches_target_endpoint(
 ) -> bool {
     surface_tree_matches_target_endpoint(
         outgoing.window_size,
-        candidate.surface_geometry.size,
+        candidate.surface_geometry,
         candidate.window_size,
     ) && persistent_endpoint_layers_cover_target(
         outgoing.window_size,
@@ -501,8 +501,9 @@ pub(crate) fn snapshot_matches_target_endpoint(
 /// can resize its decoration/shadow subsurface before its persistent content
 /// surface; the union then matches the target even though most of the target
 /// snapshot still contains the outgoing-sized client. Every persistent layer
-/// that covered the outgoing client must either be retired or cover the new
-/// client before the endpoint is frozen.
+/// that covered the outgoing client must either be retired or match the new
+/// client before the endpoint is frozen. On a small shrink, resized shadows
+/// can enclose unchanged fullscreen content while their union looks correct.
 fn persistent_endpoint_layers_cover_target<LayerId: Eq>(
     outgoing_window_size: Size<i32, Physical>,
     outgoing_layers: &[(LayerId, Rectangle<i32, Physical>)],
@@ -510,8 +511,6 @@ fn persistent_endpoint_layers_cover_target<LayerId: Eq>(
     candidate_layers: &[(LayerId, Rectangle<i32, Physical>)],
 ) -> bool {
     let outgoing_client = Rectangle::from_size(outgoing_window_size);
-    let candidate_client = Rectangle::from_size(candidate_window_size);
-
     outgoing_layers
         .iter()
         .filter(|(_, geometry)| rectangle_contains(*geometry, outgoing_client))
@@ -519,7 +518,13 @@ fn persistent_endpoint_layers_cover_target<LayerId: Eq>(
             candidate_layers
                 .iter()
                 .find(|(candidate_id, _)| candidate_id == id)
-                .is_none_or(|(_, geometry)| rectangle_contains(*geometry, candidate_client))
+                .is_none_or(|(_, geometry)| {
+                    surface_tree_matches_target_endpoint(
+                        outgoing_window_size,
+                        *geometry,
+                        candidate_window_size,
+                    )
+                })
         })
 }
 
@@ -534,19 +539,33 @@ fn rectangle_contains<Kind>(container: Rectangle<i32, Kind>, target: Rectangle<i
 
 fn surface_tree_matches_target_endpoint(
     outgoing_window_size: Size<i32, Physical>,
-    candidate_surface_size: Size<i32, Physical>,
+    candidate_surface_geometry: Rectangle<i32, Physical>,
     candidate_window_size: Size<i32, Physical>,
 ) -> bool {
-    endpoint_extent_distance(candidate_surface_size, candidate_window_size)
-        <= endpoint_extent_distance(candidate_surface_size, outgoing_window_size)
+    rectangle_contains(
+        candidate_surface_geometry,
+        Rectangle::from_size(candidate_window_size),
+    ) && endpoint_margin_distance(candidate_surface_geometry, candidate_window_size)
+        <= endpoint_margin_distance(candidate_surface_geometry, outgoing_window_size)
 }
 
-fn endpoint_extent_distance(
-    surface_size: Size<i32, Physical>,
+/// Snapshots use the xdg client origin, so negative tree coordinates describe
+/// the left/top CSD margins. Compare the opposite margins around each possible
+/// client size instead of comparing the decorated allocation to an undecorated
+/// size. Otherwise a lone tile close to fullscreen can be classified as stale
+/// forever: a 2520x1350 client with 20px margins has a 2560x1390 tree, closer in
+/// raw size to 2560x1440 fullscreen than to its own client geometry.
+fn endpoint_margin_distance(
+    surface_geometry: Rectangle<i32, Physical>,
     window_size: Size<i32, Physical>,
 ) -> i64 {
-    i64::from((surface_size.w - window_size.w).abs())
-        + i64::from((surface_size.h - window_size.h).abs())
+    let left = -i64::from(surface_geometry.loc.x);
+    let top = -i64::from(surface_geometry.loc.y);
+    let right = i64::from(surface_geometry.loc.x) + i64::from(surface_geometry.size.w)
+        - i64::from(window_size.w);
+    let bottom = i64::from(surface_geometry.loc.y) + i64::from(surface_geometry.size.h)
+        - i64::from(window_size.h);
+    (right - left).abs() + (bottom - top).abs()
 }
 
 fn commit_has_advanced(current: CommitCounter, previous: CommitCounter) -> bool {
@@ -781,7 +800,7 @@ mod tests {
     fn native_target_rejects_outgoing_sized_subsurfaces_after_root_resize() {
         assert!(!surface_tree_matches_target_endpoint(
             (1280, 800).into(),
-            (1300, 820).into(),
+            Rectangle::new((-10, -10).into(), (1300, 820).into()),
             (500, 304).into(),
         ));
     }
@@ -790,8 +809,66 @@ mod tests {
     fn native_target_accepts_resized_surface_tree_with_csd_margins() {
         assert!(surface_tree_matches_target_endpoint(
             (1280, 800).into(),
-            (540, 344).into(),
+            Rectangle::new((-20, -20).into(), (540, 344).into()),
             (500, 304).into(),
+        ));
+    }
+
+    #[test]
+    fn single_window_fullscreen_exit_accepts_the_restored_csd_tree() {
+        // Recorded GTK/Firefox exit: the restored 2520x1350 client has 20px
+        // margins, making its full tree width equal to the outgoing fullscreen.
+        assert!(surface_tree_matches_target_endpoint(
+            (2560, 1440).into(),
+            Rectangle::new((-20, -20).into(), (2560, 1390).into()),
+            (2520, 1350).into(),
+        ));
+    }
+
+    #[test]
+    fn nearby_fullscreen_exit_accepts_csd_margins_when_only_one_axis_resizes() {
+        for client in [(2520, 1440), (2560, 1400)] {
+            assert!(surface_tree_matches_target_endpoint(
+                (2560, 1440).into(),
+                Rectangle::new((-20, -20).into(), (client.0 + 40, client.1 + 40).into()),
+                client.into(),
+            ));
+        }
+    }
+
+    #[test]
+    fn nearby_fullscreen_exit_accepts_asymmetric_csd_margins() {
+        assert!(surface_tree_matches_target_endpoint(
+            (2560, 1440).into(),
+            Rectangle::new((-20, -18).into(), (2564, 1396).into()),
+            (2520, 1350).into(),
+        ));
+    }
+
+    #[test]
+    fn nearby_fullscreen_exit_rejects_outgoing_sized_and_mixed_trees() {
+        // Both the entirely stale decorated tree and an old fullscreen
+        // content layer behind resized decorations must keep the exit held.
+        for surface in [(2600, 1480), (2580, 1460)] {
+            assert!(!surface_tree_matches_target_endpoint(
+                (2560, 1440).into(),
+                Rectangle::new((-20, -20).into(), surface.into()),
+                (2520, 1350).into(),
+            ));
+        }
+    }
+
+    #[test]
+    fn native_target_rejects_a_tree_that_does_not_cover_the_target_client() {
+        assert!(!surface_tree_matches_target_endpoint(
+            (500, 304).into(),
+            Rectangle::new((0, 0).into(), (1270, 790).into()),
+            (1280, 800).into(),
+        ));
+        assert!(!surface_tree_matches_target_endpoint(
+            (2560, 1440).into(),
+            Rectangle::new((20, 20).into(), (2520, 1350).into()),
+            (2520, 1350).into(),
         ));
     }
 
@@ -811,6 +888,47 @@ mod tests {
             &outgoing_layers,
             (1280, 800).into(),
             &mixed_target_layers,
+        ));
+    }
+
+    #[test]
+    fn native_shrink_rejects_old_content_hidden_within_restored_csd_margins() {
+        let outgoing = (2560, 1440).into();
+        let restored = (2540, 1440).into();
+        let outgoing_layers = [
+            (1, Rectangle::from_size(outgoing)),
+            (2, Rectangle::new((-20, -20).into(), (2600, 1480).into())),
+        ];
+        let restored_shadow = Rectangle::new((-20, -20).into(), (2580, 1480).into());
+        let mixed_layers = [(1, Rectangle::from_size(outgoing)), (2, restored_shadow)];
+
+        // The resized shadow already encloses the outgoing content, so the
+        // union alone cannot distinguish this partial commit from completion.
+        assert!(surface_tree_matches_target_endpoint(
+            outgoing,
+            restored_shadow,
+            restored,
+        ));
+        assert!(!persistent_endpoint_layers_cover_target(
+            outgoing,
+            &outgoing_layers,
+            restored,
+            &mixed_layers,
+        ));
+
+        let complete_layers = [(1, Rectangle::from_size(restored)), (2, restored_shadow)];
+        assert!(persistent_endpoint_layers_cover_target(
+            outgoing,
+            &outgoing_layers,
+            restored,
+            &complete_layers,
+        ));
+        let replaced_layers = [(3, Rectangle::from_size(restored)), (2, restored_shadow)];
+        assert!(persistent_endpoint_layers_cover_target(
+            outgoing,
+            &outgoing_layers,
+            restored,
+            &replaced_layers,
         ));
     }
 

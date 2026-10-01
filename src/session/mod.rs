@@ -975,28 +975,11 @@ fn toggle_focused_fullscreen<D: SessionDriver>(session: &mut Session<D>, output:
                 toplevel,
                 field_handoff.is_some(),
             );
-        } else if session
-            .fullscreen
-            .compositor_unfullscreen_restores_maximize(&focused)
-            && set_surface_field_maximized(session, &focused, true)
-        {
-            pointer::reconcile_state(session);
-            session.request_redraw();
-            return;
         } else {
             session
                 .fullscreen
                 .unrequest_compositor(&session.wayland, toplevel);
         }
-    } else if !entering
-        && session
-            .fullscreen
-            .compositor_unfullscreen_restores_maximize(&focused)
-        && set_surface_field_maximized(session, &focused, true)
-    {
-        pointer::reconcile_state(session);
-        session.request_redraw();
-        return;
     } else {
         crate::xwayland::set_window_fullscreen(session, &window, entering);
     }
