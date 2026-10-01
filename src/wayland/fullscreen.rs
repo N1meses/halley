@@ -63,7 +63,8 @@ struct FullscreenWindow {
 enum FullscreenRestoreKind {
     #[default]
     Windowed,
-    FieldMaximized,
+    /// Entry began at maximize, but exit owns the pre-maximize normal window.
+    WindowedFromMaximize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,7 +469,7 @@ impl FullscreenManager {
         }
         entry.target_output = target.name();
         if retain_maximized {
-            entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
+            entry.restore_kind = FullscreenRestoreKind::WindowedFromMaximize;
         }
         // The destination is the size we are about to configure, decided once
         // here, exactly like field maximize decides its target rect at toggle
@@ -861,15 +862,7 @@ impl FullscreenManager {
     ) -> Option<ExternalTransactionRequest> {
         let wl_surface = window.wl_surface().map(|surface| surface.into_owned())?;
         let entry = self.windows.get_mut(&wl_surface)?;
-        let geometry = entry.restore.as_ref()?.geometry;
-        entry.presentation_windowed = Some(geometry);
-        Some(begin_external_transaction(
-            entry,
-            false,
-            geometry,
-            presentation,
-            crate::frame_clock::monotonic_now(),
-        ))
+        begin_external_restore(entry, presentation, crate::frame_clock::monotonic_now())
     }
 
     pub(crate) fn settle_external_configure(
@@ -1024,9 +1017,7 @@ impl FullscreenManager {
         let target_output = entry.target_output.clone();
         let restore = entry.restore.clone();
         let preserve_stack = entry.preserve_stack;
-        let retain_maximized = entry.restore_kind == FullscreenRestoreKind::FieldMaximized
-            && entry.origin == FullscreenOrigin::Compositor
-            && !protocol_desired;
+        let retain_maximized = retains_maximized_protocol(entry);
         let committed = toplevel.with_committed_state(|state| {
             state.is_some_and(|state| {
                 protocol_commit_is_active(
@@ -1380,24 +1371,6 @@ impl FullscreenManager {
             .collect()
     }
 
-    /// Whether releasing the client's fullscreen request should hand the
-    /// window back to the field-maximize presentation it replaced on entry.
-    /// A concurrent Mod+F owner keeps fullscreen instead.
-    pub(crate) fn client_unfullscreen_restores_maximize(&self, surface: &WlSurface) -> bool {
-        self.windows
-            .get(surface)
-            .is_some_and(client_release_restores_field_maximize)
-    }
-
-    /// Whether leaving compositor-owned fullscreen should restore the
-    /// field-maximize presentation it replaced. Nested client fullscreen keeps
-    /// ownership instead.
-    pub(crate) fn compositor_unfullscreen_restores_maximize(&self, surface: &WlSurface) -> bool {
-        self.windows
-            .get(surface)
-            .is_some_and(compositor_release_restores_field_maximize)
-    }
-
     /// Client maximize requests received while Mod+F owns the window are
     /// echoes of the previous maximized state, not a new user action.
     pub(crate) fn suppresses_client_maximize(&self, surface: &WlSurface) -> bool {
@@ -1444,15 +1417,17 @@ impl FullscreenManager {
         field_output_rect: Option<Rectangle<i32, Physical>>,
     ) {
         if let Some(entry) = self.windows.get_mut(surface) {
-            entry.restore = Some(WindowedPlacement {
-                location: restore_geometry.loc,
-                geometry: restore_geometry,
-                output: Some(restore_output),
-            });
-            entry.presentation_windowed = Some(field_geometry);
-            entry.presentation_output = field_output_rect;
-            entry.restore_presentation_output = restore_output_rect;
-            entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
+            record_maximize_handoff(
+                entry,
+                WindowedPlacement {
+                    location: restore_geometry.loc,
+                    geometry: restore_geometry,
+                    output: Some(restore_output),
+                },
+                restore_output_rect,
+                field_geometry,
+                field_output_rect,
+            );
         }
     }
 
@@ -1482,15 +1457,15 @@ impl FullscreenManager {
         presentation_output: Option<Rectangle<i32, Physical>>,
     ) {
         if let Some(entry) = self.windows.get_mut(surface) {
-            entry.restore = Some(WindowedPlacement {
-                location: restore_geometry.loc,
-                geometry: restore_geometry,
-                output: Some(restore_output),
-            });
-            entry.presentation_windowed = Some(restore_geometry);
-            entry.presentation_output = presentation_output;
-            entry.restore_presentation_output = presentation_output;
-            entry.preserve_stack = true;
+            record_cluster_restore(
+                entry,
+                WindowedPlacement {
+                    location: restore_geometry.loc,
+                    geometry: restore_geometry,
+                    output: Some(restore_output),
+                },
+                presentation_output,
+            );
         }
     }
 
@@ -1607,26 +1582,6 @@ fn animations_enabled(animations: &Animations) -> bool {
     animations.enabled && animations.fullscreen.enabled
 }
 
-fn client_release_restores_field_maximize(entry: &FullscreenWindow) -> bool {
-    if entry.restore_kind != FullscreenRestoreKind::FieldMaximized {
-        return false;
-    }
-    entry
-        .native
-        .map_or(entry.origin == FullscreenOrigin::Client, |native| {
-            native.client_requested && !native.compositor_requested
-        })
-}
-
-fn compositor_release_restores_field_maximize(entry: &FullscreenWindow) -> bool {
-    if entry.restore_kind != FullscreenRestoreKind::FieldMaximized {
-        return false;
-    }
-    entry
-        .native
-        .is_some_and(|native| native.compositor_requested && !native.client_requested)
-}
-
 /// Whether the committed xdg states still count as the protocol fullscreen
 /// edge `handle_commit` is waiting on.
 fn protocol_commit_is_active(
@@ -1639,9 +1594,9 @@ fn protocol_commit_is_active(
     if protocol_desired {
         has_target_state
     } else if retain_maximized {
-        // Mod+F replaced field-maximize without taking the Fullscreen bit.
-        // Leftover Maximized is intentional so Firefox does not snap to its
-        // windowed size; only leftover Fullscreen still blocks the visual.
+        // Mod+F entered from maximize without taking the Fullscreen bit.
+        // Maximized is allowed while that fullscreen presentation is desired;
+        // exit disables this exception and waits for the normal state.
         has_fullscreen
     } else {
         has_fullscreen || has_maximized
@@ -1889,9 +1844,63 @@ fn retain_restore_presentation_output(
     }
 }
 
+fn record_maximize_handoff(
+    entry: &mut FullscreenWindow,
+    restore: WindowedPlacement,
+    restore_output_rect: Option<Rectangle<i32, Physical>>,
+    maximized_geometry: Rectangle<i32, Logical>,
+    maximized_output_rect: Option<Rectangle<i32, Physical>>,
+) {
+    entry.restore = Some(restore);
+    entry.presentation_windowed = Some(maximized_geometry);
+    entry.presentation_output = maximized_output_rect;
+    entry.restore_presentation_output = restore_output_rect;
+    entry.restore_kind = FullscreenRestoreKind::WindowedFromMaximize;
+}
+
+fn record_cluster_restore(
+    entry: &mut FullscreenWindow,
+    restore: WindowedPlacement,
+    presentation_output: Option<Rectangle<i32, Physical>>,
+) {
+    // A maximize handoff already owns the original normal placement and its
+    // pre-maximize camera projection. Cluster updates cannot replace either.
+    if entry.restore_kind == FullscreenRestoreKind::WindowedFromMaximize {
+        return;
+    }
+    entry.presentation_windowed = Some(restore.geometry);
+    entry.restore = Some(restore);
+    entry.presentation_output = presentation_output;
+    entry.restore_presentation_output = presentation_output;
+    entry.preserve_stack = true;
+}
+
+fn retains_maximized_protocol(entry: &FullscreenWindow) -> bool {
+    entry.desired
+        && entry.restore_kind == FullscreenRestoreKind::WindowedFromMaximize
+        && entry.origin == FullscreenOrigin::Compositor
+        && entry.native.is_some_and(|native| !native.protocol_desired)
+}
+
 fn select_restore_presentation_endpoint(entry: &mut FullscreenWindow) {
     entry.presentation_windowed = entry.restore.as_ref().map(|restore| restore.geometry);
     entry.presentation_output = entry.restore_presentation_output;
+}
+
+fn begin_external_restore(
+    entry: &mut FullscreenWindow,
+    presentation: ExternalPresentationKind,
+    now: Duration,
+) -> Option<ExternalTransactionRequest> {
+    let geometry = entry.restore.as_ref()?.geometry;
+    select_restore_presentation_endpoint(entry);
+    Some(begin_external_transaction(
+        entry,
+        false,
+        geometry,
+        presentation,
+        now,
+    ))
 }
 
 fn prefer_seeded_restore(
@@ -2303,29 +2312,6 @@ mod tests {
     }
 
     #[test]
-    fn client_fullscreen_restores_the_field_maximize_it_replaced() {
-        let mut entry = test_entry(true);
-        entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
-        assert!(client_release_restores_field_maximize(&entry));
-
-        entry.native.as_mut().unwrap().compositor_requested = true;
-        assert!(
-            !client_release_restores_field_maximize(&entry),
-            "Mod+F must keep ownership when nested client fullscreen exits"
-        );
-
-        entry.native = None;
-        entry.origin = FullscreenOrigin::Client;
-        assert!(
-            client_release_restores_field_maximize(&entry),
-            "X11 client fullscreen follows the same restore policy"
-        );
-
-        entry.restore_kind = FullscreenRestoreKind::Windowed;
-        assert!(!client_release_restores_field_maximize(&entry));
-    }
-
-    #[test]
     fn only_visual_owner_edges_need_a_new_outgoing_snapshot() {
         let mut native = NativeFullscreenState::default();
         assert!(native_owner_change_is_visual(
@@ -2450,29 +2436,11 @@ mod tests {
     }
 
     #[test]
-    fn leftover_maximized_does_not_block_protocol_windowed_mod_f() {
+    fn fullscreen_entry_can_keep_maximized_during_protocol_windowed_mod_f() {
         assert!(!protocol_commit_is_active(false, false, false, true, true));
         assert!(protocol_commit_is_active(false, false, false, true, false));
         assert!(protocol_commit_is_active(false, false, true, false, true));
         assert!(protocol_commit_is_active(true, true, true, false, false));
-    }
-
-    #[test]
-    fn compositor_fullscreen_restores_the_field_maximize_it_replaced() {
-        let mut entry = test_entry(false);
-        entry.restore_kind = FullscreenRestoreKind::FieldMaximized;
-        request_native_owner(&mut entry, FullscreenOrigin::Compositor);
-        assert!(compositor_release_restores_field_maximize(&entry));
-
-        request_native_owner(&mut entry, FullscreenOrigin::Client);
-        assert!(
-            !compositor_release_restores_field_maximize(&entry),
-            "nested client fullscreen keeps ownership when Mod+F exits"
-        );
-
-        entry.restore_kind = FullscreenRestoreKind::Windowed;
-        release_native_owner(&mut entry, FullscreenOrigin::Client);
-        assert!(!compositor_release_restores_field_maximize(&entry));
     }
 
     #[test]
@@ -2483,7 +2451,7 @@ mod tests {
             geometry: Rectangle::new((400, 240).into(), (800, 600).into()),
             output: Some("DP-1".to_string()),
         });
-        entering.restore_kind = FullscreenRestoreKind::FieldMaximized;
+        entering.restore_kind = FullscreenRestoreKind::WindowedFromMaximize;
         assert!(native_visual_buffer_matches(
             &entering,
             Some((1840, 1120).into()),
@@ -3067,6 +3035,223 @@ mod tests {
 
         assert_eq!(entry.presentation_windowed, Some(floating_world));
         assert_eq!(entry.presentation_output, Some(floating_output));
+    }
+
+    #[test]
+    fn maximize_fullscreen_off_restores_normal_field_and_cluster_placements() {
+        let maximized = Rectangle::new((20, 70).into(), (2520, 1350).into());
+        let cases = [
+            // Field placement is projected through the pre-maximize camera.
+            (
+                false,
+                Rectangle::new((960, 480).into(), (800, 600).into()),
+                Rectangle::new((400, 240).into(), (400, 300).into()),
+            ),
+            // Single-window and multi-window cluster normal placements.
+            (true, maximized, maximized.to_physical(1)),
+            (
+                true,
+                Rectangle::new((1040, 70).into(), (1500, 1350).into()),
+                Rectangle::new((1040, 70).into(), (1500, 1350).into()),
+            ),
+        ];
+        for (cluster, normal, normal_output) in cases {
+            for origin in [FullscreenOrigin::Client, FullscreenOrigin::Compositor] {
+                let mut entry = test_entry(false);
+                record_maximize_handoff(
+                    &mut entry,
+                    WindowedPlacement {
+                        location: normal.loc,
+                        geometry: normal,
+                        output: Some("DP-1".to_string()),
+                    },
+                    Some(normal_output),
+                    maximized,
+                    Some(maximized.to_physical(1)),
+                );
+                request_native_owner(&mut entry, origin);
+                entry.active = true;
+                if cluster {
+                    // A layout update during fullscreen must not replace the
+                    // saved pre-maximize placement or its output projection.
+                    record_cluster_restore(
+                        &mut entry,
+                        WindowedPlacement {
+                            location: maximized.loc,
+                            geometry: maximized,
+                            output: Some("DP-1".to_string()),
+                        },
+                        Some(maximized.to_physical(1)),
+                    );
+                }
+                release_all_native_owners(&mut entry);
+                select_restore_presentation_endpoint(&mut entry);
+                let restore = entry.restore.as_ref().unwrap();
+                assert_eq!(restore.geometry, normal);
+                assert_eq!(restore.location, normal.loc);
+                assert_eq!(entry.presentation_windowed, Some(normal));
+                assert_eq!(entry.presentation_output, Some(normal_output));
+                assert!(!entry.desired);
+
+                let mut state = ToplevelState::default();
+                state.states.set(State::Maximized);
+                state.states.set(State::Fullscreen);
+                apply_protocol_presentation_state(&mut state, origin, false);
+                assert!(!state.states.contains(State::Maximized));
+                assert!(!state.states.contains(State::Fullscreen));
+                assert_eq!(
+                    fullscreen_commit_action(&entry, false),
+                    FullscreenCommitAction::Visual(false),
+                );
+
+                // A later fullscreen cycle starts from normal and cannot
+                // reintroduce a retired maximize protocol state.
+                entry.active = false;
+                request_native_owner(&mut entry, origin);
+                apply_protocol_presentation_state(
+                    &mut state,
+                    native_protocol_origin(&entry),
+                    entry.native.unwrap().protocol_desired,
+                );
+                assert!(!state.states.contains(State::Maximized));
+                release_all_native_owners(&mut entry);
+                select_restore_presentation_endpoint(&mut entry);
+                assert_eq!(entry.presentation_windowed, Some(normal));
+                assert_eq!(entry.presentation_output, Some(normal_output));
+            }
+        }
+    }
+
+    #[test]
+    fn compositor_fullscreen_off_from_maximize_waits_for_the_normal_state() {
+        let mut entry = test_entry(false);
+        entry.restore_kind = FullscreenRestoreKind::WindowedFromMaximize;
+        request_native_owner(&mut entry, FullscreenOrigin::Compositor);
+        entry.active = true;
+        assert!(retains_maximized_protocol(&entry));
+
+        release_all_native_owners(&mut entry);
+        assert!(protocol_commit_is_active(
+            false,
+            false,
+            false,
+            true,
+            retains_maximized_protocol(&entry),
+        ));
+        assert!(!protocol_commit_is_active(
+            false,
+            false,
+            false,
+            false,
+            retains_maximized_protocol(&entry),
+        ));
+    }
+
+    #[test]
+    fn external_maximize_fullscreen_off_restores_normal_and_can_repeat() {
+        let animations = Animations::default();
+        let maximized = Rectangle::new((20, 70).into(), (2520, 1350).into());
+        let fullscreen = Rectangle::new((0, 0).into(), (2560, 1440).into());
+        for (normal, normal_output) in [
+            (
+                Rectangle::new((960, 480).into(), (800, 600).into()),
+                Rectangle::new((400, 240).into(), (400, 300).into()),
+            ),
+            (maximized, maximized.to_physical(1)),
+            (
+                Rectangle::new((1040, 70).into(), (1500, 1350).into()),
+                Rectangle::new((1040, 70).into(), (1500, 1350).into()),
+            ),
+        ] {
+            let mut entry = test_entry(true);
+            entry.native = None;
+            entry.fullscreen_size = fullscreen.size;
+            record_maximize_handoff(
+                &mut entry,
+                WindowedPlacement {
+                    location: normal.loc,
+                    geometry: normal,
+                    output: Some("DP-1".to_string()),
+                },
+                Some(normal_output),
+                maximized,
+                Some(maximized.to_physical(1)),
+            );
+            for cycle in 1..=2 {
+                let now = Duration::from_secs(cycle);
+                assert_eq!(
+                    begin_external_restore(&mut entry, ExternalPresentationKind::Animated, now),
+                    Some(ExternalTransactionRequest::Configure(normal)),
+                );
+                assert_eq!(entry.presentation_windowed, Some(normal));
+                assert_eq!(entry.presentation_output, Some(normal_output));
+                assert_eq!(
+                    acknowledge_external_geometry(&mut entry, normal, &animations, now),
+                    ExternalConfigureResult::Waiting,
+                );
+                assert_eq!(
+                    acknowledge_external_surface(
+                        &mut entry,
+                        Some(fullscreen.size),
+                        &animations,
+                        now,
+                    ),
+                    ExternalConfigureResult::Waiting,
+                );
+                assert_eq!(
+                    acknowledge_external_surface(&mut entry, Some(normal.size), &animations, now),
+                    ExternalConfigureResult::Settled {
+                        fullscreen: false,
+                        animated: true,
+                    },
+                );
+                assert!(!entry.desired);
+                assert!(!entry.active);
+                assert_eq!(entry.restore.as_ref().unwrap().geometry, normal);
+
+                begin_external_transaction(
+                    &mut entry,
+                    true,
+                    fullscreen,
+                    ExternalPresentationKind::Animated,
+                    now,
+                );
+                acknowledge_external_geometry(&mut entry, fullscreen, &animations, now);
+                assert_eq!(
+                    acknowledge_external_surface(
+                        &mut entry,
+                        Some(fullscreen.size),
+                        &animations,
+                        now,
+                    ),
+                    ExternalConfigureResult::Settled {
+                        fullscreen: true,
+                        animated: true,
+                    },
+                );
+                assert!(entry.active);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_cluster_fullscreen_exit_still_tracks_the_latest_normal_tile() {
+        let mut entry = test_entry(true);
+        let normal = Rectangle::new((1040, 70).into(), (1500, 1350).into());
+        record_cluster_restore(
+            &mut entry,
+            WindowedPlacement {
+                location: normal.loc,
+                geometry: normal,
+                output: Some("DP-1".to_string()),
+            },
+            Some(normal.to_physical(1)),
+        );
+        release_all_native_owners(&mut entry);
+        select_restore_presentation_endpoint(&mut entry);
+        assert_eq!(entry.restore.as_ref().unwrap().geometry, normal);
+        assert_eq!(entry.presentation_output, Some(normal.to_physical(1)));
+        assert!(entry.preserve_stack);
     }
 
     #[test]
