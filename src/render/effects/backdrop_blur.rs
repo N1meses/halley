@@ -11,7 +11,7 @@ use smithay::backend::renderer::gles::{
     Capability, GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
     UniformName, UniformType, ffi, link_program,
 };
-use smithay::backend::renderer::utils::CommitCounter;
+use smithay::backend::renderer::utils::{CommitCounter, DamageSet};
 use smithay::backend::renderer::{ContextId, Offscreen, Renderer, Texture};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
@@ -19,6 +19,8 @@ use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transfor
 const DOWN_SHADER: &str = include_str!("shaders/blur_down.frag");
 const UP_SHADER: &str = include_str!("shaders/blur_up.frag");
 const COMPOSITE_SHADER: &str = include_str!("shaders/blur_composite.frag");
+mod regions;
+use regions::BlurPlan;
 const BLUR_VERTEX_SHADER: &str = r#"#version 100
 attribute vec2 vert;
 varying vec2 v_coords;
@@ -129,7 +131,10 @@ pub struct BackdropBlurElement {
     id: Id,
     commit: CommitCounter,
     size: Size<i32, Physical>,
+    geometry: Rectangle<i32, Physical>,
+    partial: bool,
     patches: Vec<BlurPatch>,
+    plan: RefCell<Option<BlurPlan>>,
     textures: Rc<RefCell<BlurTextures>>,
     element: Rc<ElementBlur>,
     retry: Rc<RefCell<RetryState>>,
@@ -162,6 +167,7 @@ impl BackdropBlurRenderer {
         patches: Vec<BlurPatch>,
         config: halley_config::Blur,
         presentation_epoch: u64,
+        output_transform: Transform,
     ) -> Result<Option<BackdropBlurElement>, Box<dyn Error>> {
         if patches.is_empty() {
             return Ok(None);
@@ -285,6 +291,20 @@ impl BackdropBlurRenderer {
             }
         };
         let commit = blur_commit(&patches, config, presentation_epoch);
+        let padding = regions::padding(physical_size, levels, blur_offset(config.radius));
+        let mut geometry = patches
+            .iter()
+            .map(|p| regions::expand(p.rect, padding))
+            .reduce(Rectangle::merge)
+            .and_then(|r| r.intersection(Rectangle::from_size(physical_size)))
+            .unwrap_or_default();
+        // The rotated DRM framebuffer and scene have different coordinate
+        // bases. Preserve the existing full capture until that path can use a
+        // transformed region plan; cross-GPU scenes remain correct as well.
+        let partial = output_transform == Transform::Normal;
+        if !partial {
+            geometry = Rectangle::from_size(physical_size);
+        }
         Ok(Some(BackdropBlurElement {
             // Each stack position keeps a stable identity. Smithay can then
             // retain its per-effect capture cache without ever aliasing two
@@ -292,7 +312,10 @@ impl BackdropBlurRenderer {
             id,
             commit,
             size: physical_size,
+            geometry,
+            partial,
             patches,
+            plan: RefCell::new(None),
             textures: Rc::clone(resources.textures.as_ref().expect("allocated above")),
             element,
             retry: Rc::clone(&resources.retry),
@@ -519,12 +542,14 @@ fn run_blur(
     down: RawPassProgram,
     up: RawPassProgram,
     offset: f32,
+    plan: &BlurPlan,
 ) -> Result<(), GlesError> {
-    let size = textures.size;
+    debug_assert_eq!(textures.size, plan.passes[0].source);
     frame.with_context(|gl| unsafe {
         let mut draw_fbo = 0_i32;
         let mut read_fbo = 0_i32;
         let mut viewport = [0_i32; 4];
+        let mut scissor = [0_i32; 4];
         let mut active_texture = 0_i32;
         let mut texture_binding = 0_i32;
         let mut program = 0_i32;
@@ -532,6 +557,7 @@ fn run_blur(
         gl.GetIntegerv(ffi::DRAW_FRAMEBUFFER_BINDING, &mut draw_fbo);
         gl.GetIntegerv(ffi::READ_FRAMEBUFFER_BINDING, &mut read_fbo);
         gl.GetIntegerv(ffi::VIEWPORT, viewport.as_mut_ptr());
+        gl.GetIntegerv(ffi::SCISSOR_BOX, scissor.as_mut_ptr());
         gl.GetIntegerv(ffi::ACTIVE_TEXTURE, &mut active_texture);
         gl.ActiveTexture(ffi::TEXTURE0);
         gl.GetIntegerv(ffi::TEXTURE_BINDING_2D, &mut texture_binding);
@@ -550,14 +576,15 @@ fn run_blur(
         let result = (|| {
             gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, fbo);
             gl.Disable(ffi::BLEND);
-            gl.Disable(ffi::SCISSOR_TEST);
+            gl.Enable(ffi::SCISSOR_TEST);
 
             let vertices: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0];
             let render_pass = |source: &GlesTexture,
                                source_size: Size<i32, Physical>,
                                target: &GlesTexture,
                                target_size: Size<i32, Physical>,
-                               pass: RawPassProgram|
+                               pass: RawPassProgram,
+                               regions: &[Rectangle<i32, Physical>]|
              -> Result<(), GlesError> {
                 gl.UseProgram(pass.program);
                 gl.Uniform1i(pass.texture, 0);
@@ -602,36 +629,46 @@ fn run_blur(
                     0,
                     vertices.as_ptr().cast(),
                 );
-                gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+                for rect in regions {
+                    gl.Scissor(rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
+                    gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+                }
                 Ok(())
             };
 
-            render_pass(
-                &textures.accum,
-                size,
-                &textures.chain[0],
-                level_size(size, 0),
-                down,
-            )?;
-            for index in 1..textures.chain.len() {
+            let levels = textures.chain.len();
+            for (index, pass) in plan.passes.iter().enumerate() {
+                let (source, target, program) = if index < levels {
+                    (
+                        if index == 0 {
+                            &textures.accum
+                        } else {
+                            &textures.chain[index - 1]
+                        },
+                        &textures.chain[index],
+                        down,
+                    )
+                } else {
+                    let level = levels * 2 - index - 1;
+                    (
+                        &textures.chain[level],
+                        if level == 0 {
+                            result
+                        } else {
+                            &textures.chain[level - 1]
+                        },
+                        up,
+                    )
+                };
                 render_pass(
-                    &textures.chain[index - 1],
-                    level_size(size, index as u32 - 1),
-                    &textures.chain[index],
-                    level_size(size, index as u32),
-                    down,
+                    source,
+                    pass.source,
+                    target,
+                    pass.target,
+                    program,
+                    &pass.regions,
                 )?;
             }
-            for index in (1..textures.chain.len()).rev() {
-                render_pass(
-                    &textures.chain[index],
-                    level_size(size, index as u32),
-                    &textures.chain[index - 1],
-                    level_size(size, index as u32 - 1),
-                    up,
-                )?;
-            }
-            render_pass(&textures.chain[0], level_size(size, 0), result, size, up)?;
             Ok(())
         })();
         gl.DeleteFramebuffers(1, &fbo);
@@ -639,6 +676,7 @@ fn run_blur(
         gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, read_fbo as u32);
         gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, draw_fbo as u32);
         gl.Viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
         gl.BindTexture(ffi::TEXTURE_2D, texture_binding as u32);
         gl.ActiveTexture(active_texture as u32);
         gl.UseProgram(program as u32);
@@ -681,7 +719,7 @@ impl Element for BackdropBlurElement {
     }
 
     fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
-        Rectangle::from_size(self.size)
+        self.geometry
     }
 
     fn kind(&self) -> Kind {
@@ -690,6 +728,32 @@ impl Element for BackdropBlurElement {
 
     fn is_framebuffer_effect(&self) -> bool {
         true
+    }
+
+    fn framebuffer_effect_damage(
+        &self,
+        _scale: Scale<f64>,
+        damage: &[Rectangle<i32, Physical>],
+    ) -> DamageSet<i32, Physical> {
+        let plan = if self.partial {
+            regions::plan(
+                self.size,
+                self.textures.borrow().chain.len() as u32,
+                self.offset,
+                &self.patches,
+                damage,
+            )
+        } else {
+            regions::plan_for_outputs(
+                self.size,
+                self.textures.borrow().chain.len() as u32,
+                self.offset,
+                vec![Rectangle::from_size(self.size)],
+            )
+        };
+        let required = DamageSet::from_slice(&plan.capture);
+        *self.plan.borrow_mut() = Some(plan);
+        required
     }
 }
 
@@ -706,7 +770,27 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
             return Ok(());
         }
         let textures = self.textures.borrow();
-        let size = textures.size;
+        let mut plan = self.plan.borrow_mut();
+        // Wrappers that use Element's conservative default still get a safe
+        // closed dependency plan covering every displayed patch.
+        let plan = plan.get_or_insert_with(|| {
+            if self.partial {
+                regions::plan(
+                    self.size,
+                    textures.chain.len() as u32,
+                    self.offset,
+                    &self.patches,
+                    &[self.geometry],
+                )
+            } else {
+                regions::plan_for_outputs(
+                    self.size,
+                    textures.chain.len() as u32,
+                    self.offset,
+                    vec![Rectangle::from_size(self.size)],
+                )
+            }
+        });
         let capture = frame.with_context(|gl| unsafe {
             let mut current_draw_fbo = 0_i32;
             let mut current_read_fbo = 0_i32;
@@ -741,18 +825,20 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                 if gl.CheckFramebufferStatus(ffi::DRAW_FRAMEBUFFER) != ffi::FRAMEBUFFER_COMPLETE {
                     return Err(GlesError::FramebufferBindingError);
                 }
-                gl.BlitFramebuffer(
-                    0,
-                    0,
-                    size.w,
-                    size.h,
-                    0,
-                    0,
-                    size.w,
-                    size.h,
-                    ffi::COLOR_BUFFER_BIT,
-                    ffi::NEAREST,
-                );
+                for rect in &plan.capture {
+                    gl.BlitFramebuffer(
+                        rect.loc.x,
+                        rect.loc.y,
+                        rect.loc.x + rect.size.w,
+                        rect.loc.y + rect.size.h,
+                        rect.loc.x,
+                        rect.loc.y,
+                        rect.loc.x + rect.size.w,
+                        rect.loc.y + rect.size.h,
+                        ffi::COLOR_BUFFER_BIT,
+                        ffi::NEAREST,
+                    );
+                }
                 Ok(())
             })();
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, current_read_fbo as u32);
@@ -781,7 +867,7 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
         &self,
         frame: &mut GlesFrame<'_, '_>,
         _src: Rectangle<f64, Buffer>,
-        _dst: Rectangle<i32, Physical>,
+        dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         _opaque_regions: &[Rectangle<i32, Physical>],
         _cache: Option<&UserDataMap>,
@@ -799,6 +885,10 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                 self.down,
                 self.up,
                 self.offset,
+                self.plan
+                    .borrow()
+                    .as_ref()
+                    .expect("capture prepares a blur plan"),
             ) {
                 suspend_blur(&self.retry, "render passes", &error);
                 return Ok(());
@@ -810,13 +900,17 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
         if !self.element.ready.get() {
             return Ok(());
         }
+        let damage: Vec<_> = damage
+            .iter()
+            .map(|r| Rectangle::new(r.loc + dst.loc, r.size))
+            .collect();
         for patch in &self.patches {
             if let Err(error) = composite_patch(
                 frame,
                 &self.element.result,
                 &self.composite,
                 *patch,
-                damage,
+                &damage,
                 self.saturation,
                 self.noise,
             ) {
@@ -1057,3 +1151,6 @@ mod tests {
         assert!(!retry.blocked(now));
     }
 }
+
+#[cfg(test)]
+mod pixel_tests;

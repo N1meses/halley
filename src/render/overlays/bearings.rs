@@ -342,6 +342,7 @@ pub fn elements(
         blur_patches,
         blur_config,
         0,
+        output.current_transform(),
     )? {
         foreground.push(SceneElement::BackdropBlur(blur));
     }

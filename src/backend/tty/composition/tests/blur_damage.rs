@@ -310,3 +310,47 @@ fn opacity_changes_behind_the_effect_invalidate_even_without_a_new_commit() {
     }
     assert_eq!(blur.captures.get(), 3);
 }
+
+#[test]
+fn a_foreground_cover_cannot_cull_background_pixels_needed_by_blur() {
+    let mut renderer = RasterRenderer::default();
+    let mut tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
+    let mut target = RasterTexture::new((100, 80));
+    let blur = CachedBlur::new(Id::new());
+    let content = Id::new();
+    let background = solid(&Id::new(), (0, 0, 100, 80), 0, RED);
+    let cover = solid(&Id::new(), (20, 20, 10, 10), 0, WHITE);
+    for (tick, color) in [GREEN, WHITE, GREEN].into_iter().enumerate() {
+        let scene = [
+            TestElement::Solid(cover.clone()),
+            TestElement::Blur(blur.clone()),
+            TestElement::Solid(solid(&content, (20, 20, 10, 10), tick, color)),
+            TestElement::Solid(background.clone()),
+        ];
+        assert_pixels_match_full_repaint(&mut tracker, &mut renderer, &mut target, &scene);
+        let expected = Color32F::new(
+            (RED.r() * 6.0 + color.r() * 3.0) / 9.0,
+            (RED.g() * 6.0 + color.g() * 3.0) / 9.0,
+            (RED.b() * 6.0 + color.b() * 3.0) / 9.0,
+            1.0,
+        );
+        assert_eq!(
+            target.pixel(19, 24),
+            expected,
+            "hidden content contributes to neighboring blur"
+        );
+    }
+    assert_eq!(blur.captures.get(), 3);
+    let scene = [
+        TestElement::Solid(solid(&Id::new(), (20, 20, 10, 10), 0, WHITE)),
+        TestElement::Blur(blur.clone()),
+        TestElement::Solid(solid(&content, (20, 20, 10, 10), 2, GREEN)),
+        TestElement::Solid(background),
+    ];
+    assert_pixels_match_full_repaint(&mut tracker, &mut renderer, &mut target, &scene);
+    assert_eq!(
+        blur.captures.get(),
+        3,
+        "foreground replacement keeps hidden background cache valid"
+    );
+}

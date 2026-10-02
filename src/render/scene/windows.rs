@@ -730,6 +730,7 @@ pub(super) fn live_window_elements(
             patches,
             context.blur,
             window_blur_epoch(&visual),
+            context.output.current_transform(),
         )? {
             elements.push(SceneElement::BackdropBlur(blur));
         }
