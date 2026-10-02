@@ -225,8 +225,11 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
                 let label_mix = (case == "cluster-label").then(|| {
                     clusters.label_hover_mix(halley_core::cluster::ClusterId::new(1), tick < 90)
                 });
-                let demand =
-                    FrameDemand::new(false, overlays.animating(now) || label_mix.is_some(), false);
+                let demand = FrameDemand::new(
+                    false,
+                    overlays.animating_on_output("actual", now) || label_mix.is_some(),
+                    false,
+                );
                 assert!(!demand.force_full_repaint);
                 let snapshot = overlays.snapshot("actual", now);
                 let scene = actual_resources.scene(

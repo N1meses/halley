@@ -512,22 +512,23 @@ impl OverlayManager {
         }
     }
 
-    pub fn animating(&self, now: Duration) -> bool {
+    /// Match the output ownership used by `snapshot`: a local fade must not
+    /// keep an unrelated output in its continuous redraw loop.
+    pub fn animating_on_output(&self, output: &str, now: Duration) -> bool {
         self.basics
             .as_ref()
-            .is_some_and(|card| !card.finished(now) && card.mix(now) < 1.0)
-            || self
-                .notification
-                .as_ref()
-                .is_some_and(|notification| notification.animating(now))
+            .is_some_and(|card| card.output == output && !card.finished(now) && card.mix(now) < 1.0)
+            || self.notification.as_ref().is_some_and(|notification| {
+                notification.output == output && notification.animating(now)
+            })
             || self
                 .zoom_indicators
-                .values()
-                .any(|indicator| indicator.animating(now))
+                .get(output)
+                .is_some_and(|indicator| indicator.animating(now))
             || self
                 .cluster_indicators
-                .values()
-                .any(|indicator| indicator.animating(now))
+                .get(output)
+                .is_some_and(|indicator| indicator.animating(now))
     }
 
     /// Timer-side lifecycle update. Returns true when a frame must be queued
@@ -594,6 +595,78 @@ fn transition_progress_for(elapsed: Duration, duration: Duration) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_local_overlay_animates_only_on_its_own_output() {
+        for kind in ["basics", "notification", "zoom", "cluster"] {
+            let mut overlays = OverlayManager::default();
+            let mut now = Duration::from_millis(90);
+            match kind {
+                "basics" => {
+                    overlays.show_basics_card("DP-1".into(), "Super".into(), Duration::ZERO);
+                }
+                "notification" => overlays.show_config_error("DP-1".into(), 500, Duration::ZERO),
+                "zoom" => {
+                    overlays.show_zoom_indicator(
+                        "DP-1",
+                        0.75,
+                        &halley_config::ZoomIndicator::default(),
+                        Duration::ZERO,
+                    );
+                    now = Duration::from_millis(800);
+                }
+                "cluster" => overlays.show_cluster_indicator(
+                    "DP-1",
+                    "Work",
+                    halley_core::cluster::layout::ClusterWorkspaceLayoutKind::Tiling,
+                    Duration::ZERO,
+                ),
+                _ => unreachable!(),
+            }
+            assert!(overlays.animating_on_output("DP-1", now), "{kind}");
+            assert!(!overlays.animating_on_output("DP-2", now), "{kind}");
+            let unrelated = overlays.snapshot("DP-2", now);
+            assert!(
+                unrelated.basics.is_none()
+                    && unrelated.notification.is_none()
+                    && unrelated.zoom_indicator.is_none()
+                    && unrelated.cluster_indicator.is_none()
+            );
+            overlays.dismiss_basics_card(Duration::from_millis(200));
+            overlays.wakeup(Duration::from_secs(2));
+            assert!(
+                !overlays.animating_on_output("DP-1", Duration::from_secs(2)),
+                "{kind}"
+            );
+            assert!(
+                !overlays.animating_on_output("DP-2", Duration::from_secs(2)),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn indicator_hold_expiry_and_reactivation_are_independent_per_output() {
+        let mut overlays = OverlayManager::default();
+        let config = halley_config::ZoomIndicator {
+            hold_duration_ms: 120,
+            fade_duration_ms: 180,
+            ..Default::default()
+        };
+        overlays.show_zoom_indicator("DP-1", 0.75, &config, Duration::ZERO);
+        overlays.show_zoom_indicator("DP-2", 0.50, &config, Duration::from_millis(100));
+        let now = Duration::from_millis(150);
+        assert!(overlays.animating_on_output("DP-1", now));
+        assert!(!overlays.animating_on_output("DP-2", now));
+        let now = Duration::from_millis(310);
+        overlays.wakeup(now);
+        assert!(!overlays.animating_on_output("DP-1", now));
+        assert!(overlays.animating_on_output("DP-2", now));
+        assert!(overlays.snapshot("DP-1", now).zoom_indicator.is_none());
+        overlays.show_zoom_indicator("DP-1", 0.60, &config, now);
+        assert!(!overlays.animating_on_output("DP-1", now));
+        assert!(overlays.animating_on_output("DP-2", now));
+    }
 
     #[test]
     fn repeated_error_replaces_message_lifetime_without_flashing_out() {
@@ -691,7 +764,7 @@ mod tests {
             overlays.snapshot("DP-1", Duration::ZERO).exit_mix,
             Some(1.0)
         );
-        assert!(!overlays.animating(Duration::ZERO));
+        assert!(!overlays.animating_on_output("DP-1", Duration::ZERO));
         assert!(!overlays.show_exit(Duration::from_millis(1)));
         assert!(overlays.exit_modal_active());
 
@@ -802,9 +875,9 @@ mod tests {
 
         let mut overlays = OverlayManager::default();
         overlays.show_zoom_indicator("DP-1", 0.75, &config, Duration::ZERO);
-        assert!(!overlays.animating(Duration::from_millis(749)));
+        assert!(!overlays.animating_on_output("DP-1", Duration::from_millis(749)));
         assert!(overlays.wakeup(Duration::from_millis(750)));
-        assert!(overlays.animating(Duration::from_millis(750)));
+        assert!(overlays.animating_on_output("DP-1", Duration::from_millis(750)));
         assert!(overlays.wakeup(Duration::from_millis(930)));
     }
 
@@ -911,7 +984,7 @@ mod tests {
             card.mix, 0.0,
             "the card fades in instead of appearing abruptly"
         );
-        assert!(overlays.animating(Duration::ZERO));
+        assert!(overlays.animating_on_output("DP-1", Duration::ZERO));
         assert_eq!(
             overlays
                 .snapshot("DP-1", Duration::from_millis(180))

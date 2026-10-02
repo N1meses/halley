@@ -1245,7 +1245,10 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         && crate::shell::cluster_composer::tick_session(app, target_presentation_time);
     let apogee_animating = crate::shell::apogee::tick(app, target_presentation_time);
     let background_animating = app.background_animates_on_output(output, target_presentation_time);
-    let overlay_animating = app.shell.overlays.animating(target_presentation_time);
+    let overlay_animating = app
+        .shell
+        .overlays
+        .animating_on_output(&output.name(), target_presentation_time);
     let cluster_geometry_animating = app
         .clusters
         .is_animating_on_output(&output.name(), target_presentation_time)
