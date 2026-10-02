@@ -17,6 +17,8 @@ use super::RenderRequest;
 use crate::presentation::window::{
     window_visual_state, window_visual_state_with_cluster_presentation,
 };
+#[cfg(test)]
+mod animation_pixels;
 mod apogee_clusters;
 mod capture_ui;
 mod cluster_composer;

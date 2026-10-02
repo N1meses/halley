@@ -13,6 +13,7 @@ use super::*;
 use crate::session::tty::FrameDemand;
 
 mod blur_damage;
+mod local_animation;
 
 const RED: Color32F = Color32F::new(1.0, 0.0, 0.0, 1.0);
 const GREEN: Color32F = Color32F::new(0.0, 1.0, 0.0, 1.0);
@@ -305,7 +306,7 @@ fn unchanged_scene_skips_composition_and_transfer_for_repeated_pointer_redraws()
 
 #[test]
 fn fps_samples_redraw_only_changed_chip_pixels_on_primary_and_secondary_outputs() {
-    let fps = FrameDemand::new(false, true);
+    let fps = FrameDemand::new(false, false, true);
     assert!(fps.keep_redrawing);
     let mut renderer = RasterRenderer::default();
     let (mut frame, texture) = compose(&mut renderer);
@@ -371,9 +372,9 @@ fn fps_samples_redraw_only_changed_chip_pixels_on_primary_and_secondary_outputs(
 }
 
 #[test]
-fn scene_animation_with_or_without_fps_still_forces_full_primary_and_secondary_repaints() {
+fn geometry_animation_with_or_without_fps_still_forces_full_primary_and_secondary_repaints() {
     for fps_visible in [false, true] {
-        let animation = FrameDemand::new(true, fps_visible);
+        let animation = FrameDemand::new(true, false, fps_visible);
         assert!(animation.keep_redrawing);
         let mut renderer = RasterRenderer::default();
         let (mut frame, texture) = compose(&mut renderer);
@@ -862,7 +863,7 @@ fn framebuffer_effect_recaptures_when_background_changes_and_reuses_when_static(
 
 #[test]
 fn fps_selective_damage_preserves_effect_capture_on_primary_and_secondary_outputs() {
-    let fps = FrameDemand::new(false, true);
+    let fps = FrameDemand::new(false, false, true);
     let mut renderer = RasterRenderer::default();
     let (mut frame, texture) = compose(&mut renderer);
     let mut primary_tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
