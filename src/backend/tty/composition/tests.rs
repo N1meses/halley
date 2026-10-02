@@ -12,6 +12,8 @@ use smithay::utils::user_data::UserDataMap;
 use super::*;
 use crate::session::tty::FrameDemand;
 
+mod blur_damage;
+
 const RED: Color32F = Color32F::new(1.0, 0.0, 0.0, 1.0);
 const GREEN: Color32F = Color32F::new(0.0, 1.0, 0.0, 1.0);
 const WHITE: Color32F = Color32F::new(1.0, 1.0, 1.0, 1.0);
