@@ -179,6 +179,10 @@ Halley advertises `wp_single_pixel_buffer_manager_v1` version 1. Clients can
 create a solid-color buffer without shared-memory storage; Smithay handles
 its lifecycle and rendering.
 
+Exclusive layer-shell focus controls which client receives forwarded keyboard
+input. Halley still evaluates compositor shortcuts unless the session is locked
+or the focused surface has an active keyboard-shortcuts inhibitor.
+
 Halley advertises `wp_content_type_manager_v1` and
 `xdg_toplevel_icon_manager_v1` version 1. Smithay stores content hints and icon
 metadata with committed surface state. These hints do not change maximization,

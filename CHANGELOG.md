@@ -74,6 +74,9 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Keep compositor shortcuts available while exclusive layer-shell surfaces
+  have keyboard focus. Session locks and active shortcut inhibitors continue
+  to block bindings. Adapted from noervthere's layer-focus fix.
 - Remove `vendor/` and the Smithay Cargo override. Pin `smithay` and
   `smithay-drm-extras` to unmodified upstream revision
   `79bbed5e1199090d787115614847a79c76607181`, matching Niri's checked pin.

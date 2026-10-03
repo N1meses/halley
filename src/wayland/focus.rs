@@ -20,10 +20,6 @@ impl KeyboardFocus {
             | Self::Window(surface) => surface.clone(),
         }
     }
-
-    pub fn bypasses_shortcuts(&self) -> bool {
-        matches!(self, Self::ExclusiveLayer(_))
-    }
 }
 
 /// Resolves actual seat focus without conflating it with Halley's persistent
