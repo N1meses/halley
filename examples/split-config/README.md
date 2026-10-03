@@ -23,8 +23,6 @@ Verify the complete gathered configuration with:
 halleyctl config verify --config examples/split-config/halley.rune
 ```
 
-Startup never rewrites any existing single-file or split configuration. Inspect
-an optional structural migration with `halleyctl config migrate --dry-run
---config PATH`, then run it again without `--dry-run` after reviewing the
-result. A gathered root cannot identify which source file owns a section, so
-run the command directly against the file that owns the affected section.
+Halley never backs up, migrates, or replaces an existing single-file or split
+configuration. Edit settings in the file that owns the affected section, then
+verify the root with `halleyctl config verify --config PATH`.

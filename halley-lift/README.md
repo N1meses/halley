@@ -22,10 +22,8 @@ already running. Halley launches it as an ordinary command line with the session
 environment, so no arguments or environment variables are required and the whole
 integration is one line in the `keybinds` section.
 
-Startup never rewrites an existing configuration, and routine structural
-migration preserves launcher bindings in 0.6-or-newer configs. (Explicitly
-migrating an incompatible pre-0.6 config backs it up and installs the current
-default.) Keep exactly one launcher on `Mod+D`. To use the bundled launcher:
+Halley keeps existing configurations unchanged. Keep exactly one launcher on
+`Mod+D`. To use the bundled launcher, edit the binding yourself:
 
 ```rune
 "$var.mod+d" "halley-lift"
