@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Add `cursor.disable-hardware-cursor` (default `false`). Native outputs can
+  use hardware cursor planes by default; set it to `true` and reload to force
+  cursor composition when a driver shows cursor artifacts. Cross-GPU outputs
+  retain their existing composed cursor path.
 - Advertise content-type and XDG toplevel-icon protocol version 1, accepting
   committed content hints and icon metadata through upstream Smithay.
 - Advertise `wp_single_pixel_buffer_manager_v1` for clients using solid-color

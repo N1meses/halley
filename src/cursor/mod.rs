@@ -98,6 +98,7 @@ pub struct CursorManager {
     theme: CursorTheme,
     default_theme: CursorTheme,
     size: u8,
+    disable_hardware_cursor: bool,
     image: CursorImageStatus,
     overrides: CursorOverrides,
     cache: RefCell<HashMap<(CursorIcon, i32), Rc<PreparedCursor>>>,
@@ -111,6 +112,7 @@ impl CursorManager {
             theme: CursorTheme::load(&config.theme),
             default_theme: CursorTheme::load("default"),
             size: config.size,
+            disable_hardware_cursor: config.disable_hardware_cursor,
             image: CursorImageStatus::default_named(),
             overrides: CursorOverrides::default(),
             cache: RefCell::new(HashMap::new()),
@@ -119,8 +121,10 @@ impl CursorManager {
     }
 
     pub fn reload(&mut self, config: &halley_config::Cursor) -> bool {
+        let hardware_changed = self.disable_hardware_cursor != config.disable_hardware_cursor;
+        self.disable_hardware_cursor = config.disable_hardware_cursor;
         if self.theme_name == config.theme && self.size == config.size {
-            return false;
+            return hardware_changed;
         }
         self.theme_name.clone_from(&config.theme);
         self.theme = CursorTheme::load(&config.theme);
@@ -128,6 +132,10 @@ impl CursorManager {
         self.size = config.size;
         self.cache.get_mut().clear();
         true
+    }
+
+    pub fn hardware_cursor_disabled(&self) -> bool {
+        self.disable_hardware_cursor
     }
 
     pub fn frame(&self, icon: CursorIcon, output_scale: i32, time: Duration) -> Rc<CursorFrame> {
@@ -352,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_only_invalidates_for_theme_or_size_changes() {
+    fn reload_detects_theme_size_and_hardware_policy_changes() {
         let config = halley_config::Cursor::default();
         let mut manager = CursorManager::new(&config);
 
@@ -361,6 +369,21 @@ mod tests {
         let changed = halley_config::Cursor { size: 32, ..config };
         assert!(manager.reload(&changed));
         assert!(!manager.reload(&changed));
+
+        // Changing plane policy must trigger redraw without discarding the
+        // theme cache or the client's current cursor image.
+        manager.set_image(CursorImageStatus::Named(CursorIcon::Text));
+        let changed = halley_config::Cursor {
+            disable_hardware_cursor: true,
+            ..changed
+        };
+        assert!(manager.reload(&changed));
+        assert!(manager.hardware_cursor_disabled());
+        assert!(!manager.reload(&changed));
+        assert!(matches!(
+            manager.image,
+            CursorImageStatus::Named(CursorIcon::Text)
+        ));
     }
 
     #[test]

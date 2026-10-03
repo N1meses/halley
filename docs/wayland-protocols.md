@@ -188,3 +188,9 @@ Halley advertises `wp_content_type_manager_v1` and
 metadata with committed surface state. These hints do not change maximization,
 fullscreen, or focus policy, and accepting icon metadata does not yet display
 client-supplied icons in Halley UI.
+
+Native outputs use hardware cursor planes when the cursor and driver support
+them. Set `disable-hardware-cursor true` in the `cursor` section and reload to
+force software composition if cursor artifacts appear. Winit has no DRM cursor
+plane, and cross-GPU outputs retain software cursor composition inside the
+transferred scene texture.

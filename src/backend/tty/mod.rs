@@ -1395,6 +1395,7 @@ impl Renderable for TtyBackend {
         };
         let target_presentation_time = request.frame.target_presentation_time;
         let force_full_repaint = request.frame.force_full_repaint;
+        let disable_hardware_cursor = request.cursor.cursor.hardware_cursor_disabled();
         let session_lock_generation = request.desktop.session_lock.frame_generation();
         let elements = {
             let mut renderer = self
@@ -1426,17 +1427,19 @@ impl Renderable for TtyBackend {
                 .gpu_manager
                 .single_renderer(&self.primary_render_node)
                 .map_err(|err| format!("primary renderer unavailable: {err:?}"))?;
-            let result =
-                self.drm_outputs[entry_index]
-                    .drm_output
-                    .render_frame::<_, crate::render::conservative::Unculled<'_, SceneElement>>(
-                        renderer.as_mut(),
-                        &prepared_elements,
-                        clear,
-                        dmabuf::frame_flags_for_scene(elements.iter().any(
-                            smithay::backend::renderer::element::Element::is_framebuffer_effect,
-                        )),
-                    )?;
+            let result = self.drm_outputs[entry_index]
+                .drm_output
+                .render_frame::<_, crate::render::conservative::Unculled<'_, SceneElement>>(
+                renderer.as_mut(),
+                &prepared_elements,
+                clear,
+                dmabuf::frame_flags_for_scene(
+                    elements
+                        .iter()
+                        .any(smithay::backend::renderer::element::Element::is_framebuffer_effect),
+                    disable_hardware_cursor,
+                ),
+            )?;
             if result.needs_sync()
                 && let PrimaryPlaneElement::Swapchain(element) = &result.primary_element
                 && let Err(err) = element.sync.wait()

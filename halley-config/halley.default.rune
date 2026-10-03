@@ -258,6 +258,10 @@ cursor:
   # for each output scale.
   size 24
 
+  # Native DRM cursor planes are enabled when supported. Set true if the
+  # driver produces cursor artifacts; reload applies the change.
+  disable-hardware-cursor false
+
   # Hide after a physical keyboard press, without changing pointer focus,
   # grabs, or constraints. Pointer motion, buttons, and scrolling reveal it.
   hide-when-typing false
