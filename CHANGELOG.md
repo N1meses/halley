@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Add `cursor.disable-hardware-cursor` (default `false`). Native outputs can
+  use hardware cursor planes by default; set it to `true` and reload to force
+  cursor composition when a driver shows cursor artifacts. Cross-GPU outputs
+  retain their existing composed cursor path.
+- Advertise content-type and XDG toplevel-icon protocol version 1, accepting
+  committed content hints and icon metadata through upstream Smithay.
+- Advertise `wp_single_pixel_buffer_manager_v1` for clients using solid-color
+  Wayland buffers, through unmodified upstream Smithay.
 - Advertise the staging `ext-workspace-v1` global, so taskbars, docks, and
   scripts can enumerate Halley's clusters per output and activate or deactivate
   them. One workspace group is published per mapped output, clusters stay
@@ -70,6 +78,9 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Keep compositor shortcuts available while exclusive layer-shell surfaces
+  have keyboard focus. Session locks and active shortcut inhibitors continue
+  to block bindings. Adapted from noervthere's layer-focus fix.
 - Remove `vendor/` and the Smithay Cargo override. Pin `smithay` and
   `smithay-drm-extras` to unmodified upstream revision
   `79bbed5e1199090d787115614847a79c76607181`, matching Niri's checked pin.
@@ -146,6 +157,10 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Accept negative mouse/touchpad acceleration values and quoted numeric speeds;
+  `sensitivity` is an alias for `accel-speed`. Use the unmodified upstream
+  `rune-cfg` signed-number fix without a vendor copy. The compatibility work is
+  informed by noervthere's Halley fork.
 - Fix builds with default features disabled by guarding XWayland-only popup
   handling and completing the no-op tracing implementation.
 - Reject IME requests during screen locking with a deferred protocol error,

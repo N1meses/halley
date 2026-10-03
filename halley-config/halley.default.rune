@@ -180,7 +180,7 @@ input:
     #
     # enabled true
     # natural-scroll false
-    # accel-speed 0.0             # -1.0 through 1.0
+    # accel-speed -0.5            # -1.0 through 1.0; sensitivity is an alias
     # accel-profile "adaptive"    # "adaptive" or "flat"
     # scroll-method "two-finger"  # "none", "two-finger", "edge", or
     #                             # "on-button-down"
@@ -257,6 +257,10 @@ cursor:
   # Base logical size. Halley selects the closest frame supplied by the theme
   # for each output scale.
   size 24
+
+  # Native DRM cursor planes are enabled when supported. Set true if the
+  # driver produces cursor artifacts; reload applies the change.
+  disable-hardware-cursor false
 
   # Hide after a physical keyboard press, without changing pointer focus,
   # grabs, or constraints. Pointer motion, buttons, and scrolling reveal it.

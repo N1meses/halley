@@ -174,3 +174,23 @@ fields, and restarting the IME. An already running compositor keeps its old
 protocol implementation until it is restarted. `wayland-info` should list
 `zwp_input_method_manager_v2` at version 1; the `v2` in the interface name is the
 protocol generation, not the advertised interface version.
+
+Halley advertises `wp_single_pixel_buffer_manager_v1` version 1. Clients can
+create a solid-color buffer without shared-memory storage; Smithay handles
+its lifecycle and rendering.
+
+Exclusive layer-shell focus controls which client receives forwarded keyboard
+input. Halley still evaluates compositor shortcuts unless the session is locked
+or the focused surface has an active keyboard-shortcuts inhibitor.
+
+Halley advertises `wp_content_type_manager_v1` and
+`xdg_toplevel_icon_manager_v1` version 1. Smithay stores content hints and icon
+metadata with committed surface state. These hints do not change maximization,
+fullscreen, or focus policy, and accepting icon metadata does not yet display
+client-supplied icons in Halley UI.
+
+Native outputs use hardware cursor planes when the cursor and driver support
+them. Set `disable-hardware-cursor true` in the `cursor` section and reload to
+force software composition if cursor artifacts appear. Winit has no DRM cursor
+plane, and cross-GPU outputs retain software cursor composition inside the
+transferred scene texture.

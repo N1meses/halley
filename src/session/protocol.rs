@@ -1534,6 +1534,8 @@ impl<D: SessionDriver> smithay::wayland::background_effect::ExtBackgroundEffectH
 
 crate::upstream_protocols::delegate_upstream_protocols!(@<D: SessionDriver> Session<D>, crate::wayland::text_input::allow_request);
 
+impl<D: SessionDriver> smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler for Session<D> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -262,8 +262,8 @@ fn is_modifier_keysym(keysym: Keysym) -> bool {
     )
 }
 
-fn shortcut_policy_allows_bindings(focus_bypasses_shortcuts: bool, inhibitor_active: bool) -> bool {
-    !focus_bypasses_shortcuts && !inhibitor_active
+fn shortcut_policy_allows_bindings(session_locked: bool, inhibitor_active: bool) -> bool {
+    !session_locked && !inhibitor_active
 }
 
 pub(super) fn bindings_enabled<D: SessionDriver>(session: &Session<D>) -> bool {
@@ -274,9 +274,6 @@ pub(super) fn bindings_enabled<D: SessionDriver>(session: &Session<D>) -> bool {
         &session.nodes,
         crate::frame_clock::monotonic_now(),
     );
-    let bypasses_shortcuts = focus
-        .as_ref()
-        .is_some_and(|focus| focus.bypasses_shortcuts());
     let inhibitor_active = focus
         .map(|focus| focus.surface())
         .and_then(|surface| {
@@ -285,7 +282,10 @@ pub(super) fn bindings_enabled<D: SessionDriver>(session: &Session<D>) -> bool {
                 .keyboard_shortcuts_inhibitor_for_surface(&surface)
         })
         .is_some_and(|inhibitor| inhibitor.is_active());
-    shortcut_policy_allows_bindings(bypasses_shortcuts, inhibitor_active)
+    // Exclusive layer focus owns forwarded keys, but does not itself inhibit
+    // compositor shortcuts. Lock-screen isolation and explicit client
+    // inhibitors remain authoritative.
+    shortcut_policy_allows_bindings(session.session_lock.active(), inhibitor_active)
 }
 
 pub(super) fn binding_context_for_output<D: SessionDriver>(
@@ -4320,7 +4320,7 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_policy_respects_shell_and_client_inhibition() {
+    fn shortcut_policy_respects_session_lock_and_client_inhibition() {
         assert!(shortcut_policy_allows_bindings(false, false));
         assert!(!shortcut_policy_allows_bindings(true, false));
         assert!(!shortcut_policy_allows_bindings(false, true));
