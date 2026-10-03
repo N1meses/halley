@@ -116,7 +116,10 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             self,
             &window,
             "new-window",
-            format_args!("generation={generation} geometry={:?}", window.geometry()),
+            format_args!(
+                "generation={generation} geometry={:?}",
+                window.last_configure()
+            ),
         );
         eventline::debug!(
             "xwayland: registered managed window xid={} generation={generation}",
@@ -138,7 +141,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             "map-request",
             format_args!(
                 "geometry={:?} fullscreen={} maximized={} mapped={}",
-                surface.geometry(),
+                surface.last_configure(),
                 surface.is_fullscreen(),
                 surface.is_maximized(),
                 surface.is_mapped(),
@@ -214,7 +217,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
         let configured = self.xwayland.override_redirect_placements.remove(&xid);
         match override_redirect_map_admission(first_map, configured.is_some()) {
             OverrideRedirectMapAdmission::ImmediateFresh => {
-                map_override_redirect(self, surface.clone(), surface.geometry(), None, false);
+                map_override_redirect(self, surface.clone(), surface.last_configure(), None, false);
             }
             OverrideRedirectMapAdmission::ImmediateConfigured => {
                 let geometry = configured
@@ -223,7 +226,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
                 map_override_redirect(self, surface, geometry, None, false);
             }
             OverrideRedirectMapAdmission::AwaitConfigure => {
-                let geometry = surface.geometry();
+                let geometry = surface.last_configure();
                 defer_override_redirect_remap(self, surface, geometry);
             }
         }
@@ -234,7 +237,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             self,
             &surface,
             "unmapped",
-            format_args!("geometry={:?}", surface.geometry()),
+            format_args!("geometry={:?}", surface.last_configure()),
         );
         cancel_pending_override_redirect(self, surface.window_id());
         self.xwayland
@@ -270,7 +273,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             self,
             &surface,
             "destroyed",
-            format_args!("geometry={:?}", surface.geometry()),
+            format_args!("geometry={:?}", surface.last_configure()),
         );
         cancel_pending_override_redirect(self, surface.window_id());
         self.xwayland
@@ -317,7 +320,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             "configure-request",
             format_args!(
                 "requested={{x:{x:?},y:{y:?},width:{width:?},height:{height:?}}} resolved={geometry:?} current={:?}",
-                surface.geometry(),
+                surface.last_configure(),
             ),
         );
         if surface.is_transient_for().is_some()
@@ -642,7 +645,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             self,
             &surface,
             "fullscreen-request",
-            format_args!("geometry={:?}", surface.geometry()),
+            format_args!("geometry={:?}", surface.last_configure()),
         );
         enter_fullscreen(self, &surface, FullscreenRequestOrigin::Client);
         self.request_redraw();
@@ -653,7 +656,7 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
             self,
             &surface,
             "unfullscreen-request",
-            format_args!("geometry={:?}", surface.geometry()),
+            format_args!("geometry={:?}", surface.last_configure()),
         );
         leave_fullscreen(self, &surface, FullscreenRequestOrigin::Client);
         self.request_redraw();

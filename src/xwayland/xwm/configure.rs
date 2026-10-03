@@ -224,7 +224,8 @@ pub(super) fn requested_geometry(
     width: Option<u32>,
     height: Option<u32>,
 ) -> Rectangle<i32, Logical> {
-    let current = surface.geometry();
+    // Smithay geometry() is surface-local; configure requests use X root coordinates.
+    let current = surface.last_configure();
     let location = requested_location(current.loc, x, y, surface.is_transient_for().is_some());
     let requested_size = Size::from((
         width.map(saturating_i32).unwrap_or(current.size.w),
@@ -260,6 +261,42 @@ mod tests {
     use super::{SizePolicy, requested_location};
     use smithay::utils::{Logical, Point, Size};
     use x11rb::properties::{AspectRatio, WmSizeHints};
+
+    /// Uses the upstream surface implementation; no X windows are created.
+    #[test]
+    #[ignore = "requires an X server in DISPLAY to resolve Smithay's atoms"]
+    fn upstream_x11_configure_requests_preserve_root_coordinates() {
+        use smithay::utils::Rectangle;
+        use smithay::xwayland::{X11Surface, xwm::Atoms};
+        use std::sync::{Arc, Weak, atomic::AtomicBool};
+
+        let (connection, _) = x11rb::connect(None).expect("connect to DISPLAY");
+        let atoms = Atoms::new(&connection).unwrap().reply().unwrap();
+        for location in [(4106, 151), (-1200, 80)] {
+            let root = Rectangle::new(location.into(), (640, 480).into());
+            let surface = X11Surface::new(
+                None,
+                0,
+                false,
+                Weak::new(),
+                atoms,
+                None,
+                root,
+                Arc::new(AtomicBool::new(false)),
+            );
+            // Upstream's visible rectangle starts at the surface origin even
+            // when the X window lives on another output.
+            assert_eq!(surface.geometry().loc, Point::from((0, 0)));
+            assert_eq!(
+                super::requested_geometry(&surface, None, None, None, None),
+                root
+            );
+            assert_eq!(
+                super::requested_geometry(&surface, None, None, Some(800), None),
+                Rectangle::new(root.loc, (800, 480).into()),
+            );
+        }
+    }
 
     fn constrain(hints: WmSizeHints, requested: (i32, i32)) -> Size<i32, Logical> {
         SizePolicy::from_hints(Some(hints)).constrain(Size::from(requested))

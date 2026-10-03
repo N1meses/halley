@@ -157,6 +157,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Restore XWayland dropdown placement in Steam and Qt apps by using X11 root
+  configure geometry for popup offsets and managed position synchronization,
+  preventing menus from appearing at the owner's top-left corner.
 - Keep wl-clipboard's temporary focus helpers out of cluster layouts and return
   keyboard focus to their original window, preventing Neovim deletes and yanks
   from sending subsequent typing to another tile.

@@ -634,7 +634,7 @@ pub(super) fn source_point_from_owner_x_root<D: SessionDriver>(
     child_x_root: Point<i32, Logical>,
     now: std::time::Duration,
 ) -> Option<Point<i32, Logical>> {
-    let owner_x_root = owner.x11_surface()?.geometry().loc;
+    let owner_x_root = owner.x11_surface()?.last_configure().loc;
     let (_, presentation) = presentation_for_window(session, owner, now)?;
     Some(owner_relative_source_point(
         presentation.root_source_origin(),
@@ -676,7 +676,7 @@ fn presentation_geometry_is_moving<D: SessionDriver>(
 /// Republishes a managed X11 window's position to the X server when the
 /// compositor has moved it without configuring the client.
 ///
-/// The compositor's `Space` and `X11Surface::geometry()` are deliberately
+/// The compositor's `Space` and `X11Surface::last_configure()` are deliberately
 /// separate stores. `Space` is Halley's Field/source coordinate system, while
 /// X11 geometry is expressed in the fixed root-desktop coordinate system.
 /// Publishing `Space::element_location` directly works only while an output's
@@ -700,7 +700,7 @@ pub(crate) fn sync_position<D: SessionDriver>(session: &Session<D>, window: &Win
         return false;
     };
     let location = presentation.root_screen_origin();
-    let current = surface.geometry();
+    let current = surface.last_configure();
     let owns_own_geometry = session.xwayland.pending_windows.contains_key(&xid)
         || session.xwayland.client_geometry_guarded(xid, now)
         || presentation_geometry_is_moving(session, window, &output, now)
@@ -763,7 +763,7 @@ pub(crate) fn configure_window<D: SessionDriver>(
     // the corresponding root-desktop position after any motion has finished.
     session.wayland.space.relocate_element(window, geometry.loc);
     let size = super::configure::constrain_surface_size(surface, geometry.size);
-    let current = surface.geometry();
+    let current = surface.last_configure();
     if current.size == size {
         return;
     }
