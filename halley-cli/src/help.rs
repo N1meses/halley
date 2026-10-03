@@ -16,7 +16,7 @@ Commands:
   stack          Cycle an active stacking cluster
   tile           Focus or swap cluster tiles
   portal         Inspect the desktop portal backend
-  config         Edit, migrate, or verify the selected configuration
+  config         Edit or verify the selected configuration
   quit           Open Halley's exit confirmation
 
 Retrieval in the compositor:
@@ -68,14 +68,8 @@ Usage:
   halleyctl config verify
   halleyctl config verify -c PATH
   halleyctl config verify --config PATH
-  halleyctl config migrate [--dry-run]
-  halleyctl config migrate [--dry-run] -c PATH
-  halleyctl config migrate [--dry-run] --config PATH
 
 `edit` uses $VISUAL, then $EDITOR, and falls back to vi.
-`migrate` explicitly applies structurally detected compatibility updates. It
-validates the complete result and keeps a timestamped backup. Pre-0.6 files
-require replacement with the current default. Use --dry-run to inspect first.
 ";
 
 pub const NODE_HELP: &str = "\

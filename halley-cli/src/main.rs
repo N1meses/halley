@@ -162,7 +162,6 @@ fn main() -> ExitCode {
         Ok(Action::Portal { command, json }) => cmd::portal::run(command, json),
         Ok(Action::PortalHelp) => show(help::PORTAL_HELP),
         Ok(Action::ConfigEdit(path)) => config::edit(path),
-        Ok(Action::ConfigMigrate { path, dry_run }) => config::migrate(path, dry_run),
         Ok(Action::ConfigVerify(path)) => config::verify(path),
         Ok(Action::ConfigHelp) => show(help::CONFIG_HELP),
         Ok(Action::Quit) => with_client(|client| {

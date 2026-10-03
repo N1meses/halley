@@ -426,9 +426,8 @@ configured keyboard repeat settings; camera easing follows the queued target.
 Window geometry and keyboard focus do not change. Fullscreen, maximize, and
 active cluster views block Field panning.
 
-Panning actions intentionally have no default bindings and are not added by
-migration. Assign them to your preferred chords; existing default bindings are
-preserved. Bare `pan-field` remains the pointer-drag action.
+Panning actions intentionally have no default bindings. Assign them to your
+preferred chords. Bare `pan-field` remains the pointer-drag action.
 
 Scripting uses the same operations and returns an error when unavailable:
 
@@ -438,8 +437,8 @@ halleyctl pan left
 ```
 
 The client API exposes `transfer_window(direction)` and `pan_field(direction)`.
-Transfer bindings are included in new configs; existing configs can receive
-unoccupied bindings through `halleyctl config migrate`.
+Transfer bindings are included in new configs; add them yourself to existing
+configs using unoccupied chords.
 
 Keyboard actions and binding scopes follow the selected monitor even in hover
 focus mode. Successful window transfers move the pointer to the transferred
