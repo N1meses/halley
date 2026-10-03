@@ -17,13 +17,14 @@ All notable changes to this project will be documented in this file.
   coordinates, without sending the drag to the app. Attached popups, menus, and
   tooltips remain client-managed. Ordinary app-controlled dragging is unchanged.
 - Add `Super+Alt+Shift+Arrow` Field window transfers between monitors, with
-  bootstrap defaults, examples, and conflict-aware configuration migration.
+  bootstrap defaults and examples. Existing configs need these bindings added
+  manually.
 - Add optional directional `pan-field` keyboard actions without default binds,
   plus `halleyctl pan` and `halleyctl monitor transfer` scripting commands.
 - Add `animations.node.collapse-duration-ms` (280 ms by default) for the window
   snapshot shrinking and traveling into a node, independent of marker appearance
   and ordinary window-close/custom-shader duration. Manual `Mod+N` collapse and
-  automatic decay use it; existing configs receive the setting through migration.
+  automatic decay use it; omitted settings use the built-in default.
 - Add smooth, output-local `Mod+A` `arrange-visible` Field mosaics for
   ordinary windows centered in the active output's visible work area, with
   constraint-aware exclusions and minimum-travel placement. Pressing `Mod+A`
@@ -69,6 +70,9 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Remove `halleyctl config migrate` and its configuration backup and replacement
+  code. Existing configurations stay user-owned; edit compatibility changes
+  manually and check them with `halleyctl config verify`.
 - Apply window-rule `opacity` to client content and popups only. Titlebars,
   borders, pin badges, and compositor shadows stay fully opaque. Open and
   close animations still fade chrome with the window.

@@ -6,11 +6,9 @@
 #   $HOME/.config/halley/halley.rune
 #
 # Halley creates this file only when it does not already exist. Startup never
-# rewrites an existing config. Optional compatibility updates are structural
-# and explicit: inspect them with `halleyctl config migrate --dry-run`, then
-# apply them with `halleyctl config migrate`. Applied migrations validate the
-# complete result, write atomically, and retain a timestamped backup. While
-# Halley is running, valid saves are applied automatically. A syntactically
+# rewrites, backs up, or replaces an existing config. Edit settings and bindings
+# yourself and check the result with `halleyctl config verify`. While Halley is
+# running, valid saves are applied automatically. A syntactically
 # invalid or incomplete save is rejected as one unit and the last valid
 # configuration remains active.
 #
