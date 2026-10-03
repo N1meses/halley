@@ -174,3 +174,7 @@ fields, and restarting the IME. An already running compositor keeps its old
 protocol implementation until it is restarted. `wayland-info` should list
 `zwp_input_method_manager_v2` at version 1; the `v2` in the interface name is the
 protocol generation, not the advertised interface version.
+
+Halley advertises `wp_single_pixel_buffer_manager_v1` version 1. Clients can
+create a solid-color buffer without shared-memory storage; Smithay handles
+its lifecycle and rendering.

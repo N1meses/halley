@@ -32,6 +32,7 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::ShmState;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
@@ -223,6 +224,7 @@ impl<D: SessionDriver> Session<D> {
             XdgActivationState::new::<Self>(&display_handle),
             WlrLayerShellState::new::<Self>(&display_handle),
             BackgroundEffectState::new::<Self>(&display_handle),
+            SinglePixelBufferState::new::<Self>(&display_handle),
             XdgDecorationState::new::<Self>(&display_handle),
             ViewporterState::new::<Self>(&display_handle),
             FractionalScaleManagerState::new::<Self>(&display_handle),

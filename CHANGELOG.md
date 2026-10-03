@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Advertise `wp_single_pixel_buffer_manager_v1` for clients using solid-color
+  Wayland buffers, through unmodified upstream Smithay.
 - Advertise the staging `ext-workspace-v1` global, so taskbars, docks, and
   scripts can enumerate Halley's clusters per output and activate or deactivate
   them. One workspace group is published per mapped output, clusters stay

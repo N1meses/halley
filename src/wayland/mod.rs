@@ -52,6 +52,7 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::ShmState;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
@@ -214,6 +215,7 @@ pub struct WaylandState {
     // Retained for the lifetime of the advertised ext-background-effect
     // global. Committed per-surface regions live in Smithay's surface cache.
     _background_effect_state: BackgroundEffectState,
+    _single_pixel_buffer_state: SinglePixelBufferState,
     // Retained for the lifetime of its advertised global.
     _xdg_decoration_state: XdgDecorationState,
     _viewporter_state: ViewporterState,
@@ -308,6 +310,7 @@ impl WaylandState {
         xdg_activation_state: XdgActivationState,
         layer_shell_state: WlrLayerShellState,
         background_effect_state: BackgroundEffectState,
+        single_pixel_buffer_state: SinglePixelBufferState,
         xdg_decoration_state: XdgDecorationState,
         viewporter_state: ViewporterState,
         fractional_scale_manager_state: FractionalScaleManagerState,
@@ -340,6 +343,7 @@ impl WaylandState {
             xdg_activation_state,
             layer_shell_state,
             _background_effect_state: background_effect_state,
+            _single_pixel_buffer_state: single_pixel_buffer_state,
             _xdg_decoration_state: xdg_decoration_state,
             _viewporter_state: viewporter_state,
             _fractional_scale_manager_state: fractional_scale_manager_state,
