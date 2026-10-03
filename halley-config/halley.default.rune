@@ -6,11 +6,11 @@
 #   $HOME/.config/halley/halley.rune
 #
 # Halley creates this file only when it does not already exist. Startup never
-# rewrites, backs up, or replaces an existing config. Edit settings and bindings
-# yourself and check the result with `halleyctl config verify`. While Halley is
-# running, valid saves are applied automatically. A syntactically
-# invalid or incomplete save is rejected as one unit and the last valid
-# configuration remains active.
+# rewrites an existing config. Halley does not back up or replace it.
+# Edit settings and bindings yourself and check the result with
+# `halleyctl config verify`. While Halley is running, valid saves are applied
+# automatically. A syntactically invalid or incomplete save is rejected as one
+# unit and the last valid configuration remains active.
 #
 # Sections and fields may be omitted unless noted otherwise; omitted values
 # use their built-in defaults. `keybinds:` is required because it defines the
