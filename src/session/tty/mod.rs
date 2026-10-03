@@ -1245,16 +1245,20 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         && crate::shell::cluster_composer::tick_session(app, target_presentation_time);
     let apogee_animating = crate::shell::apogee::tick(app, target_presentation_time);
     let background_animating = app.background_animates_on_output(output, target_presentation_time);
-    let overlay_animating = app.shell.overlays.animating(target_presentation_time);
-    let cluster_animating = app
+    let overlay_animating = app
+        .shell
+        .overlays
+        .animating_on_output(&output.name(), target_presentation_time);
+    let cluster_geometry_animating = app
         .clusters
         .is_animating_on_output(&output.name(), target_presentation_time)
         || app
             .clusters
-            .bloom_is_animating_on_output(&output.name(), target_presentation_time)
-        || app
-            .clusters
-            .labels_animating_on_output(&output.name(), app.nodes.config.show_labels);
+            .bloom_is_animating_on_output(&output.name(), target_presentation_time);
+    let cluster_labels_animating = app
+        .clusters
+        .labels_animating_on_output(&output.name(), app.nodes.config.show_labels);
+    let cluster_animating = cluster_geometry_animating || cluster_labels_animating;
     let show_cursor = super::pointer::cursor_visible(app);
     let cursor_override = super::pointer::cursor_override(app);
     crate::cursor::surface::refresh_outputs(
@@ -1280,23 +1284,28 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         app.cursor_policy
             .schedule_animation(output, next_cursor_frame);
     }
-    let scene_animating = camera_animating
+    // Node animation still includes collapse, slide, preview and physics
+    // geometry. Keep its conservative safeguard alongside camera/window
+    // transitions; local overlays report their own geometry/alpha damage.
+    let geometry_animating = camera_animating
         || edge_pan_animating
         || fullscreen_camera_changed
         || window_animating
         || closing_animating
         || node_animating
-        || bearings_animating
-        || focus_cycle_animating
         || composer_animating
         || apogee_animating
         || background_animating
-        || overlay_animating
-        || cluster_animating
+        || cluster_geometry_animating
         || fullscreen_animating
         || maximize_animating;
+    let local_animating = bearings_animating
+        || focus_cycle_animating
+        || overlay_animating
+        || cluster_labels_animating;
     let mut frame_demand = FrameDemand::new(
-        scene_animating,
+        geometry_animating,
+        local_animating,
         app.settings.debug.overlay_fps && !app.session_lock.active(),
     );
     if pointer_is_on_output {

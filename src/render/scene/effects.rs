@@ -39,6 +39,7 @@ pub(super) fn append_compositor_overlay_blur(
             patches,
             style.blur,
             0,
+            output.current_transform(),
         )? {
             elements.push(SceneElement::BackdropBlur(blur));
         }
@@ -244,6 +245,7 @@ pub(super) fn append_surface_backdrop_blur(
         patches,
         blur_config,
         0,
+        output.current_transform(),
     )? {
         elements.push(SceneElement::BackdropBlur(blur));
     }

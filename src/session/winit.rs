@@ -785,7 +785,10 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                     );
                 }
 
-                let overlay_animating = app.shell.overlays.animating(target_presentation_time);
+                let overlay_animating = app
+                    .shell
+                    .overlays
+                    .animating_on_output(&output.name(), target_presentation_time);
                 if camera_animating
                     || edge_pan_animating
                     || fullscreen_camera_changed

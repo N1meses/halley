@@ -559,12 +559,25 @@ pub trait Element {
     /// to be called *before* the accompanying `RenderElement::draw` call, *if* the contents behind
     /// the element have changed.
     ///
-    /// Additionally damage calculation will be altered to always include the whole area behind the
-    /// element, if a capture is queued up, to make sure the framebuffer contents are available for capture.
+    /// By default damage calculation includes the whole area behind the element
+    /// when capture is queued. [`Element::framebuffer_effect_damage`] can restrict
+    /// or pad that area to match an effect's filter dependencies.
     ///
     /// Any damage reported by this element will also cause `capture_framebuffer` to be called.
     fn is_framebuffer_effect(&self) -> bool {
         false
+    }
+
+    /// Regions that must be redrawn before capturing changed content behind
+    /// this effect. Both input and result use output coordinates. Effects may
+    /// expand damage for filter kernels and retain a plan for the following
+    /// capture/draw calls. The default captures the entire element geometry.
+    fn framebuffer_effect_damage(
+        &self,
+        scale: Scale<f64>,
+        _damage: &[Rectangle<i32, Physical>],
+    ) -> DamageSet<i32, Physical> {
+        DamageSet::from_slice(&[self.geometry(scale)])
     }
 }
 
@@ -669,6 +682,14 @@ where
 
     fn is_framebuffer_effect(&self) -> bool {
         (*self).is_framebuffer_effect()
+    }
+
+    fn framebuffer_effect_damage(
+        &self,
+        scale: Scale<f64>,
+        damage: &[Rectangle<i32, Physical>],
+    ) -> DamageSet<i32, Physical> {
+        (*self).framebuffer_effect_damage(scale, damage)
     }
 }
 
@@ -1107,6 +1128,17 @@ macro_rules! render_elements_internal {
                         #[$meta]
                     )*
                     Self::$body(x) => $crate::render_elements_internal!(@call is_framebuffer_effect; x)
+                ),*,
+                Self::_GenericCatcher(_) => unreachable!(),
+            }
+        }
+
+        fn framebuffer_effect_damage(&self, scale: $crate::utils::Scale<f64>, damage: &[$crate::utils::Rectangle<i32, $crate::utils::Physical>]) -> $crate::backend::renderer::utils::DamageSet<i32, $crate::utils::Physical> {
+            match self {
+                $(
+                    #[allow(unused_doc_comments)]
+                    $(#[$meta])*
+                    Self::$body(x) => $crate::render_elements_internal!(@call framebuffer_effect_damage; x, scale, damage)
                 ),*,
                 Self::_GenericCatcher(_) => unreachable!(),
             }

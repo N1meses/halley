@@ -4,18 +4,18 @@ use calloop::RegistrationToken;
 
 use crate::frame_clock::FrameClock;
 
-/// Continuous diagnostics need another scene sample without invalidating
-/// unchanged pixels. Scene animations still require a complete repaint.
+/// Local animation and continuous diagnostics need another scene sample,
+/// while camera and scene geometry transitions retain the buffer-age reset.
 pub(crate) struct FrameDemand {
     pub keep_redrawing: bool,
     pub force_full_repaint: bool,
 }
 
 impl FrameDemand {
-    pub fn new(scene_animating: bool, fps_overlay_visible: bool) -> Self {
+    pub fn new(geometry_animating: bool, local_animating: bool, fps_overlay_visible: bool) -> Self {
         Self {
-            keep_redrawing: scene_animating || fps_overlay_visible,
-            force_full_repaint: scene_animating,
+            keep_redrawing: geometry_animating || local_animating || fps_overlay_visible,
+            force_full_repaint: geometry_animating,
         }
     }
 }
@@ -373,8 +373,30 @@ mod tests {
     }
 
     #[test]
+    fn local_animation_keeps_vblank_cadence_without_resetting_buffer_ages() {
+        let animation = FrameDemand::new(false, true, false);
+        assert!(!animation.force_full_repaint);
+        let mut state = state();
+        state.queue_redraw();
+        state.frame_submitted(animation.keep_redrawing);
+        assert_eq!(state.on_vblank(None), (VblankAction::Redraw, None));
+        // A label may still be advancing below its visible threshold. Such a
+        // sample owes another paced frame even when no pixels changed.
+        assert_eq!(
+            state.frame_skipped(animation.keep_redrawing, true, Duration::from_millis(100)),
+            EstimatedVblankTimer::ArmAfter(Duration::from_millis(10))
+        );
+        state.timer_armed(registration_token());
+        assert_eq!(state.estimated_vblank_fired(), Ok(true));
+        let settled = FrameDemand::new(false, false, false);
+        state.frame_submitted(settled.keep_redrawing);
+        assert_eq!(state.on_vblank(None), (VblankAction::SendCallbacks, None));
+        assert!(!state.is_redraw_queued());
+    }
+
+    #[test]
     fn fps_samples_continue_after_submitted_and_unchanged_frames_then_stop_when_disabled() {
-        let fps = FrameDemand::new(false, true);
+        let fps = FrameDemand::new(false, false, true);
         assert!(!fps.force_full_repaint);
         let mut state = state();
         state.queue_redraw();
@@ -403,7 +425,7 @@ mod tests {
             assert!(state.is_redraw_queued());
         }
 
-        let disabled = FrameDemand::new(false, false);
+        let disabled = FrameDemand::new(false, false, false);
         state.frame_skipped(disabled.keep_redrawing, true, Duration::from_millis(1100));
         state.timer_armed(registration_token());
         assert_eq!(state.estimated_vblank_fired(), Ok(true));
@@ -412,7 +434,7 @@ mod tests {
 
     #[test]
     fn continuous_samples_without_presentation_timestamps_wait_for_current_refresh() {
-        let fps = FrameDemand::new(false, true);
+        let fps = FrameDemand::new(false, false, true);
         let mut state = state();
         state.queue_redraw();
         for tick in 0..3 {
@@ -437,7 +459,7 @@ mod tests {
 
     #[test]
     fn failed_sample_and_queued_scene_change_wait_for_rendering_before_callbacks() {
-        let fps = FrameDemand::new(false, true);
+        let fps = FrameDemand::new(false, false, true);
         let mut state = state();
         state.queue_redraw();
         state.frame_skipped(fps.keep_redrawing, false, Duration::from_secs(5));
