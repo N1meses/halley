@@ -14,20 +14,37 @@ use smithay::wayland::compositor::{
     BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
     with_states,
 };
+use smithay::wayland::content_type::{ContentTypeState, ContentTypeSurfaceCachedState};
+use smithay::wayland::shell::xdg::{
+    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+};
 use smithay::wayland::single_pixel_buffer::{SinglePixelBufferState, get_single_pixel_buffer};
+use smithay::wayland::xdg_toplevel_icon::{
+    ToplevelIconCachedState, XdgToplevelIconHandler, XdgToplevelIconManager,
+};
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
+use wayland_protocols::wp::content_type::v1::client::{
+    wp_content_type_manager_v1 as content_manager, wp_content_type_v1 as content,
+};
 use wayland_protocols::wp::single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1 as pixel;
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::toplevel_icon::v1::client::{
+    xdg_toplevel_icon_manager_v1 as icon_manager, xdg_toplevel_icon_v1 as icon,
+};
 
 #[derive(Default)]
 struct Observations {
     rgba: Option<[u32; 4]>,
     destroyed_buffers: usize,
+    content_type: u32,
+    icon_name: Option<String>,
 }
 
 struct Server {
     compositor: CompositorState,
     observations: Arc<Mutex<Observations>>,
+    shell: XdgShellState,
 }
 
 #[derive(Default)]
@@ -46,14 +63,44 @@ impl CompositorHandler for Server {
     }
     fn commit(&mut self, surface: &WlSurface) {
         with_states(surface, |states| {
+            let content_type = *states
+                .cached_state
+                .get::<ContentTypeSurfaceCachedState>()
+                .current()
+                .content_type() as u32;
+            let icon_name = states
+                .cached_state
+                .get::<ToplevelIconCachedState>()
+                .current()
+                .icon_name()
+                .map(str::to_owned);
+            let mut observations = self.observations.lock().unwrap();
+            observations.content_type = content_type;
+            observations.icon_name = icon_name;
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             if let Some(BufferAssignment::NewBuffer(buffer)) = attributes.current().buffer.as_ref()
                 && let Ok(pixel) = get_single_pixel_buffer(buffer)
             {
-                self.observations.lock().unwrap().rgba = Some([pixel.r, pixel.g, pixel.b, pixel.a]);
+                observations.rgba = Some([pixel.r, pixel.g, pixel.b, pixel.a]);
             }
         });
     }
+}
+impl XdgToplevelIconHandler for Server {}
+impl XdgShellHandler for Server {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.shell
+    }
+    fn new_toplevel(&mut self, _: ToplevelSurface) {}
+    fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
+    fn grab(
+        &mut self,
+        _: PopupSurface,
+        _: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _: smithay::utils::Serial,
+    ) {
+    }
+    fn reposition_request(&mut self, _: PopupSurface, _: PositionerState, _: u32) {}
 }
 impl BufferHandler for Server {
     fn buffer_destroyed(
@@ -92,6 +139,13 @@ delegate_noop!(Client: ignore wl_compositor::WlCompositor);
 delegate_noop!(Client: ignore wl_surface::WlSurface);
 delegate_noop!(Client: ignore wl_buffer::WlBuffer);
 delegate_noop!(Client: ignore pixel::WpSinglePixelBufferManagerV1);
+delegate_noop!(Client: ignore content_manager::WpContentTypeManagerV1);
+delegate_noop!(Client: ignore content::WpContentTypeV1);
+delegate_noop!(Client: ignore icon_manager::XdgToplevelIconManagerV1);
+delegate_noop!(Client: ignore icon::XdgToplevelIconV1);
+delegate_noop!(Client: ignore xdg_wm_base::XdgWmBase);
+delegate_noop!(Client: ignore xdg_surface::XdgSurface);
+delegate_noop!(Client: ignore xdg_toplevel::XdgToplevel);
 
 struct Fixture {
     observations: Arc<Mutex<Observations>>,
@@ -108,12 +162,16 @@ impl Fixture {
         let mut dh = display.handle();
         let compositor = CompositorState::new::<Server>(&dh);
         let _pixels = SinglePixelBufferState::new::<Server>(&dh);
+        let _content = ContentTypeState::new::<Server>(&dh);
+        let _icons = XdgToplevelIconManager::new::<Server>(&dh);
+        let shell = XdgShellState::new::<Server>(&dh);
         dh.insert_client(server_socket, Arc::new(ClientData::default()))
             .unwrap();
         let observations = Arc::new(Mutex::new(Observations::default()));
         let mut server = Server {
             compositor,
             observations: observations.clone(),
+            shell,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
@@ -150,6 +208,69 @@ impl Fixture {
         );
         compositor.create_surface(&self.queue.handle(), ())
     }
+}
+
+#[test]
+fn content_type_applies_on_commit_and_resets_when_destroyed() {
+    let mut f = Fixture::new();
+    let (name, version) = f.state.globals["wp_content_type_manager_v1"];
+    assert_eq!(version, 1);
+    let manager: content_manager::WpContentTypeManagerV1 =
+        f.registry.bind(name, 1, &f.queue.handle(), ());
+    let surface = f.surface();
+    let content = manager.get_surface_content_type(&surface, &f.queue.handle(), ());
+    content.set_content_type(content::Type::Game);
+    f.sync();
+    assert_eq!(
+        f.observations.lock().unwrap().content_type,
+        content::Type::None as u32
+    );
+    surface.commit();
+    f.sync();
+    assert_eq!(
+        f.observations.lock().unwrap().content_type,
+        content::Type::Game as u32
+    );
+    content.destroy();
+    surface.commit();
+    f.sync();
+    assert_eq!(
+        f.observations.lock().unwrap().content_type,
+        content::Type::None as u32
+    );
+}
+
+#[test]
+fn toplevel_icon_metadata_applies_on_commit_and_can_be_cleared() {
+    let mut f = Fixture::new();
+    let (name, version) = f.state.globals["xdg_toplevel_icon_manager_v1"];
+    assert_eq!(version, 1);
+    let manager: icon_manager::XdgToplevelIconManagerV1 =
+        f.registry.bind(name, 1, &f.queue.handle(), ());
+    let shell: xdg_wm_base::XdgWmBase =
+        f.registry
+            .bind(f.state.globals["xdg_wm_base"].0, 1, &f.queue.handle(), ());
+    let surface = f.surface();
+    let xdg_surface = shell.get_xdg_surface(&surface, &f.queue.handle(), ());
+    let toplevel = xdg_surface.get_toplevel(&f.queue.handle(), ());
+    let icon = manager.create_icon(&f.queue.handle(), ());
+    icon.set_name("org.example.Game".into());
+    manager.set_icon(&toplevel, Some(&icon));
+    f.sync();
+    assert!(f.observations.lock().unwrap().icon_name.is_none());
+    surface.commit();
+    f.sync();
+    assert_eq!(
+        f.observations.lock().unwrap().icon_name.as_deref(),
+        Some("org.example.Game")
+    );
+    manager.set_icon(&toplevel, None);
+    surface.commit();
+    f.sync();
+    assert!(f.observations.lock().unwrap().icon_name.is_none());
+    icon.destroy();
+    manager.destroy();
+    f.sync();
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

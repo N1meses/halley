@@ -11,6 +11,7 @@ use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::compositor::CompositorState;
+use smithay::wayland::content_type::ContentTypeState;
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::drm_syncobj::{DrmSyncPointSource, DrmSyncobjState};
@@ -37,6 +38,7 @@ use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
+use smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager;
 
 use super::output::{OutputChange, OutputConfiguration, OutputState};
 use crate::cursor::CursorManager;
@@ -225,6 +227,8 @@ impl<D: SessionDriver> Session<D> {
             WlrLayerShellState::new::<Self>(&display_handle),
             BackgroundEffectState::new::<Self>(&display_handle),
             SinglePixelBufferState::new::<Self>(&display_handle),
+            ContentTypeState::new::<Self>(&display_handle),
+            XdgToplevelIconManager::new::<Self>(&display_handle),
             XdgDecorationState::new::<Self>(&display_handle),
             ViewporterState::new::<Self>(&display_handle),
             FractionalScaleManagerState::new::<Self>(&display_handle),

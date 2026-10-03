@@ -1552,3 +1552,5 @@ mod tests {
         ));
     }
 }
+
+impl<D: SessionDriver> smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler for Session<D> {}
