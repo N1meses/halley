@@ -203,6 +203,18 @@ pub fn handle_commit(
                 )
             });
         super::set_window_output(&window, &placement.output);
+        let location = if super::clipboard_helper::is_helper(surface) {
+            super::clipboard_helper::remember_focus(
+                surface,
+                wayland.focused_window.as_ref(),
+                wayland.focused_layer.as_ref(),
+            );
+            // The helper needs a mapped surface and keyboard enter serial,
+            // but must not appear as desktop chrome or intercept hover input.
+            (-1_000_000, -1_000_000).into()
+        } else {
+            location
+        };
         wayland.space.map_element(window.clone(), location, false);
         // New windows steal focus - matches most WMs' default behavior.
         // Also raises+activates via `focus_and_raise`, same as clicking a

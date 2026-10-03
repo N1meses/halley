@@ -157,6 +157,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Keep wl-clipboard's temporary focus helpers out of cluster layouts and return
+  keyboard focus to their original window, preventing Neovim deletes and yanks
+  from sending subsequent typing to another tile.
 - Accept negative mouse/touchpad acceleration values and quoted numeric speeds;
   `sensitivity` is an alias for `accel-speed`. Use the unmodified upstream
   `rune-cfg` signed-number fix without a vendor copy. The compatibility work is

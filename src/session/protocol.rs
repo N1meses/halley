@@ -297,6 +297,13 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
         );
         wayland::text_input::handle_popup_commit(self, surface);
         match toplevel_commit.clone() {
+            wayland::xdg_shell::ToplevelCommit::Mapped(mapped)
+                if wayland::clipboard_helper::saved_focus(&mapped).is_some() =>
+            {
+                // Clipboard serial helpers must never become cluster tiles,
+                // Field nodes, startup members, or animated opening windows.
+                self.opening_origins.forget(&mapped);
+            }
             wayland::xdg_shell::ToplevelCommit::Mapped(mapped) => {
                 let startup_cluster = self.startup_cluster_for_wayland_surface(&mapped);
                 let startup_target = startup_cluster.and_then(|cluster| {

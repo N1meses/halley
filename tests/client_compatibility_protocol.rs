@@ -1,4 +1,6 @@
 //! Client compatibility requests through the production upstream dispatcher.
+#[path = "../src/wayland/clipboard_helper.rs"]
+mod clipboard_helper;
 #[path = "../src/wayland/dispatch.rs"]
 mod upstream_protocols;
 
@@ -39,6 +41,7 @@ struct Observations {
     destroyed_buffers: usize,
     content_type: u32,
     icon_name: Option<String>,
+    toplevels: Vec<WlSurface>,
 }
 
 struct Server {
@@ -91,7 +94,13 @@ impl XdgShellHandler for Server {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.shell
     }
-    fn new_toplevel(&mut self, _: ToplevelSurface) {}
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        self.observations
+            .lock()
+            .unwrap()
+            .toplevels
+            .push(surface.wl_surface().clone());
+    }
     fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
     fn grab(
         &mut self,
@@ -208,6 +217,96 @@ impl Fixture {
         );
         compositor.create_surface(&self.queue.handle(), ())
     }
+
+    fn toplevel(&mut self, app_id: &str) -> (xdg_toplevel::XdgToplevel, WlSurface) {
+        let shell: xdg_wm_base::XdgWmBase = self.registry.bind(
+            self.state.globals["xdg_wm_base"].0,
+            1,
+            &self.queue.handle(),
+            (),
+        );
+        let surface = self.surface();
+        let xdg_surface = shell.get_xdg_surface(&surface, &self.queue.handle(), ());
+        let toplevel = xdg_surface.get_toplevel(&self.queue.handle(), ());
+        toplevel.set_app_id(app_id.into());
+        self.sync();
+        let server_surface = self
+            .observations
+            .lock()
+            .unwrap()
+            .toplevels
+            .last()
+            .unwrap()
+            .clone();
+        (toplevel, server_surface)
+    }
+}
+
+const CLIPBOARD_APP_ID: &str = "io.github.bugaevc.wl-clipboard";
+
+#[test]
+fn clipboard_helper_remembers_the_exact_caller_with_two_or_three_windows() {
+    for count in [2, 3] {
+        let mut f = Fixture::new();
+        let windows = (0..count)
+            .map(|_| f.toplevel("kitty").1)
+            .collect::<Vec<_>>();
+        for caller in &windows {
+            assert!(!clipboard_helper::is_helper(caller));
+            assert!(clipboard_helper::saved_focus(caller).is_none());
+            let (_, helper) = f.toplevel(CLIPBOARD_APP_ID);
+            assert!(clipboard_helper::is_helper(&helper));
+            clipboard_helper::remember_focus(&helper, Some(caller), None);
+            assert_eq!(
+                clipboard_helper::saved_focus(&helper)
+                    .unwrap()
+                    .window
+                    .as_ref(),
+                Some(caller)
+            );
+        }
+    }
+}
+
+#[test]
+fn overlapping_clipboard_helpers_return_to_the_original_terminal() {
+    let mut f = Fixture::new();
+    let (_, caller) = f.toplevel("kitty");
+    let (first_toplevel, first) = f.toplevel(CLIPBOARD_APP_ID);
+    clipboard_helper::remember_focus(&first, Some(&caller), None);
+    let (_, second) = f.toplevel(CLIPBOARD_APP_ID);
+    clipboard_helper::remember_focus(&second, Some(&first), None);
+    first_toplevel.destroy();
+    f.sync();
+    assert_eq!(
+        clipboard_helper::saved_focus(&second).unwrap().window,
+        Some(caller)
+    );
+}
+
+#[test]
+fn clipboard_helpers_without_a_caller_do_not_invent_a_successor() {
+    let mut f = Fixture::new();
+    let (_, helper) = f.toplevel(CLIPBOARD_APP_ID);
+    clipboard_helper::remember_focus(&helper, None, None);
+    let saved = clipboard_helper::saved_focus(&helper).unwrap();
+    assert!(saved.window.is_none());
+    assert!(saved.layer.is_none());
+}
+
+#[test]
+fn clipboard_return_identity_survives_metadata_changes_until_teardown() {
+    let mut f = Fixture::new();
+    let (_, caller) = f.toplevel("kitty");
+    let (helper_toplevel, helper) = f.toplevel(CLIPBOARD_APP_ID);
+    clipboard_helper::remember_focus(&helper, Some(&caller), None);
+    helper_toplevel.set_app_id("changed-after-mapping".into());
+    f.sync();
+    assert!(!clipboard_helper::is_helper(&helper));
+    assert_eq!(
+        clipboard_helper::saved_focus(&helper).unwrap().window,
+        Some(caller)
+    );
 }
 
 #[test]
