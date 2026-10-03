@@ -2204,6 +2204,7 @@ where
                 (position_after.1 + offset.y).round() as i32,
             )
                 .into();
+            #[cfg(feature = "xwayland")]
             if let Some(surface) = window.x11_surface() {
                 session.xwayland.move_override_redirect(surface, location);
             }

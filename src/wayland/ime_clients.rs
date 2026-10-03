@@ -6,6 +6,9 @@ use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::zwp
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
 use smithay::reexports::wayland_server::backend::{ClientId, protocol::ProtocolError};
 
+const LOCK_ERROR: &str =
+    "Input methods are disconnected while the session is locked; reconnect after unlocking.";
+
 #[derive(Default)]
 pub struct ImeClients(HashMap<ClientId, Client>);
 
@@ -14,15 +17,17 @@ impl ImeClients {
         &mut self,
         locked: bool,
         client: &Client,
-        _resource: &I,
+        resource: &I,
         request: &I::Request,
-        display: &DisplayHandle,
+        _display: &DisplayHandle,
     ) -> bool
     where
         I::Request: 'static,
     {
         if locked && I::interface().name.starts_with("zwp_input_") {
-            disconnect(client, display);
+            // Let libwayland destroy the client after dispatch returns. Killing
+            // it here invalidates resources still in use by the request callback.
+            resource.post_error(0u32, LOCK_ERROR);
             return false;
         }
         if matches!(
@@ -42,10 +47,13 @@ impl ImeClients {
 }
 
 fn disconnect(client: &Client, display: &DisplayHandle) {
-    client.kill(display, ProtocolError {
-        code: 0,
-        object_id: 1,
-        object_interface: "wl_display".into(),
-        message: "Input methods are disconnected while the session is locked; reconnect after unlocking.".into(),
-    });
+    client.kill(
+        display,
+        ProtocolError {
+            code: 0,
+            object_id: 1,
+            object_interface: "wl_display".into(),
+            message: LOCK_ERROR.into(),
+        },
+    );
 }

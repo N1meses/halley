@@ -146,6 +146,10 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Fix builds with default features disabled by guarding XWayland-only popup
+  handling and completing the no-op tracing implementation.
+- Reject IME requests during screen locking with a deferred protocol error,
+  avoiding destruction of resources still in use by libwayland's dispatch.
 - Reverse the landmark displacement that camera zoom-out causes. The first
   zoom step that moves a collapsed node or cluster core remembers its pre-zoom
   home, further zoom-out reflows from the displayed position without replacing
