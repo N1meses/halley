@@ -53,12 +53,17 @@ impl ScreencastState {
             Modifier::from(request.modifier),
             DmabufFlags::from_bits_retain(request.flags),
         );
-        for plane in request.planes {
+        let mut planes = request.planes;
+        planes.sort_by_key(|plane| plane.plane_index);
+        for (index, plane) in planes.into_iter().enumerate() {
+            if plane.plane_index as usize != index {
+                return Err("DMA-BUF plane indices must be contiguous and unique".into());
+            }
             let fd = descriptors
                 .get_mut(plane.fd_index as usize)
                 .and_then(Option::take)
                 .ok_or_else(|| format!("missing DMA-BUF descriptor {}", plane.fd_index))?;
-            if !builder.add_plane(fd, plane.plane_index, plane.offset, plane.stride) {
+            if !builder.add_plane(fd, plane.offset, plane.stride) {
                 return Err("too many DMA-BUF planes".to_string());
             }
         }

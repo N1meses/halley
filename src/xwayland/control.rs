@@ -7,8 +7,8 @@ use x11rb::errors::ReplyError;
 use x11rb::protocol::ErrorKind;
 use x11rb::protocol::xkb::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
-    AtomEnum, AutoRepeatMode, ChangeKeyboardControlAux, ConnectionExt as _, CreateWindowAux,
-    GetGeometryReply, InputFocus, PropMode, Window, WindowClass,
+    AtomEnum, AutoRepeatMode, ChangeKeyboardControlAux, ConfigureWindowAux, ConnectionExt as _,
+    CreateWindowAux, GetGeometryReply, InputFocus, PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -297,6 +297,20 @@ impl X11Control {
     /// them to focus themselves. Queue `SetInputFocus` explicitly, preserving
     /// X11 request ordering without waiting for server confirmation on the
     /// compositor thread.
+    /// Move an explicitly compositor-dragged pop-out without a round trip.
+    /// Smithay observes the resulting ConfigureNotify on its XWM connection.
+    pub fn move_override_redirect(
+        &self,
+        window: Window,
+        x: i32,
+        y: i32,
+    ) -> Result<(), Box<dyn Error>> {
+        self.connection
+            .configure_window(window, &ConfigureWindowAux::new().x(x).y(y))?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
     pub fn focus_window(&self, window: Window) -> Result<(), Box<dyn Error>> {
         self.connection
             .set_input_focus(InputFocus::NONE, window, CURRENT_TIME)?;

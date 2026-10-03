@@ -11,7 +11,7 @@ use smithay::backend::renderer::gles::{
     Capability, GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
     UniformName, UniformType, ffi, link_program,
 };
-use smithay::backend::renderer::utils::{CommitCounter, DamageSet};
+use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{ContextId, Offscreen, Renderer, Texture};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
@@ -291,20 +291,11 @@ impl BackdropBlurRenderer {
             }
         };
         let commit = blur_commit(&patches, config, presentation_epoch);
-        let padding = regions::padding(physical_size, levels, blur_offset(config.radius));
-        let mut geometry = patches
-            .iter()
-            .map(|p| regions::expand(p.rect, padding))
-            .reduce(Rectangle::merge)
-            .and_then(|r| r.intersection(Rectangle::from_size(physical_size)))
-            .unwrap_or_default();
-        // The rotated DRM framebuffer and scene have different coordinate
-        // bases. Preserve the existing full capture until that path can use a
-        // transformed region plan; cross-GPU scenes remain correct as well.
-        let partial = output_transform == Transform::Normal;
-        if !partial {
-            geometry = Rectangle::from_size(physical_size);
-        }
+        // Upstream captures the whole effect geometry. Cover the output so
+        // blur kernels have valid pixels beyond each displayed patch.
+        let geometry = Rectangle::from_size(physical_size);
+        let partial = false;
+        let _ = output_transform;
         Ok(Some(BackdropBlurElement {
             // Each stack position keeps a stable identity. Smithay can then
             // retain its per-effect capture cache without ever aliasing two
@@ -728,32 +719,6 @@ impl Element for BackdropBlurElement {
 
     fn is_framebuffer_effect(&self) -> bool {
         true
-    }
-
-    fn framebuffer_effect_damage(
-        &self,
-        _scale: Scale<f64>,
-        damage: &[Rectangle<i32, Physical>],
-    ) -> DamageSet<i32, Physical> {
-        let plan = if self.partial {
-            regions::plan(
-                self.size,
-                self.textures.borrow().chain.len() as u32,
-                self.offset,
-                &self.patches,
-                damage,
-            )
-        } else {
-            regions::plan_for_outputs(
-                self.size,
-                self.textures.borrow().chain.len() as u32,
-                self.offset,
-                vec![Rectangle::from_size(self.size)],
-            )
-        };
-        let required = DamageSet::from_slice(&plan.capture);
-        *self.plan.borrow_mut() = Some(plan);
-        required
     }
 }
 

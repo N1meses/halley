@@ -2,6 +2,7 @@ mod app_icon;
 pub mod arrange_texture;
 pub mod background;
 pub mod close;
+pub(crate) mod conservative;
 pub mod effects;
 pub mod fullscreen_texture;
 pub mod ids;

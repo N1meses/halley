@@ -30,7 +30,6 @@ use smithay::wayland::xwayland_shell::{
     XWaylandShellHandler, XWaylandShellState, XWaylandSurfaceUserData,
 };
 use smithay::xwayland::{X11Wm, XWayland, XWaylandClientData, XWaylandEvent};
-use smithay::{delegate_xwayland_keyboard_grab, delegate_xwayland_shell};
 
 use crate::session::{Session, SessionDriver};
 
@@ -85,12 +84,12 @@ impl<D: SessionDriver> State<D> {
     pub fn new(display: &DisplayHandle, loop_handle: LoopHandle<'static, Session<D>>) -> Self
     where
         Session<D>: XWaylandShellHandler + XWaylandKeyboardGrabHandler + 'static,
-        Session<D>: GlobalDispatch<XwaylandShellV1, ()>,
-        Session<D>: Dispatch<XwaylandShellV1, ()>,
+        Session<D>: GlobalDispatch<XwaylandShellV1, smithay::wayland::GlobalData>,
+        Session<D>: Dispatch<XwaylandShellV1, smithay::wayland::GlobalData>,
         Session<D>: Dispatch<XwaylandSurfaceV1, XWaylandSurfaceUserData>,
-        Session<D>: GlobalDispatch<ZwpXwaylandKeyboardGrabManagerV1, ()>,
-        Session<D>: Dispatch<ZwpXwaylandKeyboardGrabManagerV1, ()>,
-        Session<D>: Dispatch<ZwpXwaylandKeyboardGrabV1, ()>,
+        Session<D>: GlobalDispatch<ZwpXwaylandKeyboardGrabManagerV1, smithay::wayland::GlobalData>,
+        Session<D>: Dispatch<ZwpXwaylandKeyboardGrabManagerV1, smithay::wayland::GlobalData>,
+        Session<D>: Dispatch<ZwpXwaylandKeyboardGrabV1, smithay::wayland::GlobalData>,
     {
         Self {
             shell_state: XWaylandShellState::new::<Session<D>>(display),
@@ -138,6 +137,21 @@ impl<D: SessionDriver> State<D> {
     pub fn display_name(&self) -> Option<OsString> {
         self.display
             .map(|display| OsString::from(format!(":{display}")))
+    }
+
+    pub fn move_override_redirect(
+        &self,
+        surface: &smithay::xwayland::X11Surface,
+        location: Point<i32, Logical>,
+    ) {
+        let Some(control) = self.control.as_ref() else {
+            return;
+        };
+        if let Err(err) =
+            control.move_override_redirect(surface.window_id(), location.x, location.y)
+        {
+            eventline::warn!("xwayland: pop-out move failed: {err}");
+        }
     }
 
     pub fn raise_window(&mut self, window: &smithay::desktop::Window) {
@@ -401,6 +415,7 @@ where
         &display_handle,
         None,
         session.launch_environment(),
+        std::iter::empty::<&str>(),
         true,
         Stdio::null(),
         Stdio::null(),
@@ -769,9 +784,6 @@ impl<D: SessionDriver> XWaylandKeyboardGrabHandler for Session<D> {
             .and_then(KeyboardFocusTarget::for_window)
     }
 }
-
-delegate_xwayland_shell!(@<D: SessionDriver> Session<D>);
-delegate_xwayland_keyboard_grab!(@<D: SessionDriver> Session<D>);
 
 #[cfg(test)]
 mod tests {

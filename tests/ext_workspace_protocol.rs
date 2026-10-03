@@ -16,6 +16,9 @@
 #[allow(dead_code)] // The compositor uses more of this module than these tests do.
 mod ext_workspace;
 
+#[path = "../src/wayland/dispatch.rs"]
+mod upstream_protocols;
+
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -195,7 +198,7 @@ impl CompositorHandler for Server {
     }
 }
 
-smithay::delegate_compositor!(Server);
+upstream_protocols::delegate_upstream_protocols!(Server);
 
 impl Server {
     fn sync(&mut self, display: &DisplayHandle) {
@@ -211,8 +214,6 @@ impl OutputHandler for Server {
         }
     }
 }
-
-smithay::delegate_output!(Server);
 
 impl GlobalDispatch<ExtWorkspaceManagerV1, (), Server> for Server {
     fn bind(

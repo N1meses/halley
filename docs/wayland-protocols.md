@@ -13,18 +13,19 @@ X11 applications keep using X11 IME and do not participate in this pair.
 This is interface version 1 of the v3 protocol; the newer interface-version-2
 requests and events are not advertised.
 
-Halley's vendored Smithay buffers IME edits until commit, uses each text-input
-object's commit count for `done`, resets pending state on enable and focus loss,
-and rejects additional IMEs without disturbing the active one. Candidate popups
-are visible only while a text input is enabled; all live popups receive caret
-updates, including the current rectangle at creation. Destroying an IME releases
-its keyboard grab and removes its popups. Old keyboard objects cannot release a
-replacement grab. Socket-level
-regressions in `tests/text_input_protocol.rs` exercise these transitions with
-real Wayland requests and events. Run them with
-`cargo test -p halley --test text_input_protocol`. These tests validate protocol
-handling; candidate-window rendering and toolkit integration still require a
-live IME session.
+Halley uses unmodified Smithay pinned to revision
+`79bbed5e1199090d787115614847a79c76607181`, matching the Niri revision checked
+for this change. Native composition and candidate popups use its basic
+text-input/input-method implementation. Halley no longer carries the IME
+state, commit-buffering, keyboard-grab teardown, or multiple-popup patches.
+Socket-level smoke tests live in `tests/text_input_protocol.rs`; toolkit and
+candidate-window integration still require a live IME session.
+
+When the screen locks, Halley disconnects clients that created an input method
+and rejects new input-method requests until unlock. This prevents the IME from
+receiving lock-screen input without modifying Smithay. The IME must reconnect
+or be restarted after unlock; composition does not resume automatically on the
+old connection. X11 applications continue to use their X11 IME.
 
 Halley advertises `ext_background_effect_manager_v1` version 1 with the blur
 capability. A committed `set_blur_region` is clipped to the requesting
@@ -53,6 +54,12 @@ reopening as an ordinary output-sized window. Explicit initial-size window
 rules take precedence, and surfaces already known when the hint is retained
 are never resized by it. The hint is cleared after a normal close and is never
 written to disk.
+
+With the unmodified Smithay pin, Halley uses conservative full-output
+framebuffer capture and blur processing. Halley's custom foreground-only invalidation and padded regional
+damage hooks have been removed, so blur may require more GPU work. Local
+animations likewise repaint their output fully; unrelated outputs and the FPS
+overlay alone retain their existing redraw policy.
 
 All blur effects on one output share one persistent output-sized texture pool.
 Each stack depth still performs its own framebuffer capture, so an upper

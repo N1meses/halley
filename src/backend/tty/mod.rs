@@ -1409,6 +1409,8 @@ impl Renderable for TtyBackend {
                 request,
             )?
         };
+        let (prepared_elements, blur) = crate::render::conservative::prepare(&elements);
+        let force_full_repaint = force_full_repaint || blur;
         if force_full_repaint {
             // Geometry animations (window open/close, zoom, camera motion)
             // can touch a different pixel set in every swapchain buffer. A
@@ -1427,9 +1429,9 @@ impl Renderable for TtyBackend {
             let result =
                 self.drm_outputs[entry_index]
                     .drm_output
-                    .render_frame::<_, SceneElement>(
+                    .render_frame::<_, crate::render::conservative::Unculled<'_, SceneElement>>(
                         renderer.as_mut(),
-                        &elements,
+                        &prepared_elements,
                         clear,
                         dmabuf::frame_flags_for_scene(elements.iter().any(
                             smithay::backend::renderer::element::Element::is_framebuffer_effect,

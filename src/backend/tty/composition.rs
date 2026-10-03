@@ -60,6 +60,8 @@ impl<T: Texture + Clone> ComposedFrame<T> {
         R: Renderer<TextureId = T> + Bind<T>,
         E: RenderElement<R>,
     {
+        let (elements, blur) = crate::render::conservative::prepare(elements);
+        let force_full_repaint = force_full_repaint || blur;
         let mut states = RenderElementStates::default();
         let size = self.size.to_logical(1, Transform::Normal);
         let damage_tracker = &mut self.damage;
@@ -69,7 +71,7 @@ impl<T: Texture + Clone> ComposedFrame<T> {
                 renderer,
                 &mut target,
                 usize::from(!force_full_repaint),
-                elements,
+                &elements,
                 clear,
             )?;
             states = result.states;

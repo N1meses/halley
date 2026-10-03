@@ -18,13 +18,13 @@ fn local_fade_motion_and_removal_match_full_pixels_on_both_gpu_paths_with_buffer
             .collect();
         let background = solid(&Id::new(), (0, 0, 100, 80), 0, RED);
         let card = Id::new();
-        let mut saw_partial = false;
+        let mut saw_repaint = false;
         let mut saw_unchanged = false;
         for tick in 0..24 {
             let active = (3..18).contains(&tick);
             let demand = FrameDemand::new(false, active, false);
             assert_eq!(demand.keep_redrawing, active);
-            assert!(!demand.force_full_repaint);
+            assert_eq!(demand.force_full_repaint, active);
             let mut scene = Vec::new();
             if active {
                 let alpha = ((tick - 2).min(18 - tick) as f32 / 5.0).min(1.0);
@@ -38,7 +38,11 @@ fn local_fade_motion_and_removal_match_full_pixels_on_both_gpu_paths_with_buffer
                 ));
             }
             scene.push(background.clone());
-            let age = if tick < buffers { 0 } else { buffers };
+            let age = if tick < buffers || demand.force_full_repaint {
+                0
+            } else {
+                buffers
+            };
             let damage = primary_tracker
                 .render_output(
                     &mut renderer,
@@ -79,18 +83,19 @@ fn local_fade_motion_and_removal_match_full_pixels_on_both_gpu_paths_with_buffer
                 *reference.pixels.borrow()
             );
             if tick >= buffers {
-                let local = Rectangle::new((12, 6).into(), (24, 17).into());
-                assert!(damage.iter().all(|rect| local.contains_rect(*rect)));
-                assert!(
-                    secondary_damage
-                        .iter()
-                        .all(|rect| local.contains_rect(*rect))
-                );
-                saw_partial |= !damage.is_empty() && !secondary_damage.is_empty();
+                if demand.force_full_repaint {
+                    assert!(damage.iter().any(|rect| rect.size.w * rect.size.h == 8000));
+                    assert!(
+                        secondary_damage
+                            .iter()
+                            .any(|rect| rect.size.w * rect.size.h == 8000)
+                    );
+                }
+                saw_repaint |= !damage.is_empty() && !secondary_damage.is_empty();
                 saw_unchanged |= damage.is_empty() && secondary_damage.is_empty();
             }
         }
-        assert!(saw_partial && saw_unchanged);
+        assert!(saw_repaint && saw_unchanged);
     }
 }
 
@@ -130,7 +135,10 @@ fn notifications_do_not_keep_the_other_output_redrawing_or_damage_its_reused_buf
         overlays.wakeup(now);
         for (index, output) in ["DP-1", "DP-2"].into_iter().enumerate() {
             let demand = FrameDemand::new(false, overlays.animating_on_output(output, now), false);
-            assert!(!demand.force_full_repaint);
+            assert_eq!(
+                demand.force_full_repaint,
+                overlays.animating_on_output(output, now)
+            );
             let snapshot = overlays.snapshot(output, now);
             let mut scene = Vec::new();
             if let Some(notification) = snapshot.notification {
@@ -143,7 +151,11 @@ fn notifications_do_not_keep_the_other_output_redrawing_or_damage_its_reused_buf
                 ));
             }
             scene.push(background[index].clone());
-            let age = if tick < 3 { 0 } else { 3 };
+            let age = if tick < 3 || demand.force_full_repaint {
+                0
+            } else {
+                3
+            };
             let damage = primary_trackers[index]
                 .render_output(
                     &mut renderer,
@@ -193,11 +205,11 @@ fn notifications_do_not_keep_the_other_output_redrawing_or_damage_its_reused_buf
                     );
                 }
             } else if demand.keep_redrawing && tick >= 3 {
-                assert!(damage.iter().all(|r| r.size.w * r.size.h < 100 * 80));
+                assert!(damage.iter().any(|r| r.size.w * r.size.h == 100 * 80));
                 assert!(
                     secondary_damage
                         .iter()
-                        .all(|r| r.size.w * r.size.h < 100 * 80)
+                        .any(|r| r.size.w * r.size.h == 100 * 80)
                 );
                 saw_fade[index] |= !damage.is_empty();
             }

@@ -828,7 +828,9 @@ pub(super) fn reconcile<D: SessionDriver>(
                         &MotionEvent {
                             location: geometry.origin + corrected,
                             serial: SERIAL_COUNTER.next_serial(),
-                            time: session.start_time.elapsed().as_millis() as u32,
+                            time: smithay::backend::input::InputTime::from_millis(
+                                session.start_time.elapsed().as_millis() as u32,
+                            ),
                         },
                     );
                 }

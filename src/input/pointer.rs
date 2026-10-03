@@ -736,7 +736,7 @@ where
         .amount(Axis::Vertical)
         .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
 
-    let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
+    let mut frame = AxisFrame::new(event.time()).source(event.source());
     if include_horizontal && horizontal != 0.0 {
         frame = frame
             .relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal))
@@ -1131,8 +1131,8 @@ mod tests {
     }
 
     impl Event<TestBackend> for TestAxisEvent {
-        fn time(&self) -> u64 {
-            42_000
+        fn time(&self) -> smithay::backend::input::InputTime {
+            smithay::backend::input::InputTime::from_micros(42_000)
         }
 
         fn device(&self) -> TestDevice {
@@ -1212,7 +1212,7 @@ mod tests {
         };
 
         let frame = axis_frame(&event);
-        assert_eq!(frame.time, 42);
+        assert_eq!(frame.time.millis(), 42);
         assert_eq!(frame.source, Some(AxisSource::Wheel));
         assert_eq!(frame.axis, (-30.0, 15.0));
         assert_eq!(frame.v120, Some((-240, 120)));

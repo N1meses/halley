@@ -261,3 +261,23 @@ mod tests {
         assert_eq!(location, Point::from((20, 36)));
     }
 }
+
+/// Keep IME clients outside the lock session without modifying Smithay.
+pub(crate) fn allow_request<D: SessionDriver, I: smithay::reexports::wayland_server::Resource>(
+    session: &mut Session<D>,
+    client: &smithay::reexports::wayland_server::Client,
+    resource: &I,
+    request: &I::Request,
+    display: &smithay::reexports::wayland_server::DisplayHandle,
+) -> bool
+where
+    I::Request: 'static,
+{
+    session.wayland.ime_clients.allow_request(
+        session.session_lock.active(),
+        client,
+        resource,
+        request,
+        display,
+    )
+}
