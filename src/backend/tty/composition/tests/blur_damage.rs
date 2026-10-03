@@ -173,8 +173,9 @@ fn assert_pixels_match_full_repaint(
     target: &mut RasterTexture,
     scene: &[TestElement],
 ) -> Vec<Rectangle<i32, Physical>> {
+    let (prepared, _) = crate::render::conservative::prepare(scene);
     let damage = tracker
-        .render_output(renderer, target, 1, scene, Color32F::BLACK)
+        .render_output(renderer, target, 0, &prepared, Color32F::BLACK)
         .unwrap()
         .damage
         .cloned()
@@ -188,14 +189,20 @@ fn assert_pixels_match_full_repaint(
         .collect();
     let mut full = RasterTexture::new((100, 80));
     OutputDamageTracker::new((100, 80), 1.0, Transform::Normal)
-        .render_output(renderer, &mut full, 0, &full_scene, Color32F::BLACK)
+        .render_output(
+            renderer,
+            &mut full,
+            0,
+            &crate::render::conservative::prepare(&full_scene).0,
+            Color32F::BLACK,
+        )
         .unwrap();
     assert_eq!(*target.pixels.borrow(), *full.pixels.borrow());
     damage
 }
 
 #[test]
-fn foreground_replacement_motion_and_removal_reuse_backdrop_pixels() {
+fn foreground_replacement_motion_and_removal_match_conservative_pixels() {
     let mut renderer = RasterRenderer::default();
     let mut tracker = OutputDamageTracker::new((100, 80), 1.0, Transform::Normal);
     let mut target = RasterTexture::new((100, 80));
@@ -221,11 +228,11 @@ fn foreground_replacement_motion_and_removal_reuse_backdrop_pixels() {
             assert_pixels_match_full_repaint(&mut tracker, &mut renderer, &mut target, &scene);
         assert_eq!(
             blur.captures.get(),
-            1,
-            "foreground frame {tick} recaptured blur"
+            tick + 1,
+            "foreground frame {tick} must refresh conservative blur"
         );
         if tick != 0 {
-            assert!(damage.iter().all(|r| r.size.w * r.size.h < 8000));
+            assert!(damage.iter().any(|r| r.size.w * r.size.h == 8000));
         }
     }
 }
@@ -289,7 +296,7 @@ fn fully_occluded_effect_recaptures_when_revealed() {
         }
         assert_pixels_match_full_repaint(&mut tracker, &mut renderer, &mut target, &scene);
     }
-    assert_eq!(blur.captures.get(), 2);
+    assert_eq!(blur.captures.get(), 3);
 }
 
 #[test]
@@ -350,7 +357,7 @@ fn a_foreground_cover_cannot_cull_background_pixels_needed_by_blur() {
     assert_pixels_match_full_repaint(&mut tracker, &mut renderer, &mut target, &scene);
     assert_eq!(
         blur.captures.get(),
-        3,
-        "foreground replacement keeps hidden background cache valid"
+        4,
+        "foreground replacement conservatively refreshes hidden background"
     );
 }

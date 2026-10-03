@@ -8,6 +8,7 @@ pub mod focus;
 pub mod frame_callbacks;
 pub mod fullscreen;
 pub mod idle_inhibit;
+mod ime_clients;
 pub mod layer_shell;
 pub mod permissions;
 pub mod popup;
@@ -202,6 +203,7 @@ mod window_output_tests {
 /// of this type. That keeps the Smithay globals and shell lifecycle together
 /// without creating a compositor-wide god object.
 pub struct WaylandState {
+    pub ime_clients: ime_clients::ImeClients,
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub dmabuf_state: DmabufState,
@@ -347,6 +349,7 @@ impl WaylandState {
             _pointer_gestures_state: pointer_gestures_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
             _virtual_keyboard_manager_state: virtual_keyboard_manager_state,
+            ime_clients: Default::default(),
             _text_input_manager_state: text_input_manager_state,
             _input_method_manager_state: input_method_manager_state,
             keyboard_shortcuts_inhibit_state,

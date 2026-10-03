@@ -298,7 +298,7 @@ where
     };
     let route = begin_route(
         session,
-        event.time_msec(),
+        event.time().millis(),
         pan || !action_bindings.is_empty(),
         scope,
     );
@@ -315,7 +315,7 @@ where
                 session,
                 &GestureSwipeBeginEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     fingers: event.fingers(),
                 },
             );
@@ -361,7 +361,7 @@ where
             pointer.gesture_swipe_update(
                 session,
                 &GestureSwipeUpdateEvent {
-                    time: event.time_msec(),
+                    time: event.time(),
                     delta: event.delta(),
                 },
             );
@@ -370,7 +370,7 @@ where
         Sequence::Compositor(SwipeGesture::Pan(gesture)) => {
             if let Some(camera) = session.cameras.get_mut(&gesture.output) {
                 let delta = event.delta();
-                gesture.update(camera, event.time_msec(), delta.x, delta.y);
+                gesture.update(camera, event.time().millis(), delta.x, delta.y);
                 session.request_redraw();
             } else {
                 sequence = Sequence::Ignored;
@@ -438,7 +438,7 @@ where
                 session,
                 &GestureSwipeEndEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     cancelled: event.cancelled(),
                 },
             );
@@ -498,7 +498,7 @@ where
     let settings = &session.settings.input.gestures;
     let route = begin_route(
         session,
-        event.time_msec(),
+        event.time().millis(),
         settings.pinch_to_zoom && session.settings.zoom.enabled,
         settings.pinch_scope,
     );
@@ -515,7 +515,7 @@ where
                 session,
                 &GesturePinchBeginEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     fingers: event.fingers(),
                 },
             );
@@ -554,7 +554,7 @@ where
             pointer.gesture_pinch_update(
                 session,
                 &GesturePinchUpdateEvent {
-                    time: event.time_msec(),
+                    time: event.time(),
                     delta: event.delta(),
                     scale: event.scale(),
                     rotation: event.rotation(),
@@ -570,7 +570,7 @@ where
                 let zooming = gesture.update(
                     camera,
                     &session.settings.zoom,
-                    event.time_msec(),
+                    event.time().millis(),
                     delta.x,
                     delta.y,
                     event.scale(),
@@ -611,7 +611,7 @@ where
                 session,
                 &GesturePinchEndEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     cancelled: event.cancelled(),
                 },
             );
@@ -652,7 +652,7 @@ where
     } else {
         session.settings.input.gestures.compositor_scope
     };
-    let route = begin_route(session, event.time_msec(), binding.is_some(), scope);
+    let route = begin_route(session, event.time().millis(), binding.is_some(), scope);
     session.gestures.hold = Some(match route.choice {
         RouteChoice::Client => {
             let Some(owner) = route.owner else {
@@ -666,7 +666,7 @@ where
                 session,
                 &GestureHoldBeginEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     fingers: event.fingers(),
                 },
             );
@@ -704,7 +704,7 @@ where
                 session,
                 &GestureHoldEndEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     cancelled: event.cancelled(),
                 },
             );
@@ -759,7 +759,12 @@ where
         return false;
     }
 
-    let route = begin_route(session, event.time_msec(), true, GestureScope::EmptyField);
+    let route = begin_route(
+        session,
+        event.time().millis(),
+        true,
+        GestureScope::EmptyField,
+    );
     let Some(output) = (route.choice == RouteChoice::Compositor)
         .then_some(route.output)
         .flatten()
@@ -797,7 +802,7 @@ pub(crate) fn cancel_all<D: SessionDriver>(session: &mut Session<D>) {
             session,
             &GestureSwipeEndEvent {
                 serial: SERIAL_COUNTER.next_serial(),
-                time,
+                time: smithay::backend::input::InputTime::from_millis(time),
                 cancelled: true,
             },
         );
@@ -812,7 +817,7 @@ pub(crate) fn cancel_all<D: SessionDriver>(session: &mut Session<D>) {
             session,
             &GesturePinchEndEvent {
                 serial: SERIAL_COUNTER.next_serial(),
-                time,
+                time: smithay::backend::input::InputTime::from_millis(time),
                 cancelled: true,
             },
         );
@@ -827,7 +832,7 @@ pub(crate) fn cancel_all<D: SessionDriver>(session: &mut Session<D>) {
             session,
             &GestureHoldEndEvent {
                 serial: SERIAL_COUNTER.next_serial(),
-                time,
+                time: smithay::backend::input::InputTime::from_millis(time),
                 cancelled: true,
             },
         );

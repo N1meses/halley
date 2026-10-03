@@ -70,6 +70,17 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Remove `vendor/` and the Smithay Cargo override. Pin `smithay` and
+  `smithay-drm-extras` to unmodified upstream revision
+  `79bbed5e1199090d787115614847a79c76607181`, matching Niri's checked pin.
+  Adapt Halley to the revision's public input, dispatch, DMA-BUF, and Winit APIs.
+- Use basic upstream native IME support. Disconnect IME clients during screen
+  locking and reject new IME requests until unlock; reconnect or restart the IME
+  afterward. Halley's patched composition and popup lifecycle behavior is removed.
+- Return blur effects to conservative full-output capture and filtering; the
+  custom regional and foreground-aware Smithay damage patches are removed.
+  Local animations also use full repaints for reliable opacity transitions.
+  X11 initialization again uses upstream's synchronous property loading.
 - Remove `halleyctl config migrate` and its configuration backup and replacement
   code. Existing configurations stay user-owned; edit compatibility changes
   manually and check them with `halleyctl config verify`.
@@ -147,12 +158,6 @@ All notable changes to this project will be documented in this file.
   across windows, panels, output cameras, and moving subsurfaces/popups. Preserve
   the client cursor while held and restore normal pointer routing immediately
   after the last button release.
-- Keep input-method-v2 candidate popups hidden until text input is enabled,
-  send the current caret rectangle when each popup is created, and update all
-  live candidate surfaces. Destroyed IMEs no longer leave popups to be revived
-  by a replacement IME.
-- Release input-method-v2 keyboard grabs when their IME is destroyed, and keep
-  stale grab objects from releasing a replacement grab after reconnection.
 - Bound IPC connections and request deadlines, release disconnected subscribers
   and capture buffers, and enforce per-connection/global DMA-BUF quotas and
   ownership. Close received descriptors even when ancillary data is truncated.
@@ -175,19 +180,12 @@ All notable changes to this project will be documented in this file.
   requests pipelined before rejection reaches the client. Rejected lock surfaces
   remain inert and cannot reserve outputs, replace the real lock, or crash the
   compositor through uninitialized protocol objects.
-- Isolate lock-screen input from ordinary clients: suspend IME keyboard grabs
-  and text state until unlock, retire existing client grabs, and reject popup,
-  XWayland, and virtual-keyboard input paths while locked. Existing IMEs resume
-  after unlock without requiring a restart.
+- Isolate lock-screen input from ordinary clients: disconnect IME clients,
+  retire existing client grabs, and reject popup, XWayland, virtual-keyboard,
+  and new input-method requests while locked. IMEs must reconnect after unlock.
 - Respect layer-shell keyboard interactivity when grabbing popup menus. Waybar
   tray menus keep their pointer grab without taking keyboard focus from the
   current app or restoring it to a non-interactive panel after selection.
-- Correct text-input-v3 and input-method-v2 state handling: buffer composition
-  until the IME commits, report the application's actual commit count, and reset
-  pending state and caret geometry when switching text fields. Avoid duplicate
-  focus events, release destroyed active text-input objects, and reject competing
-  IMEs without disrupting the active one. Add socket-level protocol regressions
-  for composition, focus changes, object lifecycle, and IME reconnection.
 - Keep a field-maximized window (Firefox session restore) from snapping to
   its windowed size when `Mod+F` takes over. Compositor fullscreen no longer
   relocates or un-maximizes the client first, leftover Maximized no longer

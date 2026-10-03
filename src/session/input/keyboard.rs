@@ -91,7 +91,7 @@ pub(super) fn handle<D, B>(
     let keycode = key_event.key_code();
     let state = key_event.state();
     session.keyboard.side_modifiers.update(keycode, state);
-    let time = key_event.time_msec();
+    let time = key_event.time();
     if state == KeyState::Released {
         session.key_repeat.release(keycode);
         session.clusters.stop_name_repeat(keycode.raw());
@@ -111,7 +111,7 @@ pub(super) fn handle<D, B>(
     } else {
         crate::accessibility::process_key(
             session,
-            std::time::Duration::from_millis(u64::from(time)),
+            std::time::Duration::from_millis(u64::from(time.millis())),
             keycode,
             state,
         )

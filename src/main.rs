@@ -19,6 +19,8 @@ mod session;
 mod shell;
 mod titlebar;
 mod trail;
+#[path = "wayland/dispatch.rs"]
+mod upstream_protocols;
 mod wayland;
 mod window;
 #[cfg(feature = "xwayland")]

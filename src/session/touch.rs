@@ -145,7 +145,7 @@ where
                     slot: event.slot(),
                     location: screen,
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                 },
             );
         }
@@ -170,7 +170,7 @@ where
                 &MotionEvent {
                     slot: event.slot(),
                     location: screen,
-                    time: event.time_msec(),
+                    time: event.time(),
                 },
             );
         }
@@ -184,7 +184,7 @@ where
                     &UpEvent {
                         slot: event.slot(),
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }
@@ -281,7 +281,7 @@ where
             slot: event.slot(),
             location: route.location,
             serial,
-            time: event.time_msec(),
+            time: event.time(),
         },
     );
 }
@@ -356,7 +356,7 @@ where
         &MotionEvent {
             slot: event.slot(),
             location,
-            time: event.time_msec(),
+            time: event.time(),
         },
     );
 }
@@ -400,7 +400,7 @@ where
         &UpEvent {
             slot: event.slot(),
             serial: SERIAL_COUNTER.next_serial(),
-            time: event.time_msec(),
+            time: event.time(),
         },
     );
 }

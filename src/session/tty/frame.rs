@@ -4,8 +4,8 @@ use calloop::RegistrationToken;
 
 use crate::frame_clock::FrameClock;
 
-/// Local animation and continuous diagnostics need another scene sample,
-/// while camera and scene geometry transitions retain the buffer-age reset.
+/// Animations repaint conservatively with unmodified Smithay; diagnostics
+/// alone still request another sample without resetting buffer ages.
 pub(crate) struct FrameDemand {
     pub keep_redrawing: bool,
     pub force_full_repaint: bool,
@@ -15,7 +15,7 @@ impl FrameDemand {
     pub fn new(geometry_animating: bool, local_animating: bool, fps_overlay_visible: bool) -> Self {
         Self {
             keep_redrawing: geometry_animating || local_animating || fps_overlay_visible,
-            force_full_repaint: geometry_animating,
+            force_full_repaint: geometry_animating || local_animating,
         }
     }
 }
@@ -373,9 +373,9 @@ mod tests {
     }
 
     #[test]
-    fn local_animation_keeps_vblank_cadence_without_resetting_buffer_ages() {
+    fn local_animation_keeps_vblank_cadence_with_conservative_repaints() {
         let animation = FrameDemand::new(false, true, false);
-        assert!(!animation.force_full_repaint);
+        assert!(animation.force_full_repaint);
         let mut state = state();
         state.queue_redraw();
         state.frame_submitted(animation.keep_redrawing);

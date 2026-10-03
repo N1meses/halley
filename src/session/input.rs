@@ -1696,14 +1696,14 @@ where
             event.delta(),
             event.delta_unaccel(),
             event.time(),
-            event.time_msec(),
+            event.time().millis(),
         )),
         InputEvent::PointerMotionAbsolute { event } => {
             let delta = Point::<f64, Logical>::from((
                 proposed_position.0 - position_before.0,
                 proposed_position.1 - position_before.1,
             ));
-            Some((delta, delta, event.time(), event.time_msec()))
+            Some((delta, delta, event.time(), event.time().millis()))
         }
         _ => None,
     };
@@ -1962,7 +1962,7 @@ where
             &RelativeMotionEvent {
                 delta,
                 delta_unaccel,
-                utime: time,
+                time,
             },
         );
         super::pointer::finish_frame(session, &pointer_handle);
@@ -2205,9 +2205,7 @@ where
             )
                 .into();
             if let Some(surface) = window.x11_surface() {
-                if let Err(err) = surface.move_override_redirect(location) {
-                    eventline::warn!("xwayland: pop-out move failed: {err}");
-                }
+                session.xwayland.move_override_redirect(surface, location);
             }
             session.wayland.space.relocate_element(&window, location);
             if let Some((output, _)) = output_at_pointer(&session.wayland.space, position_after) {
@@ -2572,7 +2570,7 @@ where
                 &RelativeMotionEvent {
                     delta,
                     delta_unaccel,
-                    utime: time,
+                    time,
                 },
             );
         }
@@ -2695,7 +2693,7 @@ where
     {
         let button = button_event.button_code();
         let state = button_event.state();
-        let time = button_event.time_msec();
+        let time = button_event.time().millis();
         let serial = SERIAL_COUNTER.next_serial();
         if let crate::input::grab::Grab::MovePopup { button: owner, .. } =
             &session.interactions.grab
@@ -2977,7 +2975,7 @@ where
                     session,
                     &ButtonEvent {
                         serial,
-                        time,
+                        time: smithay::backend::input::InputTime::from_millis(time),
                         button,
                         state,
                     },
@@ -3830,7 +3828,7 @@ where
                 session,
                 &ButtonEvent {
                     serial,
-                    time,
+                    time: smithay::backend::input::InputTime::from_millis(time),
                     button,
                     state,
                 },
@@ -3849,7 +3847,7 @@ where
             super::pointer::finish_frame(session, &pointer_handle);
             return;
         }
-        let route = super::pointer::route_for_discrete_input(session, axis_event.time_msec());
+        let route = super::pointer::route_for_discrete_input(session, axis_event.time().millis());
         let output_name = route.as_ref().map(|route| route.output.name().to_string());
         let bindings_enabled = bindings_enabled(session);
         let modifiers = session

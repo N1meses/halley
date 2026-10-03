@@ -831,7 +831,7 @@ impl RenderElement<RasterRenderer> for EffectElement {
 }
 
 #[test]
-fn framebuffer_effect_recaptures_when_background_changes_and_reuses_when_static() {
+fn framebuffer_effect_conservatively_recaptures_every_sample() {
     let mut renderer = RasterRenderer::default();
     let (mut frame, _) = compose(&mut renderer);
     let background = Id::new();
@@ -857,12 +857,12 @@ fn framebuffer_effect_recaptures_when_background_changes_and_reuses_when_static(
             .render(&mut renderer, &scene, Color32F::BLACK, false)
             .unwrap();
     }
-    assert_eq!(*captures.borrow(), [RED, GREEN]);
-    assert_eq!(renderer.frames, 2);
+    assert_eq!(*captures.borrow(), [RED, RED, GREEN, GREEN]);
+    assert_eq!(renderer.frames, 4);
 }
 
 #[test]
-fn fps_selective_damage_preserves_effect_capture_on_primary_and_secondary_outputs() {
+fn fps_with_blur_matches_conservative_primary_and_secondary_outputs() {
     let fps = FrameDemand::new(false, false, true);
     let mut renderer = RasterRenderer::default();
     let (mut frame, texture) = compose(&mut renderer);
@@ -917,14 +917,10 @@ fn fps_selective_damage_preserves_effect_capture_on_primary_and_secondary_output
             ]
         };
         let age = usize::from(tick != 0 && !fps.force_full_repaint);
+        let primary_scene = scene(primary_captures.clone());
+        let (prepared, _) = crate::render::conservative::prepare(&primary_scene);
         let damage = primary_tracker
-            .render_output(
-                &mut renderer,
-                &mut primary,
-                age,
-                &scene(primary_captures.clone()),
-                Color32F::BLACK,
-            )
+            .render_output(&mut renderer, &mut primary, age, &prepared, Color32F::BLACK)
             .unwrap()
             .damage
             .cloned()
@@ -948,20 +944,20 @@ fn fps_selective_damage_preserves_effect_capture_on_primary_and_secondary_output
             assert!(
                 damage
                     .iter()
-                    .all(|rect| rect.size.w * rect.size.h < 100 * 80)
+                    .any(|rect| rect.size.w * rect.size.h == 100 * 80)
             );
             assert!(
                 transfer
                     .iter()
-                    .all(|rect| rect.size.w * rect.size.h < 100 * 80)
+                    .any(|rect| rect.size.w * rect.size.h == 100 * 80)
             );
         }
         assert_eq!(*primary.pixels.borrow(), *texture.pixels.borrow());
         assert_eq!(*primary.pixels.borrow(), *secondary.pixels.borrow());
     }
-    assert_eq!(*primary_captures.borrow(), [RED, GREEN]);
-    assert_eq!(*secondary_captures.borrow(), [RED, GREEN]);
+    assert_eq!(*primary_captures.borrow(), [RED, RED, RED, GREEN, GREEN]);
+    assert_eq!(*secondary_captures.borrow(), [RED, RED, RED, GREEN, GREEN]);
     assert_eq!(secondary.pixel(15, 15), Color32F::new(0.0, 0.5, 0.0, 1.0));
     assert_eq!(secondary.pixel(50, 50), RED);
-    assert_eq!(renderer.frames, 9);
+    assert_eq!(renderer.frames, 15);
 }

@@ -1,20 +1,14 @@
 //! Synthetic keyboard input is unavailable while the session is locked.
 use crate::session::{Session, SessionDriver};
 use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::{
-    zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
     zwp_virtual_keyboard_v1::{Request, ZwpVirtualKeyboardV1},
 };
 use smithay::reexports::wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, delegate_dispatch, delegate_global_dispatch,
+    Client, DataInit, Dispatch, DisplayHandle,
 };
 use smithay::wayland::virtual_keyboard::{
-    VirtualKeyboardManagerGlobalData, VirtualKeyboardManagerState, VirtualKeyboardUserData,
+    VirtualKeyboardUserData,
 };
-
-delegate_global_dispatch!(@<D: SessionDriver> Session<D>:
-    [ZwpVirtualKeyboardManagerV1: VirtualKeyboardManagerGlobalData] => VirtualKeyboardManagerState);
-delegate_dispatch!(@<D: SessionDriver> Session<D>:
-    [ZwpVirtualKeyboardManagerV1: ()] => VirtualKeyboardManagerState);
 
 impl<D: SessionDriver> Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData<Self>>
     for Session<D>
@@ -33,10 +27,8 @@ impl<D: SessionDriver> Dispatch<ZwpVirtualKeyboardV1, VirtualKeyboardUserData<Se
         if state.session_lock.active() {
             return;
         }
-        <VirtualKeyboardManagerState as Dispatch<
-            ZwpVirtualKeyboardV1,
-            VirtualKeyboardUserData<Self>,
-            Self,
-        >>::request(state, client, resource, request, data, display, data_init);
+        smithay::wayland::Dispatch2::request(
+            data, state, client, resource, request, display, data_init,
+        );
     }
 }

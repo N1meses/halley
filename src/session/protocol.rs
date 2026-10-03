@@ -26,7 +26,7 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
-use smithay::wayland::tablet_manager::TabletSeatHandler;
+use smithay::input::tablet::TabletSeatHandler;
 use smithay::wayland::compositor::{
     BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
     SurfaceAttributes, add_pre_commit_hook, with_states,
@@ -65,19 +65,6 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
-};
-use smithay::{
-    delegate_background_effect, delegate_compositor, delegate_cursor_shape, delegate_data_device,
-    delegate_dmabuf, delegate_drm_syncobj, delegate_ext_data_control,
-    delegate_fractional_scale,
-    delegate_idle_inhibit,
-    delegate_idle_notify,
-    delegate_input_method_manager,
-    delegate_keyboard_shortcuts_inhibit, delegate_layer_shell, delegate_output,
-    delegate_pointer_constraints, delegate_primary_selection, delegate_relative_pointer,
-    delegate_pointer_gestures, delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
-    delegate_text_input_manager,
-    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use super::state::{Session, SessionDriver};
@@ -1238,7 +1225,9 @@ impl<D: SessionDriver> SeatHandler for Session<D> {
     }
 }
 
-impl<D: SessionDriver> TabletSeatHandler for Session<D> {}
+impl<D: SessionDriver> TabletSeatHandler for Session<D> {
+    type ToolFocus = WlSurface;
+}
 
 impl<D: SessionDriver> IdleNotifierHandler for Session<D> {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
@@ -1543,32 +1532,7 @@ impl<D: SessionDriver> smithay::wayland::background_effect::ExtBackgroundEffectH
     }
 }
 
-delegate_compositor!(@<D: SessionDriver> Session<D>);
-delegate_background_effect!(@<D: SessionDriver> Session<D>);
-delegate_dmabuf!(@<D: SessionDriver> Session<D>);
-delegate_drm_syncobj!(@<D: SessionDriver> Session<D>);
-delegate_shm!(@<D: SessionDriver> Session<D>);
-delegate_xdg_shell!(@<D: SessionDriver> Session<D>);
-delegate_xdg_activation!(@<D: SessionDriver> Session<D>);
-delegate_layer_shell!(@<D: SessionDriver> Session<D>);
-delegate_xdg_decoration!(@<D: SessionDriver> Session<D>);
-delegate_seat!(@<D: SessionDriver> Session<D>);
-delegate_cursor_shape!(@<D: SessionDriver> Session<D>);
-delegate_output!(@<D: SessionDriver> Session<D>);
-delegate_viewporter!(@<D: SessionDriver> Session<D>);
-delegate_fractional_scale!(@<D: SessionDriver> Session<D>);
-delegate_idle_inhibit!(@<D: SessionDriver> Session<D>);
-delegate_idle_notify!(@<D: SessionDriver> Session<D>);
-delegate_presentation!(@<D: SessionDriver> Session<D>);
-delegate_relative_pointer!(@<D: SessionDriver> Session<D>);
-delegate_pointer_constraints!(@<D: SessionDriver> Session<D>);
-delegate_pointer_gestures!(@<D: SessionDriver> Session<D>);
-delegate_text_input_manager!(@<D: SessionDriver> Session<D>);
-delegate_input_method_manager!(@<D: SessionDriver> Session<D>);
-delegate_keyboard_shortcuts_inhibit!(@<D: SessionDriver> Session<D>);
-delegate_data_device!(@<D: SessionDriver> Session<D>);
-delegate_primary_selection!(@<D: SessionDriver> Session<D>);
-delegate_ext_data_control!(@<D: SessionDriver> Session<D>);
+crate::upstream_protocols::delegate_upstream_protocols!(@<D: SessionDriver> Session<D>, crate::wayland::text_input::allow_request);
 
 #[cfg(test)]
 mod tests {
