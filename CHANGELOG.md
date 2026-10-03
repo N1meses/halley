@@ -146,6 +146,10 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Accept negative mouse/touchpad acceleration values and quoted numeric speeds;
+  `sensitivity` is an alias for `accel-speed`. Use the unmodified upstream
+  `rune-cfg` signed-number fix without a vendor copy. The compatibility work is
+  informed by noervthere's Halley fork.
 - Fix builds with default features disabled by guarding XWayland-only popup
   handling and completing the no-op tracing implementation.
 - Reject IME requests during screen locking with a deferred protocol error,

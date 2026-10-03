@@ -541,6 +541,7 @@ fn parse_device_settings(
         "enabled",
         "natural-scroll",
         "accel-speed",
+        "sensitivity",
         "accel-profile",
         "scroll-method",
         "scroll-button",
@@ -552,6 +553,7 @@ fn parse_device_settings(
         "enabled",
         "natural-scroll",
         "accel-speed",
+        "sensitivity",
         "accel-profile",
         "scroll-method",
         "scroll-button",
@@ -571,6 +573,7 @@ fn parse_device_settings(
         "enabled",
         "natural-scroll",
         "accel-speed",
+        "sensitivity",
         "accel-profile",
         "scroll-method",
         "scroll-button",
@@ -594,7 +597,16 @@ fn parse_device_settings(
         None => ALL_FIELDS,
     };
     validate_fields(fields, allowed, path)?;
-    let accel_speed = optional_number(fields, "accel-speed", path)?;
+    let speed = optional_accel_speed(fields, "accel-speed", path)?;
+    let sensitivity = optional_accel_speed(fields, "sensitivity", path)?;
+    if let (Some(speed), Some(sensitivity)) = (speed, sensitivity)
+        && speed != sensitivity
+    {
+        return Err(InputParseError(format!(
+            "{path}.accel-speed and sensitivity must agree when both are set"
+        )));
+    }
+    let accel_speed = speed.or(sensitivity);
     if accel_speed.is_some_and(|speed| !(-1.0..=1.0).contains(&speed)) {
         return Err(InputParseError(format!(
             "{path}.accel-speed must be between -1.0 and 1.0"
@@ -729,6 +741,23 @@ fn optional_bool(
     }
 }
 
+fn optional_accel_speed(
+    fields: &[ObjectItem],
+    key: &str,
+    path: &str,
+) -> Result<Option<f64>, InputParseError> {
+    if let Some(Value::String(value)) = field(fields, key) {
+        return value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| InputParseError(format!("{path}.{key} must be a finite number")));
+    }
+    optional_number(fields, key, path)
+}
+
 fn optional_number(
     fields: &[ObjectItem],
     key: &str,
@@ -857,6 +886,25 @@ end
         assert_eq!(input.mouse.accel_profile, Some(AccelProfile::Flat));
         assert_eq!(input.mouse.scroll_method, Some(ScrollMethod::OnButtonDown));
         assert_eq!(input.mouse.scroll_button, Some(274));
+    }
+
+    #[test]
+    fn signed_accel_speed_and_sensitivity_alias() {
+        for setting in [
+            "accel-speed -0.5",
+            "accel-speed \"-0.5\"",
+            "sensitivity -0.5",
+        ] {
+            let input = parse(&format!("input:\n  mouse:\n    {setting}\n  end\nend\n")).unwrap();
+            assert_eq!(input.mouse.accel_speed, Some(-0.5));
+        }
+        for setting in [
+            "accel-speed -1.1",
+            "sensitivity \"NaN\"",
+            "accel-speed -0.5\n    sensitivity 0.5",
+        ] {
+            assert!(parse(&format!("input:\n  mouse:\n    {setting}\n  end\nend\n")).is_err());
+        }
     }
 
     #[test]

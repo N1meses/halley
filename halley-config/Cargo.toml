@@ -12,4 +12,4 @@ categories.workspace = true
 
 [dependencies]
 regex = "1"
-rune-cfg = "0.7.0"
+rune-cfg.workspace = true
