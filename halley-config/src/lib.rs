@@ -14,7 +14,6 @@ pub mod font;
 pub mod input;
 pub mod keybinds;
 pub mod launch;
-pub mod migrate;
 pub mod nodes;
 pub mod output;
 pub mod overlays;
@@ -73,7 +72,6 @@ pub use keybinds::{
     ModifierKey, Modifiers, MonitorTarget, TrailDirection,
 };
 pub use launch::{Autostart, LaunchConfigError, StartupCluster, parse_autostart, parse_env};
-pub use migrate::{MigrationError, MigrationReport, MigrationStatus, migrate_config_at};
 pub use nodes::{
     Debug, Decay, FocusRing, FocusRings, LandmarkPlacement, NodeBackgroundColor, NodeDisplayPolicy,
     NodeParseError, NodeShape, Nodes, RestoreCentering, parse_debug, parse_decay,

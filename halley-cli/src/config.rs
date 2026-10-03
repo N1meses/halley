@@ -67,68 +67,6 @@ pub fn verify(explicit: Option<PathBuf>) -> ExitCode {
     }
 }
 
-pub fn migrate(explicit: Option<PathBuf>, dry_run: bool) -> ExitCode {
-    let path = match resolve_config_path(explicit) {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("halleyctl: {error}");
-            return ExitCode::from(2);
-        }
-    };
-    match halley_config::migrate_config_at(&path, dry_run) {
-        Ok(report) => {
-            use halley_config::MigrationStatus;
-            match report.status {
-                MigrationStatus::UpToDate => {
-                    println!("No structural migration needed");
-                    println!("  File: {}", path.display());
-                }
-                MigrationStatus::WouldUpdate | MigrationStatus::Updated => {
-                    println!(
-                        "Configuration {}",
-                        if dry_run {
-                            "migration preview"
-                        } else {
-                            "migrated"
-                        }
-                    );
-                    println!("  File: {}", path.display());
-                    if let Some(reason) = &report.reason {
-                        println!("  Reason: {reason}");
-                    }
-                    for item in &report.applied {
-                        println!("  Change: {item}");
-                    }
-                    if let Some(backup) = report.backup {
-                        println!("  Backup: {}", backup.display());
-                    }
-                }
-                MigrationStatus::Replaced => {
-                    println!("Configuration replaced");
-                    println!("  File: {}", path.display());
-                    if let Some(reason) = &report.reason {
-                        println!("  Reason: {reason}");
-                    }
-                    for item in &report.applied {
-                        println!("  Change: {item}");
-                    }
-                    if let Some(backup) = report.backup {
-                        println!("  Backup: {}", backup.display());
-                    }
-                }
-            }
-            for item in &report.skipped {
-                println!("  Skip: {item}");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("halleyctl: could not migrate {}: {error}", path.display());
-            ExitCode::FAILURE
-        }
-    }
-}
-
 fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
     match explicit {
         Some(path) => match absolute_path(path) {
