@@ -161,6 +161,10 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Restart the Halley portal backend with its frontend, preventing a stale
+  backend from surviving a new login and delaying startup clients such as Waybar.
+- Release DRM event notifiers, output surfaces, and device resources before
+  closing GPU session access, avoiding permission errors during TTY shutdown.
 - Restore XWayland dropdown placement in Steam and Qt apps by using X11 root
   configure geometry for popup offsets and managed position synchronization,
   preventing menus from appearing at the owner's top-left corner.

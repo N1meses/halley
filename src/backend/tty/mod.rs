@@ -1322,11 +1322,28 @@ impl TtyBackend {
 
 impl Drop for TtyBackend {
     fn drop(&mut self) {
-        for gpu in &mut self.gpus {
-            if let Some(fd) = gpu.session_fd.take() {
-                if let Err(err) = self.session.close(fd) {
-                    eventline::warn!("tty: failed to close GPU session fd: {err}");
-                }
+        // Smithay clears each output's KMS state on drop. Keep libseat's GPU
+        // access until those surfaces and the device's saved state are gone.
+        self.drm_outputs.clear();
+        for gpu in self.gpus.drain(..) {
+            let TtyGpu {
+                render_node,
+                session_fd,
+                drm_fd,
+                drm_output_manager,
+                notifier,
+            } = gpu;
+            self.gpu_manager.as_mut().remove_node(&render_node);
+            // remove_node changes enumeration; refresh to release cached
+            // renderers before libseat revokes this device's access.
+            let _ = self.gpu_manager.devices();
+            drop(notifier);
+            drop(drm_output_manager);
+            drop(drm_fd);
+            if let Some(fd) = session_fd
+                && let Err(err) = self.session.close(fd)
+            {
+                eventline::warn!("tty: failed to close GPU session fd: {err}");
             }
         }
     }

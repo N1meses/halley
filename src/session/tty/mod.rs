@@ -698,14 +698,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         })
         .expect("failed to insert session notifier");
 
+    let mut drm_tokens = Vec::with_capacity(drm_notifiers.len());
     for (gpu_index, drm_notifier) in drm_notifiers.into_iter().enumerate() {
-        event_loop
+        let token = event_loop
             .handle()
             .insert_source(drm_notifier, move |event, metadata, app| match event {
                 DrmEvent::VBlank(crtc) => on_vblank(app, gpu_index, crtc, metadata.as_ref()),
                 DrmEvent::Error(err) => eventline::error!("drm event: error {err:?}"),
             })
             .expect("failed to insert drm notifier");
+        drm_tokens.push(token);
     }
 
     eventline::info!("session ready: outputs active; use the configured Quit chord to exit");
@@ -722,6 +724,11 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         })
         .expect("event loop run failed");
     eventline::info!("quit requested, exiting cleanly");
+    // Notifiers retain the DRM device. Release them before the backend drops
+    // its outputs/devices, while the session notifier still owns the seat.
+    for token in drm_tokens {
+        event_loop.handle().remove(token);
+    }
 }
 
 fn presentation_time(metadata: Option<&DrmEventMetadata>) -> Option<Duration> {

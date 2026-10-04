@@ -61,7 +61,15 @@ connection.
 `xdg-desktop-portal-halley`. Distribution packages install the matching D-Bus
 and systemd user-service files from `packaging/`.
 
-The compositor and portal use a versioned local capture protocol. When testing
-a newly built compositor in an existing graphical session, restart
-`xdg-desktop-portal-halley.service` as well; a portal process left running from
-an older build cannot serve captures for the new compositor.
+The compositor and portal use a versioned local capture protocol. The packaged
+Halley backend service follows the desktop portal frontend's stop and restart
+operations. Halley refreshes that frontend after publishing a new TTY session's
+display environment, so the backend also starts fresh instead of retaining an
+older executable or session state across logins.
+
+After installing updated user-service files, run `systemctl --user daemon-reload`.
+For an existing session, `systemctl --user restart xdg-desktop-portal.service`
+refreshes both services. Custom backend units should include
+`PartOf=graphical-session.target xdg-desktop-portal.service` too. Without that
+relationship, restart `xdg-desktop-portal-halley.service` explicitly after
+updating its binary.
