@@ -16,6 +16,7 @@ const AVAILABLE_CURSOR_MODES: u32 = CURSOR_HIDDEN | CURSOR_EMBEDDED | CURSOR_MET
 
 type Vardict = HashMap<String, OwnedValue>;
 
+#[derive(Clone)]
 pub struct ScreenCastInterface {
     connection: Connection,
     sessions: Arc<Mutex<crate::session::SessionStore>>,
@@ -55,7 +56,7 @@ impl ScreenCastInterface {
 
 #[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
 impl ScreenCastInterface {
-    fn create_session(
+    async fn create_session(
         &self,
         handle: OwnedObjectPath,
         session_handle: OwnedObjectPath,
@@ -63,31 +64,39 @@ impl ScreenCastInterface {
         _options: Vardict,
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<(u32, Vardict)> {
-        let owner = crate::auth::frontend(&self.connection, &header)?;
-        let _request = export_request(&self.connection, &handle, owner.as_str())?;
-        let session_path = session_handle.to_string();
-        let session = self
-            .sessions
-            .lock()
-            .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?
-            .create(session_path.clone(), owner.to_string(), app_id.to_string())
-            .map_err(fdo::Error::InvalidArgs)?;
-        self.connection.object_server().at(
-            session_handle,
-            SessionInterface {
-                owner: owner.to_string(),
-                connection: self.connection.clone(),
-                handle: session_path,
-                sessions: self.sessions.clone(),
-                producer: self.producer.clone(),
-            },
-        )?;
-        let mut results = Vardict::new();
-        results.insert("session_id".to_string(), owned(Value::from(session.id))?);
-        Ok((0, results))
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        let app_id = app_id.to_owned();
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            let owner = crate::auth::sender(sender.as_ref())?;
+            let _request = export_request(&this.connection, &handle, owner.as_str())?;
+            let session_path = session_handle.to_string();
+            let session = this
+                .sessions
+                .lock()
+                .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?
+                .create(session_path.clone(), owner.to_string(), app_id.to_string())
+                .map_err(fdo::Error::InvalidArgs)?;
+            this.connection.object_server().at(
+                session_handle,
+                SessionInterface {
+                    owner: owner.to_string(),
+                    connection: this.connection.clone(),
+                    handle: session_path,
+                    sessions: this.sessions.clone(),
+                    producer: this.producer.clone(),
+                },
+            )?;
+            let mut results = Vardict::new();
+            results.insert("session_id".to_string(), owned(Value::from(session.id))?);
+            Ok((0, results))
+        })
+        .await
     }
 
-    fn select_sources(
+    async fn select_sources(
         &self,
         handle: OwnedObjectPath,
         session_handle: OwnedObjectPath,
@@ -95,52 +104,59 @@ impl ScreenCastInterface {
         options: Vardict,
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<(u32, Vardict)> {
-        let owner = crate::auth::frontend(&self.connection, &header)?;
-        let _request = export_request(&self.connection, &handle, owner.as_str())?;
-        self.require_session(&session_handle, owner.as_str(), app_id)?;
-        let source_types = extract_u32(&options, "types").unwrap_or(halley_ipc::SOURCE_MONITOR);
-        let supported = source_types & AVAILABLE_SOURCE_TYPES;
-        if supported == 0 || source_types & !AVAILABLE_SOURCE_TYPES != 0 {
-            return Ok((2, Vardict::new()));
-        }
-        let cursor_mode = match extract_u32(&options, "cursor_mode").unwrap_or(CURSOR_HIDDEN) {
-            CURSOR_HIDDEN => halley_ipc::CursorMode::Hidden,
-            CURSOR_EMBEDDED => halley_ipc::CursorMode::Embedded,
-            CURSOR_METADATA => halley_ipc::CursorMode::Metadata,
-            _ => return Ok((2, Vardict::new())),
-        };
-        let session_path = session_handle.to_string();
-        if self
-            .sessions
-            .lock()
-            .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?
-            .get(&session_path)
-            .is_none()
-        {
-            return Ok((2, Vardict::new()));
-        }
-        match crate::compositor::choose_source(handle.to_string(), supported) {
-            Ok(halley_ipc::SourceChooserResponse::Selected(source)) => {
-                let mut sessions = self
-                    .sessions
-                    .lock()
-                    .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?;
-                let Some(session) = sessions.get_mut(&session_path) else {
-                    return Ok((2, Vardict::new()));
-                };
-                session.selected = Some(source);
-                session.cursor_mode = cursor_mode;
-                Ok((0, Vardict::new()))
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        let app_id = app_id.to_owned();
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            let owner = crate::auth::sender(sender.as_ref())?;
+            let _request = export_request(&this.connection, &handle, owner.as_str())?;
+            this.require_session(&session_handle, owner.as_str(), &app_id)?;
+            let source_types = extract_u32(&options, "types").unwrap_or(halley_ipc::SOURCE_MONITOR);
+            let supported = source_types & AVAILABLE_SOURCE_TYPES;
+            if supported == 0 || source_types & !AVAILABLE_SOURCE_TYPES != 0 {
+                return Ok((2, Vardict::new()));
             }
-            Ok(halley_ipc::SourceChooserResponse::Cancelled) => Ok((1, Vardict::new())),
-            Ok(halley_ipc::SourceChooserResponse::Failed { message }) | Err(message) => {
-                eventline::warn!("source chooser failed: {message}");
-                Ok((2, Vardict::new()))
+            let cursor_mode = match extract_u32(&options, "cursor_mode").unwrap_or(CURSOR_HIDDEN) {
+                CURSOR_HIDDEN => halley_ipc::CursorMode::Hidden,
+                CURSOR_EMBEDDED => halley_ipc::CursorMode::Embedded,
+                CURSOR_METADATA => halley_ipc::CursorMode::Metadata,
+                _ => return Ok((2, Vardict::new())),
+            };
+            let session_path = session_handle.to_string();
+            if this
+                .sessions
+                .lock()
+                .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?
+                .get(&session_path)
+                .is_none()
+            {
+                return Ok((2, Vardict::new()));
             }
-        }
+            match crate::compositor::choose_source(handle.to_string(), supported) {
+                Ok(halley_ipc::SourceChooserResponse::Selected(source)) => {
+                    let mut sessions = this.sessions.lock().map_err(|_| {
+                        fdo::Error::Failed("session store lock poisoned".to_string())
+                    })?;
+                    let Some(session) = sessions.get_mut(&session_path) else {
+                        return Ok((2, Vardict::new()));
+                    };
+                    session.selected = Some(source);
+                    session.cursor_mode = cursor_mode;
+                    Ok((0, Vardict::new()))
+                }
+                Ok(halley_ipc::SourceChooserResponse::Cancelled) => Ok((1, Vardict::new())),
+                Ok(halley_ipc::SourceChooserResponse::Failed { message }) | Err(message) => {
+                    eventline::warn!("source chooser failed: {message}");
+                    Ok((2, Vardict::new()))
+                }
+            }
+        })
+        .await
     }
 
-    fn start(
+    async fn start(
         &self,
         handle: OwnedObjectPath,
         session_handle: OwnedObjectPath,
@@ -149,66 +165,74 @@ impl ScreenCastInterface {
         _options: Vardict,
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<(u32, Vardict)> {
-        let owner = crate::auth::frontend(&self.connection, &header)?;
-        let _request = export_request(&self.connection, &handle, owner.as_str())?;
-        let session_path = session_handle.to_string();
-        self.require_session(&session_handle, owner.as_str(), app_id)?;
-        let (source, cursor_mode) = {
-            let sessions = self
-                .sessions
-                .lock()
-                .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?;
-            let Some(session) = sessions.get(&session_path) else {
-                return Ok((2, Vardict::new()));
-            };
-            let Some(source) = session.selected.clone() else {
-                return Ok((2, Vardict::new()));
-            };
-            (source, session.cursor_mode)
-        };
-        let (node, serial) =
-            match self
-                .producer
-                .create_stream(&session_path, source.clone(), cursor_mode)
-            {
-                Ok(stream) => stream,
-                Err(err) => {
-                    eventline::warn!("could not start PipeWire stream: {err}");
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        let app_id = app_id.to_owned();
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            let owner = crate::auth::sender(sender.as_ref())?;
+            let _request = export_request(&this.connection, &handle, owner.as_str())?;
+            let session_path = session_handle.to_string();
+            this.require_session(&session_handle, owner.as_str(), &app_id)?;
+            let (source, cursor_mode) = {
+                let sessions = this
+                    .sessions
+                    .lock()
+                    .map_err(|_| fdo::Error::Failed("session store lock poisoned".to_string()))?;
+                let Some(session) = sessions.get(&session_path) else {
                     return Ok((2, Vardict::new()));
-                }
+                };
+                let Some(source) = session.selected.clone() else {
+                    return Ok((2, Vardict::new()));
+                };
+                (source, session.cursor_mode)
             };
-        let mut properties = Vardict::new();
-        properties.insert(
-            "size".to_string(),
-            owned(Value::from((source.width(), source.height())))?,
-        );
-        match &source {
-            halley_ipc::CaptureSource::Monitor { name, x, y, .. } => {
-                properties.insert("position".to_string(), owned(Value::from((*x, *y)))?);
-                properties.insert(
-                    "source_type".to_string(),
-                    OwnedValue::from(halley_ipc::SOURCE_MONITOR),
-                );
-                properties.insert("mapping_id".to_string(), owned(Value::from(name.clone()))?);
+            let (node, serial) =
+                match this
+                    .producer
+                    .create_stream(&session_path, source.clone(), cursor_mode)
+                {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        eventline::warn!("could not start PipeWire stream: {err}");
+                        return Ok((2, Vardict::new()));
+                    }
+                };
+            let mut properties = Vardict::new();
+            properties.insert(
+                "size".to_string(),
+                owned(Value::from((source.width(), source.height())))?,
+            );
+            match &source {
+                halley_ipc::CaptureSource::Monitor { name, x, y, .. } => {
+                    properties.insert("position".to_string(), owned(Value::from((*x, *y)))?);
+                    properties.insert(
+                        "source_type".to_string(),
+                        OwnedValue::from(halley_ipc::SOURCE_MONITOR),
+                    );
+                    properties.insert("mapping_id".to_string(), owned(Value::from(name.clone()))?);
+                }
+                halley_ipc::CaptureSource::Window { surface_id, .. } => {
+                    properties.insert(
+                        "source_type".to_string(),
+                        OwnedValue::from(halley_ipc::SOURCE_WINDOW),
+                    );
+                    properties.insert(
+                        "mapping_id".to_string(),
+                        owned(Value::from(format!("halley-window-{surface_id}")))?,
+                    );
+                }
             }
-            halley_ipc::CaptureSource::Window { surface_id, .. } => {
-                properties.insert(
-                    "source_type".to_string(),
-                    OwnedValue::from(halley_ipc::SOURCE_WINDOW),
-                );
-                properties.insert(
-                    "mapping_id".to_string(),
-                    owned(Value::from(format!("halley-window-{surface_id}")))?,
-                );
+            if let Some(serial) = serial {
+                properties.insert("pipewire-serial".to_string(), OwnedValue::from(serial));
             }
-        }
-        if let Some(serial) = serial {
-            properties.insert("pipewire-serial".to_string(), OwnedValue::from(serial));
-        }
-        let streams = vec![(node, properties)];
-        let mut results = Vardict::new();
-        results.insert("streams".to_string(), owned(Value::from(streams))?);
-        Ok((0, results))
+            let streams = vec![(node, properties)];
+            let mut results = Vardict::new();
+            results.insert("streams".to_string(), owned(Value::from(streams))?);
+            Ok((0, results))
+        })
+        .await
     }
 
     #[zbus(property)]
@@ -227,6 +251,7 @@ impl ScreenCastInterface {
     }
 }
 
+#[derive(Clone)]
 struct SessionInterface {
     owner: String,
     connection: Connection,
@@ -237,23 +262,31 @@ struct SessionInterface {
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
 impl SessionInterface {
-    fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
-        crate::auth::same_owner(
-            header.sender().map(|name| name.as_str()).unwrap_or(""),
-            &self.owner,
-        )?;
-        self.producer.destroy_stream(&self.handle);
-        let _ = self
-            .connection
-            .object_server()
-            .remove::<SessionInterface, _>(self.handle.as_str());
-        if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.remove(&self.handle);
-        }
-        Ok(())
+    async fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            crate::auth::same_owner(
+                sender.as_ref().map(|name| name.as_str()).unwrap_or(""),
+                &this.owner,
+            )?;
+            this.producer.destroy_stream(&this.handle);
+            let _ = this
+                .connection
+                .object_server()
+                .remove::<SessionInterface, _>(this.handle.as_str());
+            if let Ok(mut sessions) = this.sessions.lock() {
+                sessions.remove(&this.handle);
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
+#[derive(Clone)]
 struct RequestInterface {
     owner: String,
     handle: String,
@@ -261,13 +294,20 @@ struct RequestInterface {
 
 #[interface(name = "org.freedesktop.impl.portal.Request")]
 impl RequestInterface {
-    fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
-        crate::auth::same_owner(
-            header.sender().map(|name| name.as_str()).unwrap_or(""),
-            &self.owner,
-        )?;
-        let _ = crate::compositor::cancel_source(self.handle.clone());
-        Ok(())
+    async fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            crate::auth::same_owner(
+                sender.as_ref().map(|name| name.as_str()).unwrap_or(""),
+                &this.owner,
+            )?;
+            let _ = crate::compositor::cancel_source(this.handle.clone());
+            Ok(())
+        })
+        .await
     }
 }
 

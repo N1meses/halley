@@ -1239,6 +1239,7 @@ dependencies = [
 name = "halley-portal"
 version = "0.2.0"
 dependencies = [
+ "blocking",
  "eventline",
  "gbm",
  "halley-ipc",

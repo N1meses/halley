@@ -161,6 +161,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Restore portal capture startup by removing the frontend bus-name and executable
+  gate. Keep chooser consent and request/session ownership, and run blocking
+  portal work off the D-Bus executor so capture and cancellation remain responsive.
 - Wait for compositor readiness before starting managed graphical-session
   services, honor development binaries through the systemd launcher, and give
   direct TTY launches the same graphical-session startup and logout cleanup.
