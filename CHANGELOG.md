@@ -161,6 +161,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Wait for compositor readiness before starting managed graphical-session
+  services, honor development binaries through the systemd launcher, and give
+  direct TTY launches the same graphical-session startup and logout cleanup.
 - Restart the Halley portal backend with its frontend, preventing a stale
   backend from surviving a new login and delaying startup clients such as Waybar.
 - Release DRM event notifiers, output surfaces, and device resources before

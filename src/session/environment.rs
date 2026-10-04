@@ -9,6 +9,65 @@ use std::io::Write as _;
 use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static DIRECT_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+const SESSION_CLEANUP_VARIABLES: [&str; 7] = [
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_DESKTOP",
+    "XDG_SESSION_TYPE",
+    "DESKTOP_SESSION",
+    "XCURSOR_SIZE",
+];
+
+/// A native compositor launched without a session wrapper owns cleanup too.
+pub struct NativeSession;
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        if !DIRECT_SESSION_ACTIVE.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let mut shutdown = Command::new("systemctl");
+        shutdown.args([
+            "--user",
+            "start",
+            "--job-mode=replace-irreversibly",
+            "halley-shutdown.target",
+        ]);
+        if !run("direct session shutdown", &mut shutdown) {
+            let mut stop = Command::new("systemctl");
+            stop.args([
+                "--user",
+                "stop",
+                "graphical-session.target",
+                "graphical-session-pre.target",
+            ]);
+            run("direct session target cleanup", &mut stop);
+        }
+        let mut clear = Command::new("systemctl");
+        clear.args(["--user", "unset-environment"]);
+        clear.args(SESSION_CLEANUP_VARIABLES);
+        run("direct session environment cleanup", &mut clear);
+    }
+}
+
+fn launcher_owns_session() -> bool {
+    std::env::var_os("HALLEY_SESSION_LAUNCHER_ACTIVE").as_deref() == Some(OsStr::new("1"))
+        || (std::env::var_os("MANAGERPID").is_some()
+            && std::env::var("SYSTEMD_EXEC_PID")
+                .is_ok_and(|pid| pid == std::process::id().to_string()))
+}
+
+fn init_integration_enabled() -> bool {
+    !matches!(
+        std::env::var("HALLEY_NO_INIT_INTEGRATION").as_deref(),
+        Ok("1" | "true" | "yes" | "on")
+    )
+}
 
 const SESSION_VARIABLES: [&str; 6] = [
     "WAYLAND_DISPLAY",
@@ -215,6 +274,16 @@ pub fn notify_ready() {
     if let Err(err) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         eventline::warn!("systemd readiness notification failed: {err}");
     }
+    if systemd_is_enabled() && init_integration_enabled() && !launcher_owns_session() {
+        // Enqueue rather than wait: services may connect to Wayland before
+        // this function returns and the compositor begins dispatching events.
+        let mut start = Command::new("systemctl");
+        start.args(["--user", "start", "--no-block", "graphical-session.target"]);
+        DIRECT_SESSION_ACTIVE.store(
+            run("direct graphical session", &mut start),
+            Ordering::SeqCst,
+        );
+    }
 
     #[cfg(feature = "dinit")]
     if let Err(err) = notify_dinit_ready() {
@@ -239,18 +308,28 @@ fn notify_dinit_ready() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run(label: &str, command: &mut Command) {
+fn run(label: &str, command: &mut Command) -> bool {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     match command.status() {
-        Ok(status) if status.success() => eventline::debug!("{label}: complete"),
-        Ok(status) => eventline::warn!("{label}: exited with {status}"),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            eventline::debug!("{label}: helper unavailable")
+        Ok(status) if status.success() => {
+            eventline::debug!("{label}: complete");
+            true
         }
-        Err(err) => eventline::warn!("{label}: {err}"),
+        Ok(status) => {
+            eventline::warn!("{label}: exited with {status}");
+            false
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            eventline::debug!("{label}: helper unavailable");
+            false
+        }
+        Err(err) => {
+            eventline::warn!("{label}: {err}");
+            false
+        }
     }
 }
 

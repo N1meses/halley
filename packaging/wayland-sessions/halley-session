@@ -1,5 +1,31 @@
 #!/bin/sh
 
+# A local installation keeps its launcher and binary together. Explicit
+# overrides also survive the user manager handoff.
+if [ -z "${HALLEY_BIN:-}" ]; then
+    case "$0" in
+        */*)
+            launcher_directory=$(CDPATH= cd -- "${0%/*}" 2>/dev/null && pwd -P)
+            if [ -n "$launcher_directory" ] && [ -x "$launcher_directory/halley" ]; then
+                HALLEY_BIN=$launcher_directory/halley
+            fi
+            ;;
+    esac
+fi
+HALLEY_BIN=${HALLEY_BIN:-/usr/bin/halley}
+export HALLEY_BIN
+
+# A managed service enters through this same launcher so HALLEY_BIN is honored.
+# Exec preserves the service's main PID and lets Halley send its readiness signal.
+if [ -n "${MANAGERPID:-}" ] && [ "${SYSTEMD_EXEC_PID:-}" = "$$" ]; then
+    case "$(ps -p "$MANAGERPID" -o args= 2>/dev/null)" in
+        *systemd*--user*)
+            export HALLEY_SESSION_LAUNCHER_ACTIVE=1
+            exec "${HALLEY_BIN:-/usr/bin/halley}" --session "$@"
+            ;;
+    esac
+fi
+
 # Display managers do not consistently start sessions through the user's login
 # shell. Re-enter it once so PATH, agents, and user environment match a normal
 # login before exporting Halley's desktop identity.
@@ -23,9 +49,6 @@ export XDG_CURRENT_DESKTOP=Halley
 export XDG_SESSION_DESKTOP=Halley
 export DESKTOP_SESSION=Halley
 
-HALLEY_BIN=${HALLEY_BIN:-/usr/bin/halley}
-export HALLEY_BIN
-
 init_integration_enabled() {
     case "${HALLEY_NO_INIT_INTEGRATION:-}" in
         1 | true | yes | on) return 1 ;;
@@ -41,6 +64,11 @@ manager_service_uses_selected_binary() {
     [ "$HALLEY_BIN" = /usr/bin/halley ]
 }
 
+systemd_service_uses_launcher() {
+    systemctl --user show --property=ExecStart --value halley.service 2>/dev/null \
+        | grep -Eq 'path=[^ ;]*/halley-session[ ;]'
+}
+
 sync_dbus_environment() {
     if command -v dbus-update-activation-environment >/dev/null 2>&1; then
         dbus-update-activation-environment --all >/dev/null 2>&1 || true
@@ -50,14 +78,15 @@ sync_dbus_environment() {
 unset_systemd_environment() {
     systemctl --user unset-environment \
         WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
-        XDG_SESSION_DESKTOP DESKTOP_SESSION HALLEY_BIN >/dev/null 2>&1 || true
+        XDG_SESSION_DESKTOP DESKTOP_SESSION XCURSOR_SIZE HALLEY_BIN >/dev/null 2>&1 || true
 }
 
 if init_integration_enabled \
-    && manager_service_uses_selected_binary \
     && is_systemd_managed \
     && command -v systemctl >/dev/null 2>&1 \
-    && systemctl --user list-unit-files halley.service >/dev/null 2>&1; then
+    && [ "$#" -eq 0 ] \
+    && systemctl --user cat halley.service >/dev/null 2>&1 \
+    && { manager_service_uses_selected_binary || systemd_service_uses_launcher; }; then
     if systemctl --user --quiet is-active halley.service; then
         echo 'A Halley session is already running.' >&2
         exit 1
@@ -69,7 +98,8 @@ if init_integration_enabled \
         systemd_cleanup_done=1
         systemctl --user start --job-mode=replace-irreversibly \
             halley-shutdown.target >/dev/null 2>&1 \
-            || systemctl --user stop halley.service >/dev/null 2>&1 \
+            || systemctl --user stop graphical-session.target \
+                graphical-session-pre.target >/dev/null 2>&1 \
             || true
         unset_systemd_environment
     }
@@ -118,7 +148,7 @@ if init_integration_enabled \
         dinitctl --quiet --user stop halley.target >/dev/null 2>&1 || true
         dinitctl --quiet --user unsetenv \
             WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
-            XDG_SESSION_DESKTOP DESKTOP_SESSION HALLEY_BIN >/dev/null 2>&1 || true
+            XDG_SESSION_DESKTOP DESKTOP_SESSION XCURSOR_SIZE HALLEY_BIN >/dev/null 2>&1 || true
     }
     trap cleanup_dinit 0 INT TERM HUP
 

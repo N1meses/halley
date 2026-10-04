@@ -65,18 +65,30 @@ booted systemd user manager or an active dinit user manager. It starts the
 corresponding graphical target and waits for Halley to exit. OpenRC, runit, s6,
 and systems without a supported user manager use the direct
 `halley --session` fallback. `HALLEY_NO_INIT_INTEGRATION=1` forces that fallback.
-`HALLEY_BIN` overrides `/usr/bin/halley` for development installs and uses the
-direct path because the packaged manager services intentionally target
-`/usr/bin`.
+The launcher selects a sibling `halley` binary when installed together (normally
+`/usr/bin/halley`); `HALLEY_BIN` overrides that for development installs. Updated
+systemd units enter through the launcher, which passes that binary to the
+service without re-entering the login shell. Older units and explicit
+compositor arguments use the direct path so the selected binary and arguments
+are preserved. The dinit service still targets `/usr/bin/halley`.
 
-The systemd service uses `Type=exec`: it reports failure to execute Halley but
-does not wait for a readiness notification. Its stdout and stderr append to
+The systemd service uses `Type=notify`: graphical-session services start after
+Halley publishes its display environment and announces usable listeners. The
+launcher waits for compositor exit, stops the graphical session through
+`halley-shutdown.target`, and clears its environment. Its stdout and stderr append to
 `$XDG_RUNTIME_DIR/halley-session.log` (normally under `/run/user/<uid>`).
 The log survives service stops and failed starts, so users
 can collect the log after returning to the TTY. Runtime files are temporary
 and may be removed after logout or reboot. Errors from the launcher or systemd
 before Halley starts may instead appear on the terminal or in
 `journalctl --user -u halley.service`.
+
+A direct native `halley` or `halley --session` launch also owns the systemd
+graphical-session lifecycle: it starts `graphical-session.target` after its
+listeners are ready and stops session services and clears display variables
+on exit. A managed launch leaves that cleanup to the launcher. Nested sessions
+do not start or stop host session targets. `HALLEY_NO_INIT_INTEGRATION=1`
+disables this target management too.
 
 The runit and s6 files under `packaging/` are examples for personal user
 supervision trees; those managers do not have a single standard distribution

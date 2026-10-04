@@ -53,6 +53,7 @@ fn main() {
     }
 
     if args.session {
+        let _session = session::environment::NativeSession;
         session::environment::prepare_session();
         session::tty::run(args.config_path);
     } else if args.force_winit || detect_nested_session() {
@@ -68,6 +69,7 @@ fn main() {
         // Reaching the DRM/KMS backend means this process is the desktop
         // session even when it was launched directly from a tty instead of
         // through the display-manager `--session` entry point.
+        let _session = session::environment::NativeSession;
         session::environment::prepare_session();
         session::tty::run(args.config_path);
     }
