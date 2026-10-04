@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Save autostart command output and exit status in private, persistent logs
+  under `$XDG_STATE_HOME/halley/autostart`, with three generations capped at
+  1 MiB each per command. Detached loggers preserve service independence from
+  the compositor and fall back to launching normally if storage is unavailable.
 - Add `cursor.disable-hardware-cursor` (default `false`). Native outputs can
   use hardware cursor planes by default; set it to `true` and reload to force
   cursor composition when a driver shows cursor artifacts. Cross-GPU outputs

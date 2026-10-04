@@ -409,6 +409,10 @@ declarations. See
 [startup clusters](docs/clusters.md#startup-clusters) for syntax, launch
 attribution, output placement, and restart behavior.
 
+Autostart command output and exit status are saved in private, bounded logs
+under `~/.local/state/halley/autostart` (or `$XDG_STATE_HOME/halley/autostart`).
+See [autostart logs](docs/autostart.md) for startup diagnostics and retention.
+
 Useful controls:
 
 ```sh

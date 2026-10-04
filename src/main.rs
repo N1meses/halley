@@ -3,6 +3,7 @@
 mod accessibility;
 mod animation;
 mod appearance;
+mod autostart_log;
 mod backend;
 mod capture;
 mod clusters;
@@ -30,6 +31,9 @@ mod xwayland;
 mod xwayland;
 
 fn main() {
+    if let Some(status) = autostart_log::run_worker_if_requested() {
+        std::process::exit(status);
+    }
     logging::init();
     let args = match StartupArgs::parse(std::env::args().skip(1)) {
         Ok(args) => args,
