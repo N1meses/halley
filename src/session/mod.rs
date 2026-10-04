@@ -18,6 +18,7 @@ pub(crate) mod closing;
 mod cursor;
 mod decay_notice;
 mod focus;
+mod foreign_toplevel;
 pub(crate) mod gesture;
 pub(crate) mod input;
 pub(crate) use input::{cluster_owns_focus, show_cluster_indicator, sync_cluster_activation_focus};
@@ -910,13 +911,21 @@ fn toggle_focused_fullscreen<D: SessionDriver>(session: &mut Session<D>, output:
     let Some(record) = focused_window_record(session, output) else {
         return;
     };
+    let entering = !session.fullscreen.is_fullscreen_or_pending(&record.surface);
+    set_record_fullscreen(session, record, entering);
+}
+
+fn set_record_fullscreen<D: SessionDriver>(
+    session: &mut Session<D>,
+    record: crate::nodes::NodeRecord,
+    entering: bool,
+) {
     let focused = record.surface;
     let window = record.window;
     let output_name =
         crate::wayland::window_output_name(&window).unwrap_or_else(|| record.output.clone());
     let now = crate::frame_clock::monotonic_now();
     cancel_grab_for_surface(session, &focused);
-    let entering = !session.fullscreen.is_fullscreen_or_pending(&focused);
     let cluster_restore = cluster_presentation_restore(session, &focused, now, entering);
     let entering_output_rect = entering
         .then(|| {

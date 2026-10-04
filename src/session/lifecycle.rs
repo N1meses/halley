@@ -239,6 +239,9 @@ pub(crate) fn prepare_window_unmap<D: SessionDriver>(
     session: &mut Session<D>,
     surface: &WlSurface,
 ) -> WindowUnmapPreparation {
+    if let Some(id) = session.nodes.id_for_surface(surface) {
+        session.wayland.foreign_toplevel_state.unmap(id.as_u64());
+    }
     super::touch::cancel_surface(session, surface);
     super::gesture::cancel_surface(session, surface);
     super::pointer::prepare_unmap(session, surface);

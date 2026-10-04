@@ -194,3 +194,34 @@ them. Set `disable-hardware-cursor true` in the `cursor` section and reload to
 force software composition if cursor artifacts appear. Winit has no DRM cursor
 plane, and cross-GPU outputs retain software cursor composition inside the
 transferred scene texture.
+
+Halley advertises `ext_foreign_toplevel_list_v1` version 1 and
+`zwlr_foreign_toplevel_manager_v1` version 3 for window lists, taskbars and docks.
+Both enumerate native Wayland and managed XWayland windows, including collapsed
+nodes and windows in inactive clusters. Popups, layer surfaces and X11
+override-redirect menus are excluded. Titles and app IDs follow client metadata;
+X11 app IDs use the window class. The ext list uses Smithay's stable identifiers.
+
+The wlr protocol publishes activated, minimized (collapsed), maximized and
+fullscreen states, owning-output associations, and transient parents. Every
+manager binding gets its own handles. Output associations refer to the owning
+monitor even while its window is collapsed or its cluster is inactive. Later
+`wl_output` bindings receive the association too. Window unmaps and destruction
+close the handles; remapping creates fresh handles and an ext identifier.
+Destroyed handles are never recreated during the same mapping.
+
+Taskbars can activate, close, minimize/restore, maximize/unmaximize and
+fullscreen/unfullscreen windows through Halley's existing window actions.
+Activation switches to the window's cluster or Field and restores collapsed
+nodes; stack and overflow members are brought into view. Requests are ignored
+while the session is locked or an interactive compositor grab is active.
+Activation must name Halley's seat. Fullscreen keeps the window on its current
+output (the requested output is an optional hint). Taskbar rectangles are
+validated but do not replace Halley's spatial node collapse destination.
+Minimizing a fullscreen window follows the existing policy and may be declined.
+
+`tests/foreign_toplevel_protocol.rs` checks lifecycle, properties, versions,
+multiple bindings and clients, output and parent updates, and request dispatch
+through real sockets. Its optional nested-session test additionally exercises
+native window actions against a running Halley; provide
+`HALLEY_TEST_WAYLAND_DISPLAY` as the absolute path to that test session's socket.

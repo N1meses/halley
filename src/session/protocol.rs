@@ -1246,6 +1246,7 @@ impl<D: SessionDriver> OutputHandler for Session<D> {
     /// A `wl_output` bound after the workspace manager must still learn which
     /// existing workspace group already owns that output.
     fn output_bound(&mut self, output: Output, wl_output: WlOutput) {
+        self.wayland.foreign_toplevel_state.output_bound();
         if let Some(client) = wl_output.client() {
             self.wayland
                 .ext_workspace_state

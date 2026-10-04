@@ -264,6 +264,7 @@ impl<D: SessionDriver> Session<D> {
             primary_selection_state,
             ext_data_control_state,
             crate::wayland::ext_workspace::State::new::<Self>(&display_handle),
+            crate::wayland::foreign_toplevel::State::new::<Self>(&display_handle),
         )
     }
 
