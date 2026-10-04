@@ -6,6 +6,7 @@ pub mod dmabuf;
 pub mod dnd;
 pub mod ext_workspace;
 pub mod focus;
+pub mod foreign_toplevel;
 pub mod frame_callbacks;
 pub mod fullscreen;
 pub mod idle_inhibit;
@@ -260,6 +261,7 @@ pub struct WaylandState {
     /// workspace handle the compositor has advertised lives here; the cluster
     /// model itself stays in `Session::clusters`.
     pub ext_workspace_state: ext_workspace::State,
+    pub foreign_toplevel_state: foreign_toplevel::State,
     /// Tracks popup trees once for both xdg-toplevel and layer-shell roots.
     /// Rendering and input can then ask Smithay for the same canonical tree
     /// instead of each subsystem inventing its own parent/offset bookkeeping.
@@ -340,6 +342,7 @@ impl WaylandState {
         primary_selection_state: PrimarySelectionState,
         ext_data_control_state: DataControlState,
         ext_workspace_state: ext_workspace::State,
+        foreign_toplevel_state: foreign_toplevel::State,
     ) -> Self {
         Self {
             display_handle,
@@ -378,6 +381,7 @@ impl WaylandState {
             primary_selection_state,
             ext_data_control_state,
             ext_workspace_state,
+            foreign_toplevel_state,
             popup_manager: PopupManager::default(),
             space: Space::default(),
             managed_windows: crate::window::ManagedWindowStack::default(),

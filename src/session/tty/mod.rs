@@ -720,6 +720,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
             // Every cluster mutation in this iteration is published here rather
             // than at each mutation site.
             super::workspace::sync_ext_workspace(app);
+            super::foreign_toplevel::sync(app);
             let _ = app.wayland.display_handle.flush_clients();
         })
         .expect("event loop run failed");

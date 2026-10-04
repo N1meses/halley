@@ -81,6 +81,7 @@ winit = ["smithay/backend_winit"]
 
 [dev-dependencies]
 wayland-client = "0.31.14"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # `staging` exposes the client bindings for the `ext-workspace-v1` global the
 # wire tests drive; `unstable` covers the existing Smithay protocol tests.
 wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }

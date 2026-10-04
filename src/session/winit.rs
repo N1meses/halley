@@ -854,6 +854,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         // activation, IPC, creation, dissolution, output changes - is published
         // here rather than at each mutation site.
         super::workspace::sync_ext_workspace(&mut app);
+        super::foreign_toplevel::sync(&mut app);
         let _ = app.wayland.display_handle.flush_clients();
     }
 }
