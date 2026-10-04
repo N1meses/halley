@@ -32,6 +32,18 @@ impl SeatHandler for State {
         self.cursor_resets += 1;
     }
 }
+impl smithay::wayland::compositor::CompositorHandler for State {
+    fn compositor_state(&mut self) -> &mut smithay::wayland::compositor::CompositorState {
+        unreachable!("pointer-only fixture has no compositor")
+    }
+    fn client_compositor_state<'a>(
+        &self,
+        _: &'a smithay::reexports::wayland_server::Client,
+    ) -> &'a smithay::wayland::compositor::CompositorClientState {
+        unreachable!("pointer-only fixture has no clients")
+    }
+    fn commit(&mut self, _: &WlSurface) {}
+}
 macro_rules! ignore_events {
     ($($name:ident: $event:ty),* $(,)?) => { $(
         fn $name(&self, _: &Seat<State>, _: &mut State, _: &$event) {}
@@ -49,7 +61,14 @@ impl PointerTarget<State> for Target {
     }
     fn axis(&self, _: &Seat<State>, _: &mut State, _: AxisFrame) {}
     fn frame(&self, _: &Seat<State>, _: &mut State) {}
-    fn leave(&self, _: &Seat<State>, _: &mut State, _: Serial, _: u32) {}
+    fn leave(
+        &self,
+        _: &Seat<State>,
+        _: &mut State,
+        _: Serial,
+        _: smithay::backend::input::InputTime,
+    ) {
+    }
     ignore_events! {
         relative_motion: RelativeMotionEvent,
         gesture_swipe_begin: GestureSwipeBeginEvent,
@@ -75,7 +94,7 @@ fn motion(
         &MotionEvent {
             location,
             serial: SERIAL_COUNTER.next_serial(),
-            time: 1,
+            time: smithay::backend::input::InputTime::from_millis(1),
         },
     );
 }
@@ -86,7 +105,7 @@ fn button(pointer: &PointerHandle<State>, state: &mut State, code: u32, value: B
             button: code,
             state: value,
             serial: SERIAL_COUNTER.next_serial(),
-            time: 2,
+            time: smithay::backend::input::InputTime::from_millis(2),
         },
     );
 }

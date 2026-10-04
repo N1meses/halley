@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Save autostart command output and exit status in private, persistent logs
+  under `$XDG_STATE_HOME/halley/autostart`, with three generations capped at
+  1 MiB each per command. Detached loggers preserve service independence from
+  the compositor and fall back to launching normally if storage is unavailable.
+- Add `cursor.disable-hardware-cursor` (default `false`). Native outputs can
+  use hardware cursor planes by default; set it to `true` and reload to force
+  cursor composition when a driver shows cursor artifacts. Cross-GPU outputs
+  retain their existing composed cursor path.
+- Advertise content-type and XDG toplevel-icon protocol version 1, accepting
+  committed content hints and icon metadata through upstream Smithay.
+- Advertise `wp_single_pixel_buffer_manager_v1` for clients using solid-color
+  Wayland buffers, through unmodified upstream Smithay.
 - Advertise the staging `ext-workspace-v1` global, so taskbars, docks, and
   scripts can enumerate Halley's clusters per output and activate or deactivate
   them. One workspace group is published per mapped output, clusters stay
@@ -17,13 +29,14 @@ All notable changes to this project will be documented in this file.
   coordinates, without sending the drag to the app. Attached popups, menus, and
   tooltips remain client-managed. Ordinary app-controlled dragging is unchanged.
 - Add `Super+Alt+Shift+Arrow` Field window transfers between monitors, with
-  bootstrap defaults, examples, and conflict-aware configuration migration.
+  bootstrap defaults and examples. Existing configs need these bindings added
+  manually.
 - Add optional directional `pan-field` keyboard actions without default binds,
   plus `halleyctl pan` and `halleyctl monitor transfer` scripting commands.
 - Add `animations.node.collapse-duration-ms` (280 ms by default) for the window
   snapshot shrinking and traveling into a node, independent of marker appearance
   and ordinary window-close/custom-shader duration. Manual `Mod+N` collapse and
-  automatic decay use it; existing configs receive the setting through migration.
+  automatic decay use it; omitted settings use the built-in default.
 - Add smooth, output-local `Mod+A` `arrange-visible` Field mosaics for
   ordinary windows centered in the active output's visible work area, with
   constraint-aware exclusions and minimum-travel placement. Pressing `Mod+A`
@@ -69,6 +82,23 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Keep compositor shortcuts available while exclusive layer-shell surfaces
+  have keyboard focus. Session locks and active shortcut inhibitors continue
+  to block bindings. Adapted from noervthere's layer-focus fix.
+- Remove `vendor/` and the Smithay Cargo override. Pin `smithay` and
+  `smithay-drm-extras` to unmodified upstream revision
+  `79bbed5e1199090d787115614847a79c76607181`, matching Niri's checked pin.
+  Adapt Halley to the revision's public input, dispatch, DMA-BUF, and Winit APIs.
+- Use basic upstream native IME support. Disconnect IME clients during screen
+  locking and reject new IME requests until unlock; reconnect or restart the IME
+  afterward. Halley's patched composition and popup lifecycle behavior is removed.
+- Return blur effects to conservative full-output capture and filtering; the
+  custom regional and foreground-aware Smithay damage patches are removed.
+  Local animations also use full repaints for reliable opacity transitions.
+  X11 initialization again uses upstream's synchronous property loading.
+- Remove `halleyctl config migrate` and its configuration backup and replacement
+  code. Existing configurations stay user-owned; edit compatibility changes
+  manually and check them with `halleyctl config verify`.
 - Apply window-rule `opacity` to client content and popups only. Titlebars,
   borders, pin badges, and compositor shadows stay fully opaque. Open and
   close animations still fade chrome with the window.
@@ -131,6 +161,27 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Wait for compositor readiness before starting managed graphical-session
+  services, honor development binaries through the systemd launcher, and give
+  direct TTY launches the same graphical-session startup and logout cleanup.
+- Restart the Halley portal backend with its frontend, preventing a stale
+  backend from surviving a new login and delaying startup clients such as Waybar.
+- Release DRM event notifiers, output surfaces, and device resources before
+  closing GPU session access, avoiding permission errors during TTY shutdown.
+- Restore XWayland dropdown placement in Steam and Qt apps by using X11 root
+  configure geometry for popup offsets and managed position synchronization,
+  preventing menus from appearing at the owner's top-left corner.
+- Keep wl-clipboard's temporary focus helpers out of cluster layouts and return
+  keyboard focus to their original window, preventing Neovim deletes and yanks
+  from sending subsequent typing to another tile.
+- Accept negative mouse/touchpad acceleration values and quoted numeric speeds;
+  `sensitivity` is an alias for `accel-speed`. Use the unmodified upstream
+  `rune-cfg` signed-number fix without a vendor copy. The compatibility work is
+  informed by noervthere's Halley fork.
+- Fix builds with default features disabled by guarding XWayland-only popup
+  handling and completing the no-op tracing implementation.
+- Reject IME requests during screen locking with a deferred protocol error,
+  avoiding destruction of resources still in use by libwayland's dispatch.
 - Reverse the landmark displacement that camera zoom-out causes. The first
   zoom step that moves a collapsed node or cluster core remembers its pre-zoom
   home, further zoom-out reflows from the displayed position without replacing
@@ -143,12 +194,6 @@ All notable changes to this project will be documented in this file.
   across windows, panels, output cameras, and moving subsurfaces/popups. Preserve
   the client cursor while held and restore normal pointer routing immediately
   after the last button release.
-- Keep input-method-v2 candidate popups hidden until text input is enabled,
-  send the current caret rectangle when each popup is created, and update all
-  live candidate surfaces. Destroyed IMEs no longer leave popups to be revived
-  by a replacement IME.
-- Release input-method-v2 keyboard grabs when their IME is destroyed, and keep
-  stale grab objects from releasing a replacement grab after reconnection.
 - Bound IPC connections and request deadlines, release disconnected subscribers
   and capture buffers, and enforce per-connection/global DMA-BUF quotas and
   ownership. Close received descriptors even when ancillary data is truncated.
@@ -171,19 +216,12 @@ All notable changes to this project will be documented in this file.
   requests pipelined before rejection reaches the client. Rejected lock surfaces
   remain inert and cannot reserve outputs, replace the real lock, or crash the
   compositor through uninitialized protocol objects.
-- Isolate lock-screen input from ordinary clients: suspend IME keyboard grabs
-  and text state until unlock, retire existing client grabs, and reject popup,
-  XWayland, and virtual-keyboard input paths while locked. Existing IMEs resume
-  after unlock without requiring a restart.
+- Isolate lock-screen input from ordinary clients: disconnect IME clients,
+  retire existing client grabs, and reject popup, XWayland, virtual-keyboard,
+  and new input-method requests while locked. IMEs must reconnect after unlock.
 - Respect layer-shell keyboard interactivity when grabbing popup menus. Waybar
   tray menus keep their pointer grab without taking keyboard focus from the
   current app or restoring it to a non-interactive panel after selection.
-- Correct text-input-v3 and input-method-v2 state handling: buffer composition
-  until the IME commits, report the application's actual commit count, and reset
-  pending state and caret geometry when switching text fields. Avoid duplicate
-  focus events, release destroyed active text-input objects, and reject competing
-  IMEs without disrupting the active one. Add socket-level protocol regressions
-  for composition, focus changes, object lifecycle, and IME reconnection.
 - Keep a field-maximized window (Firefox session restore) from snapping to
   its windowed size when `Mod+F` takes over. Compositor fullscreen no longer
   relocates or un-maximizes the client first, leftover Maximized no longer

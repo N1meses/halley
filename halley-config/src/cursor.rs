@@ -11,6 +11,7 @@ const DEFAULT_HIDE_AFTER_MS: u32 = 2_000;
 pub struct Cursor {
     pub theme: String,
     pub size: u8,
+    pub disable_hardware_cursor: bool,
     pub hide_when_typing: bool,
     pub hide_on_keyboard_nav: bool,
     pub hide_on_touch: bool,
@@ -22,6 +23,7 @@ impl Default for Cursor {
         Self {
             theme: "default".to_string(),
             size: DEFAULT_SIZE,
+            disable_hardware_cursor: false,
             hide_when_typing: false,
             hide_on_keyboard_nav: true,
             hide_on_touch: true,
@@ -55,6 +57,10 @@ pub fn parse_cursor(config: &RuneConfig) -> Cursor {
     Cursor {
         theme,
         size,
+        disable_hardware_cursor: config.get_or(
+            "cursor.disable-hardware-cursor",
+            defaults.disable_hardware_cursor,
+        ),
         hide_when_typing: config.get_or("cursor.hide-when-typing", defaults.hide_when_typing),
         hide_on_keyboard_nav: config
             .get_or("cursor.hide-on-keyboard-nav", defaults.hide_on_keyboard_nav),
@@ -74,6 +80,7 @@ mod tests {
 cursor:
   theme "Breeze"
   size 32
+  disable-hardware-cursor true
   hide-when-typing true
   hide-on-keyboard-nav false
   hide-on-touch false
@@ -88,6 +95,7 @@ end
             Cursor {
                 theme: "Breeze".to_string(),
                 size: 32,
+                disable_hardware_cursor: true,
                 hide_when_typing: true,
                 hide_on_keyboard_nav: false,
                 hide_on_touch: false,

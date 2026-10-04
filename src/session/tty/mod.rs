@@ -36,6 +36,7 @@ use crate::render::{
 };
 use crate::wayland;
 
+pub(crate) use self::frame::FrameDemand;
 use self::frame::{EstimatedVblankTimer, OutputFrameState, VblankAction};
 use super::RenderDriver as _;
 
@@ -697,14 +698,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         })
         .expect("failed to insert session notifier");
 
+    let mut drm_tokens = Vec::with_capacity(drm_notifiers.len());
     for (gpu_index, drm_notifier) in drm_notifiers.into_iter().enumerate() {
-        event_loop
+        let token = event_loop
             .handle()
             .insert_source(drm_notifier, move |event, metadata, app| match event {
                 DrmEvent::VBlank(crtc) => on_vblank(app, gpu_index, crtc, metadata.as_ref()),
                 DrmEvent::Error(err) => eventline::error!("drm event: error {err:?}"),
             })
             .expect("failed to insert drm notifier");
+        drm_tokens.push(token);
     }
 
     eventline::info!("session ready: outputs active; use the configured Quit chord to exit");
@@ -717,10 +720,16 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
             // Every cluster mutation in this iteration is published here rather
             // than at each mutation site.
             super::workspace::sync_ext_workspace(app);
+            super::foreign_toplevel::sync(app);
             let _ = app.wayland.display_handle.flush_clients();
         })
         .expect("event loop run failed");
     eventline::info!("quit requested, exiting cleanly");
+    // Notifiers retain the DRM device. Release them before the backend drops
+    // its outputs/devices, while the session notifier still owns the seat.
+    for token in drm_tokens {
+        event_loop.handle().remove(token);
+    }
 }
 
 fn presentation_time(metadata: Option<&DrmEventMetadata>) -> Option<Duration> {
@@ -1244,16 +1253,20 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         && crate::shell::cluster_composer::tick_session(app, target_presentation_time);
     let apogee_animating = crate::shell::apogee::tick(app, target_presentation_time);
     let background_animating = app.background_animates_on_output(output, target_presentation_time);
-    let overlay_animating = app.shell.overlays.animating(target_presentation_time);
-    let cluster_animating = app
+    let overlay_animating = app
+        .shell
+        .overlays
+        .animating_on_output(&output.name(), target_presentation_time);
+    let cluster_geometry_animating = app
         .clusters
         .is_animating_on_output(&output.name(), target_presentation_time)
         || app
             .clusters
-            .bloom_is_animating_on_output(&output.name(), target_presentation_time)
-        || app
-            .clusters
-            .labels_animating_on_output(&output.name(), app.nodes.config.show_labels);
+            .bloom_is_animating_on_output(&output.name(), target_presentation_time);
+    let cluster_labels_animating = app
+        .clusters
+        .labels_animating_on_output(&output.name(), app.nodes.config.show_labels);
+    let cluster_animating = cluster_geometry_animating || cluster_labels_animating;
     let show_cursor = super::pointer::cursor_visible(app);
     let cursor_override = super::pointer::cursor_override(app);
     crate::cursor::surface::refresh_outputs(
@@ -1279,22 +1292,30 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         app.cursor_policy
             .schedule_animation(output, next_cursor_frame);
     }
-    let mut animating = camera_animating
+    // Node animation still includes collapse, slide, preview and physics
+    // geometry. Keep its conservative safeguard alongside camera/window
+    // transitions; local overlays report their own geometry/alpha damage.
+    let geometry_animating = camera_animating
         || edge_pan_animating
         || fullscreen_camera_changed
         || window_animating
         || closing_animating
         || node_animating
-        || bearings_animating
-        || focus_cycle_animating
         || composer_animating
         || apogee_animating
         || background_animating
-        || overlay_animating
-        || cluster_animating
+        || cluster_geometry_animating
         || fullscreen_animating
-        || maximize_animating
-        || app.settings.debug.overlay_fps && !app.session_lock.active();
+        || maximize_animating;
+    let local_animating = bearings_animating
+        || focus_cycle_animating
+        || overlay_animating
+        || cluster_labels_animating;
+    let mut frame_demand = FrameDemand::new(
+        geometry_animating,
+        local_animating,
+        app.settings.debug.overlay_fps && !app.session_lock.active(),
+    );
     if pointer_is_on_output {
         let time = app.start_time.elapsed().as_millis() as u32;
         if cluster_camera_changed || fullscreen_animating || maximize_animating || arrange_animating
@@ -1319,7 +1340,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             frame: FrameContext {
                 target_presentation_time,
                 vrr_auto_eligible,
-                force_full_repaint: animating,
+                force_full_repaint: frame_demand.force_full_repaint,
                 clear: CLEAR_COLOR,
             },
             desktop: DesktopContext {
@@ -1374,12 +1395,12 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             RenderOutcome::new(RenderStatus::Skipped, None)
         }
     };
-    animating |= app.render.node_renderer.has_pending_icons();
+    frame_demand.keep_redrawing |= app.render.node_renderer.has_pending_icons();
     if app.window_animations.cleanup(target_presentation_time) {
         // The frame just composed can still scale a lagging pre-configure
         // client buffer into the arrangement endpoint. Owe one live-geometry
         // frame after retiring that endpoint so it cannot stay latched.
-        animating = true;
+        frame_demand.keep_redrawing = true;
         super::pointer::update_client_state(app, app.start_time.elapsed().as_millis() as u32);
     }
     app.render
@@ -1393,7 +1414,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         // the scene this frame rendered is the last one drawn from those
         // textures. One more frame is owed to swap back to the live surfaces;
         // without it the swap waits on unrelated damage and lands as a pop.
-        animating = true;
+        frame_demand.keep_redrawing = true;
         super::sync_keyboard_focus(app, smithay::utils::SERIAL_COUNTER.next_serial());
         super::pointer::update_client_state(app, app.start_time.elapsed().as_millis() as u32);
     }
@@ -1424,7 +1445,7 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
             .get_mut(output)
             .expect("rendered output has frame state");
         state.advance_frame_callback_sequence();
-        if let Some(token) = state.frame_submitted(animating) {
+        if let Some(token) = state.frame_submitted(frame_demand.keep_redrawing) {
             loop_handle.remove(token);
         }
         // The compositor has latched every client buffer used by this frame.
@@ -1436,7 +1457,13 @@ fn redraw_output(app: &mut TtyApp, output: &Output, loop_handle: &LoopHandle<'_,
         return;
     }
 
-    queue_estimated_vblank_timer(app, output, animating, loop_handle);
+    queue_estimated_vblank_timer(
+        app,
+        output,
+        frame_demand.keep_redrawing,
+        outcome.element_states().is_some(),
+        loop_handle,
+    );
 }
 
 fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
@@ -1489,7 +1516,8 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
 fn queue_estimated_vblank_timer(
     app: &mut TtyApp,
     output: &Output,
-    animating: bool,
+    keep_redrawing: bool,
+    scene_ready: bool,
     loop_handle: &LoopHandle<'_, TtyApp>,
 ) {
     let state = app
@@ -1498,7 +1526,9 @@ fn queue_estimated_vblank_timer(
         .get_mut(output)
         .expect("estimated-vblank output has frame state");
     let now = crate::frame_clock::monotonic_now();
-    let EstimatedVblankTimer::ArmAfter(delay) = state.frame_skipped(animating, now) else {
+    let EstimatedVblankTimer::ArmAfter(delay) =
+        state.frame_skipped(keep_redrawing, scene_ready, now)
+    else {
         return;
     };
     let output = output.clone();

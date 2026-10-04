@@ -130,7 +130,7 @@ pub(super) fn window_group_override_redirect_owner<D: SessionDriver>(
             // root-desktop coordinates.  Comparing either one to `Space`
             // would mix screen and Field coordinates whenever the camera is
             // panned or zoomed.
-            let candidate_geometry = candidate.geometry();
+            let candidate_geometry = candidate.last_configure();
             Some((
                 override_redirect_owner_rank(
                     OverrideRedirectIdentity {
@@ -202,7 +202,7 @@ pub(super) fn fullscreen_grab_proxy_owner<D: SessionDriver>(
                 && surface.is_fullscreen()
                 && crate::wayland::window_output_name(window).as_deref()
                     == Some(output.name().as_str())
-                && fullscreen_grab_proxy_geometry_matches(geometry, surface.geometry())
+                && fullscreen_grab_proxy_geometry_matches(geometry, surface.last_configure())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -522,7 +522,7 @@ pub(super) fn refresh_override_redirect_owners<D: SessionDriver>(session: &mut S
         .filter_map(|window| {
             let surface = window.x11_surface()?.clone();
             surface.is_override_redirect().then(|| {
-                let geometry = surface.geometry();
+                let geometry = surface.last_configure();
                 (window.clone(), surface, geometry)
             })
         })

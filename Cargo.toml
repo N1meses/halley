@@ -23,8 +23,12 @@ homepage = "https://github.com/saltnpepper97/halley"
 keywords = ["wayland", "compositor", "rust", "linux"]
 categories = ["os::linux-apis", "gui"]
 
+[workspace.dependencies]
+# Upstream 0.7.1 includes signed numbers; crates.io currently has 0.7.0.
+rune-cfg = { version = "0.7.1", git = "https://github.com/saltnpepper97/rune-cfg", rev = "889cf38b061b0081edbd44147fb14f2d7deb81bb" }
+
 [dependencies]
-smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef", default-features = false, features = [
+smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", rev = "79bbed5e1199090d787115614847a79c76607181", default-features = false, features = [
   "backend_egl",
   "renderer_gl",
   "backend_session",
@@ -38,7 +42,7 @@ smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", r
   "use_system_lib",
   "desktop",
 ] }
-smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef" }
+smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "79bbed5e1199090d787115614847a79c76607181" }
 calloop = "0.14.4"
 cgmath = "0.18"
 cosmic-text = { version = "0.19", features = ["swash"] }
@@ -77,6 +81,7 @@ winit = ["smithay/backend_winit"]
 
 [dev-dependencies]
 wayland-client = "0.31.14"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 # `staging` exposes the client bindings for the `ext-workspace-v1` global the
 # wire tests drive; `unstable` covers the existing Smithay protocol tests.
 wayland-protocols = { version = "0.32.12", features = ["client", "staging", "unstable"] }
@@ -89,6 +94,3 @@ sha2 = "0.10"
 # at opt-level 0 they dominate the profile of a dogfooded dev session.
 [profile.dev.package."*"]
 opt-level = 3
-
-[patch."https://github.com/Smithay/smithay.git"]
-smithay = { path = "vendor/smithay" }

@@ -1,6 +1,6 @@
 [Unit]
 Description=Halley desktop portal backend
-PartOf=graphical-session.target
+PartOf=graphical-session.target xdg-desktop-portal.service
 After=pipewire.service
 
 [Service]

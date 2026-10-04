@@ -342,7 +342,7 @@ fn pair_xwayland_ui_absolute_motion<D: SessionDriver>(
         &RelativeMotionEvent {
             delta: Point::from((0.0, 0.0)),
             delta_unaccel: Point::from((0.0, 0.0)),
-            utime: u64::from(time) * 1_000,
+            time: smithay::backend::input::InputTime::from_millis(time),
         },
     );
 }
@@ -420,7 +420,7 @@ fn route_and_update_client_focus<D: SessionDriver>(
             &MotionEvent {
                 location: route.location,
                 serial: SERIAL_COUNTER.next_serial(),
-                time,
+                time: smithay::backend::input::InputTime::from_millis(time),
             },
         );
         pair_xwayland_ui_absolute_motion(session, &pointer, &route, time);
@@ -567,7 +567,7 @@ pub(crate) fn refresh_desktop_client_focus<D: SessionDriver>(session: &mut Sessi
         &MotionEvent {
             location: route.location,
             serial: SERIAL_COUNTER.next_serial(),
-            time,
+            time: smithay::backend::input::InputTime::from_millis(time),
         },
     );
     pair_xwayland_ui_absolute_motion(session, &pointer, &route, time);
@@ -739,7 +739,7 @@ fn refresh_new_constraint_focus<D: SessionDriver>(
         &MotionEvent {
             location: route.location,
             serial: SERIAL_COUNTER.next_serial(),
-            time,
+            time: smithay::backend::input::InputTime::from_millis(time),
         },
     );
     pair_xwayland_ui_absolute_motion(session, pointer, &route, time);

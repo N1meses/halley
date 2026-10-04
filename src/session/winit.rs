@@ -7,7 +7,7 @@ use smithay::backend::winit::{self as smithay_winit, WinitEvent};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::wayland_server::Display;
 use smithay::reexports::winit::dpi::LogicalSize;
-use smithay::reexports::winit::window::Window as WinitWindow;
+use smithay::reexports::winit::window::WindowAttributes;
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::backend::winit::WinitBackend;
@@ -197,8 +197,8 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     let config_path = initial.path;
     let runtime_config = initial.config;
     let fresh_config = initial.fresh;
-    let window_attributes = WinitWindow::default_attributes()
-        .with_inner_size(LogicalSize::new(1280.0, 800.0))
+    let window_attributes = WindowAttributes::default()
+        .with_surface_size(LogicalSize::new(1280.0, 800.0))
         .with_title("halley");
 
     let (backend, winit_source) =
@@ -785,7 +785,10 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                     );
                 }
 
-                let overlay_animating = app.shell.overlays.animating(target_presentation_time);
+                let overlay_animating = app
+                    .shell
+                    .overlays
+                    .animating_on_output(&output.name(), target_presentation_time);
                 if camera_animating
                     || edge_pan_animating
                     || fullscreen_camera_changed
@@ -851,6 +854,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
         // activation, IPC, creation, dissolution, output changes - is published
         // here rather than at each mutation site.
         super::workspace::sync_ext_workspace(&mut app);
+        super::foreign_toplevel::sync(&mut app);
         let _ = app.wayland.display_handle.flush_clients();
     }
 }

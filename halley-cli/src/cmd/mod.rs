@@ -76,10 +76,6 @@ pub enum Action {
     },
     PortalHelp,
     ConfigEdit(Option<PathBuf>),
-    ConfigMigrate {
-        path: Option<PathBuf>,
-        dry_run: bool,
-    },
     ConfigVerify(Option<PathBuf>),
     ConfigHelp,
     Basics,
@@ -223,21 +219,14 @@ fn parse_config(args: &[String]) -> Result<Action, String> {
     if command == "-h" || command == "--help" {
         return Ok(Action::ConfigHelp);
     }
-    if command != "edit" && command != "verify" && command != "migrate" {
+    if command != "edit" && command != "verify" {
         return Err(format!("unknown config command {command:?}"));
     }
     let mut path = None;
-    let mut dry_run = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
             "-h" | "--help" => return Ok(Action::ConfigHelp),
-            "--dry-run" if command == "migrate" => {
-                if dry_run {
-                    return Err("config migrate --dry-run was specified more than once".to_string());
-                }
-                dry_run = true;
-            }
             "-c" | "--config" => {
                 index += 1;
                 let value = args
@@ -254,7 +243,6 @@ fn parse_config(args: &[String]) -> Result<Action, String> {
     }
     Ok(match command {
         "edit" => Action::ConfigEdit(path),
-        "migrate" => Action::ConfigMigrate { path, dry_run },
         "verify" => Action::ConfigVerify(path),
         _ => unreachable!("config command checked above"),
     })
@@ -337,18 +325,16 @@ mod tests {
             parse(&args(&["config", "edit", "-c", "/tmp/two.rune"])),
             Ok(Action::ConfigEdit(Some("/tmp/two.rune".into())))
         );
-        assert_eq!(
+        assert!(parse(&args(&["config", "migrate"])).is_err());
+        assert!(
             parse(&args(&[
                 "config",
                 "migrate",
                 "--dry-run",
                 "-c",
-                "/tmp/two.rune",
-            ])),
-            Ok(Action::ConfigMigrate {
-                path: Some("/tmp/two.rune".into()),
-                dry_run: true,
-            })
+                "/tmp/two.rune"
+            ]))
+            .is_err()
         );
         assert!(parse(&args(&["dpms", "sleep"])).is_err());
         assert!(parse(&args(&["config", "verify", "-c"])).is_err());

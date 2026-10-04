@@ -33,6 +33,10 @@ impl FrameClock {
         self.last_presentation_time = None;
     }
 
+    pub fn refresh_interval(&self) -> Option<Duration> {
+        self.refresh_interval
+    }
+
     pub fn set_vrr(&mut self, vrr: bool) {
         if self.vrr != vrr {
             self.vrr = vrr;

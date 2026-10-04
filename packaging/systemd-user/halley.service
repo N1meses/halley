@@ -9,8 +9,8 @@ Before=xdg-desktop-autostart.target
 
 [Service]
 Slice=session.slice
-Type=exec
-ExecStart=/usr/bin/halley --session
+Type=notify
+ExecStart=/usr/bin/halley-session
 UMask=0077
 StandardOutput=append:%t/halley-session.log
 StandardError=inherit

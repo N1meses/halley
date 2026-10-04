@@ -26,7 +26,7 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
-use smithay::wayland::tablet_manager::TabletSeatHandler;
+use smithay::input::tablet::TabletSeatHandler;
 use smithay::wayland::compositor::{
     BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
     SurfaceAttributes, add_pre_commit_hook, with_states,
@@ -65,19 +65,6 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
-};
-use smithay::{
-    delegate_background_effect, delegate_compositor, delegate_cursor_shape, delegate_data_device,
-    delegate_dmabuf, delegate_drm_syncobj, delegate_ext_data_control,
-    delegate_fractional_scale,
-    delegate_idle_inhibit,
-    delegate_idle_notify,
-    delegate_input_method_manager,
-    delegate_keyboard_shortcuts_inhibit, delegate_layer_shell, delegate_output,
-    delegate_pointer_constraints, delegate_primary_selection, delegate_relative_pointer,
-    delegate_pointer_gestures, delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
-    delegate_text_input_manager,
-    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use super::state::{Session, SessionDriver};
@@ -310,6 +297,13 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
         );
         wayland::text_input::handle_popup_commit(self, surface);
         match toplevel_commit.clone() {
+            wayland::xdg_shell::ToplevelCommit::Mapped(mapped)
+                if wayland::clipboard_helper::saved_focus(&mapped).is_some() =>
+            {
+                // Clipboard serial helpers must never become cluster tiles,
+                // Field nodes, startup members, or animated opening windows.
+                self.opening_origins.forget(&mapped);
+            }
             wayland::xdg_shell::ToplevelCommit::Mapped(mapped) => {
                 let startup_cluster = self.startup_cluster_for_wayland_surface(&mapped);
                 let startup_target = startup_cluster.and_then(|cluster| {
@@ -869,17 +863,8 @@ impl<D: SessionDriver> XdgShellHandler for Session<D> {
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        // Fullscreen temporarily retires field maximize so the two camera
-        // owners cannot fight. If this client fullscreen replaced a maximized
-        // presentation, hand it directly back to maximize instead of restoring
-        // the older floating geometry.
-        if self
-            .fullscreen
-            .client_unfullscreen_restores_maximize(surface.wl_surface())
-            && super::set_surface_field_maximized(self, surface.wl_surface(), true)
-        {
-            return;
-        }
+        // The maximize handoff saved the original normal placement.
+        // Fullscreen exit restores that endpoint without re-entering maximize.
         let capture_outgoing = self
             .fullscreen
             .client_request_changes_visual(surface.wl_surface(), false);
@@ -1247,7 +1232,9 @@ impl<D: SessionDriver> SeatHandler for Session<D> {
     }
 }
 
-impl<D: SessionDriver> TabletSeatHandler for Session<D> {}
+impl<D: SessionDriver> TabletSeatHandler for Session<D> {
+    type ToolFocus = WlSurface;
+}
 
 impl<D: SessionDriver> IdleNotifierHandler for Session<D> {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
@@ -1259,6 +1246,7 @@ impl<D: SessionDriver> OutputHandler for Session<D> {
     /// A `wl_output` bound after the workspace manager must still learn which
     /// existing workspace group already owns that output.
     fn output_bound(&mut self, output: Output, wl_output: WlOutput) {
+        self.wayland.foreign_toplevel_state.output_bound();
         if let Some(client) = wl_output.client() {
             self.wayland
                 .ext_workspace_state
@@ -1552,32 +1540,9 @@ impl<D: SessionDriver> smithay::wayland::background_effect::ExtBackgroundEffectH
     }
 }
 
-delegate_compositor!(@<D: SessionDriver> Session<D>);
-delegate_background_effect!(@<D: SessionDriver> Session<D>);
-delegate_dmabuf!(@<D: SessionDriver> Session<D>);
-delegate_drm_syncobj!(@<D: SessionDriver> Session<D>);
-delegate_shm!(@<D: SessionDriver> Session<D>);
-delegate_xdg_shell!(@<D: SessionDriver> Session<D>);
-delegate_xdg_activation!(@<D: SessionDriver> Session<D>);
-delegate_layer_shell!(@<D: SessionDriver> Session<D>);
-delegate_xdg_decoration!(@<D: SessionDriver> Session<D>);
-delegate_seat!(@<D: SessionDriver> Session<D>);
-delegate_cursor_shape!(@<D: SessionDriver> Session<D>);
-delegate_output!(@<D: SessionDriver> Session<D>);
-delegate_viewporter!(@<D: SessionDriver> Session<D>);
-delegate_fractional_scale!(@<D: SessionDriver> Session<D>);
-delegate_idle_inhibit!(@<D: SessionDriver> Session<D>);
-delegate_idle_notify!(@<D: SessionDriver> Session<D>);
-delegate_presentation!(@<D: SessionDriver> Session<D>);
-delegate_relative_pointer!(@<D: SessionDriver> Session<D>);
-delegate_pointer_constraints!(@<D: SessionDriver> Session<D>);
-delegate_pointer_gestures!(@<D: SessionDriver> Session<D>);
-delegate_text_input_manager!(@<D: SessionDriver> Session<D>);
-delegate_input_method_manager!(@<D: SessionDriver> Session<D>);
-delegate_keyboard_shortcuts_inhibit!(@<D: SessionDriver> Session<D>);
-delegate_data_device!(@<D: SessionDriver> Session<D>);
-delegate_primary_selection!(@<D: SessionDriver> Session<D>);
-delegate_ext_data_control!(@<D: SessionDriver> Session<D>);
+crate::upstream_protocols::delegate_upstream_protocols!(@<D: SessionDriver> Session<D>, crate::wayland::text_input::allow_request);
+
+impl<D: SessionDriver> smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler for Session<D> {}
 
 #[cfg(test)]
 mod tests {

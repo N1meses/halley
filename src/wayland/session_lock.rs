@@ -9,7 +9,6 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::{
-    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
     ext_session_lock_v1::{
         Error as SessionLockError, ExtSessionLockV1, Request as SessionLockRequest,
@@ -18,17 +17,12 @@ use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::{
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, Resource, delegate_dispatch,
-    delegate_global_dispatch,
-};
+use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, Resource};
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
 use smithay::wayland::compositor::{send_surface_state, with_states};
 use smithay::wayland::fractional_scale::with_fractional_scale;
-use smithay::wayland::input_method::InputMethodSeat;
 use smithay::wayland::session_lock::{
-    ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
-    SessionLockManagerState, SessionLockState, SessionLocker,
+    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLockState, SessionLocker,
 };
 
 use crate::session::{Session, SessionDriver};
@@ -396,22 +390,23 @@ impl<D: SessionDriver> SessionLockHandler for Session<D> {
     }
 }
 
-delegate_global_dispatch!(
-    @<D: SessionDriver>
-    Session<D>: [ExtSessionLockManagerV1: SessionLockManagerGlobalData] => SessionLockManagerState
-);
-delegate_dispatch!(
-    @<D: SessionDriver>
-    Session<D>: [ExtSessionLockManagerV1: ()] => SessionLockManagerState
-);
-delegate_dispatch!(
-    @<D: SessionDriver>
-    Session<D>: [ExtSessionLockSurfaceV1: ExtLockSurfaceUserData] => SessionLockManagerState
-);
+struct RejectedLockSurface;
 
-/// Smithay's generic dispatcher currently calls the handler after posting an
-/// InvalidUnlock protocol error. Reject that request before delegation so a
-/// second or not-yet-confirmed lock object cannot release the active lock.
+impl<D: SessionDriver> Dispatch<ExtSessionLockSurfaceV1, RejectedLockSurface> for Session<D> {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ExtSessionLockSurfaceV1,
+        _request: <ExtSessionLockSurfaceV1 as Resource>::Request,
+        _data: &RejectedLockSurface,
+        _display: &DisplayHandle,
+        _init: &mut DataInit<'_, Self>,
+    ) {
+    }
+}
+
+/// Only the confirmed owner may unlock; rejected locks create inert surfaces
+/// so pipelined requests cannot reserve outputs or assign roles.
 impl<D: SessionDriver> Dispatch<ExtSessionLockV1, SessionLockState> for Session<D> {
     fn request(
         state: &mut Self,
@@ -423,7 +418,10 @@ impl<D: SessionDriver> Dispatch<ExtSessionLockV1, SessionLockState> for Session<
         data_init: &mut DataInit<'_, Self>,
     ) {
         if state.session_lock.rejected_locks.contains(&lock.id()) {
-            SessionLockManagerState::rejected_request(lock, request, data_init);
+            if let SessionLockRequest::GetLockSurface { id, .. } = request {
+                // This rejected object must stay inert even for requests already queued.
+                data_init.init(id, RejectedLockSurface);
+            }
             return;
         }
         if matches!(request, SessionLockRequest::UnlockAndDestroy)
@@ -439,8 +437,8 @@ impl<D: SessionDriver> Dispatch<ExtSessionLockV1, SessionLockState> for Session<
             );
             return;
         }
-        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
-            state, client, lock, request, data, display, data_init,
+        smithay::wayland::Dispatch2::request(
+            data, state, client, lock, request, display, data_init,
         );
     }
 
@@ -451,23 +449,24 @@ impl<D: SessionDriver> Dispatch<ExtSessionLockV1, SessionLockState> for Session<
         data: &SessionLockState,
     ) {
         state.session_lock.rejected_locks.remove(&resource.id());
-        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::destroyed(
-            state, client_id, resource, data,
-        );
+        smithay::wayland::Dispatch2::destroyed(data, state, client_id, resource);
     }
 }
 
 pub fn enter_secure_mode<D: SessionDriver>(session: &mut Session<D>) {
     session
-        .seat
-        .input_method()
-        .clone()
-        .set_suspended(session, true);
+        .wayland
+        .ime_clients
+        .disconnect_all(&session.wayland.display_handle);
     if let Some(mut grab) = session.popup_grab.take() {
         grab.ungrab(smithay::desktop::PopupUngrabStrategy::All);
     }
     if let Some(pointer) = session.seat.get_pointer() {
-        pointer.unset_grab(session, SERIAL_COUNTER.next_serial(), 0);
+        pointer.unset_grab(
+            session,
+            SERIAL_COUNTER.next_serial(),
+            smithay::backend::input::InputTime::now(),
+        );
     }
     if let Some(keyboard) = session.seat.get_keyboard() {
         keyboard.unset_grab(session);
@@ -502,11 +501,6 @@ pub fn leave_secure_mode<D: SessionDriver>(session: &mut Session<D>) {
     }
     session.cursor.clear_overrides();
     crate::session::sync_keyboard_focus(session, SERIAL_COUNTER.next_serial());
-    session
-        .seat
-        .input_method()
-        .clone()
-        .set_suspended(session, false);
 }
 
 fn cancel_client_input<D: SessionDriver>(session: &mut Session<D>) {
@@ -519,7 +513,9 @@ fn cancel_client_input<D: SessionDriver>(session: &mut Session<D>) {
             &smithay::input::pointer::MotionEvent {
                 location: Point::<f64, Logical>::from(session.pointer.position()),
                 serial: SERIAL_COUNTER.next_serial(),
-                time: session.start_time.elapsed().as_millis() as u32,
+                time: smithay::backend::input::InputTime::from_millis(
+                    session.start_time.elapsed().as_millis() as u32,
+                ),
             },
         );
         pointer.frame(session);
@@ -546,7 +542,7 @@ fn update_pointer_focus<D: SessionDriver>(
         &MotionEvent {
             location: Point::<f64, Logical>::from(session.pointer.position()),
             serial: SERIAL_COUNTER.next_serial(),
-            time,
+            time: smithay::backend::input::InputTime::from_millis(time),
         },
     );
 }
@@ -586,7 +582,7 @@ where
             event.key_code(),
             event.state(),
             SERIAL_COUNTER.next_serial(),
-            event.time_msec(),
+            event.time(),
             |_, _, _| FilterResult::Forward,
         );
         session.request_redraw();
@@ -604,21 +600,21 @@ where
 
     match event {
         InputEvent::PointerMotion { event } => {
-            update_pointer_focus(session, &pointer, event.time_msec());
+            update_pointer_focus(session, &pointer, event.time().millis());
             pointer.relative_motion(
                 session,
                 pointer_focus(session),
                 &RelativeMotionEvent {
                     delta: event.delta(),
                     delta_unaccel: event.delta_unaccel(),
-                    utime: event.time(),
+                    time: event.time(),
                 },
             );
             pointer.frame(session);
             session.request_redraw();
         }
         InputEvent::PointerMotionAbsolute { event } => {
-            update_pointer_focus(session, &pointer, event.time_msec());
+            update_pointer_focus(session, &pointer, event.time().millis());
             let delta = Point::<f64, Logical>::from((after.0 - before.0, after.1 - before.1));
             pointer.relative_motion(
                 session,
@@ -626,14 +622,14 @@ where
                 &RelativeMotionEvent {
                     delta,
                     delta_unaccel: delta,
-                    utime: event.time(),
+                    time: event.time(),
                 },
             );
             pointer.frame(session);
             session.request_redraw();
         }
         InputEvent::PointerButton { event } => {
-            update_pointer_focus(session, &pointer, event.time_msec());
+            update_pointer_focus(session, &pointer, event.time().millis());
             if event.button_code() == 0x110
                 && event.state() == ButtonState::Pressed
                 && let Some((surface, _, _)) = session
@@ -647,7 +643,7 @@ where
                 session,
                 &ButtonEvent {
                     serial: SERIAL_COUNTER.next_serial(),
-                    time: event.time_msec(),
+                    time: event.time(),
                     button: event.button_code(),
                     state: event.state(),
                 },
@@ -655,7 +651,7 @@ where
             pointer.frame(session);
         }
         InputEvent::PointerAxis { event } => {
-            update_pointer_focus(session, &pointer, event.time_msec());
+            update_pointer_focus(session, &pointer, event.time().millis());
             pointer.axis(
                 session,
                 crate::input::pointer::axis_frame_filtered(event, true, true),

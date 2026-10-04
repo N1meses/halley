@@ -10,16 +10,21 @@ use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
 use super::TtyDrmOutput;
 use crate::backend::dmabuf::{SurfaceDmabufFeedback, scanout_formats};
 
-pub fn frame_flags() -> FrameFlags {
-    // Keep cursor elements in the primary composition. Client cursor surfaces
-    // can switch size and storage while moving across a window, and the AMD
-    // cursor-plane path has produced stale black damage during those switches.
-    // Niri exposes the same policy as its `disable-cursor-plane` workaround.
-    FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY
+pub fn frame_flags(disable_hardware_cursor: bool) -> FrameFlags {
+    // Keep primary scanout policy independent of cursor-plane selection.
+    // Smithay falls back to composition if the cursor cannot use the plane.
+    let mut flags = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY;
+    if !disable_hardware_cursor {
+        flags.insert(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+    }
+    flags
 }
 
-pub fn frame_flags_for_scene(has_framebuffer_effect: bool) -> FrameFlags {
-    let mut flags = frame_flags();
+pub fn frame_flags_for_scene(
+    has_framebuffer_effect: bool,
+    disable_hardware_cursor: bool,
+) -> FrameFlags {
+    let mut flags = frame_flags(disable_hardware_cursor);
     if has_framebuffer_effect {
         // Direct scan-out of a window skips the backdrop blur behind it, so
         // the surface flickers between the client buffer and the composed
@@ -51,8 +56,9 @@ pub fn surface_feedback(
         .clone()
         .add_preference_tranche(
             scanout_node.dev_id(),
-            Some(TrancheFlags::Scanout),
+            TrancheFlags::Scanout,
             primary_scanout_formats,
+            4..=5,
         )
         .build()?;
 
@@ -69,8 +75,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_scanout_policy_uses_only_the_primary_plane() {
-        let flags = frame_flags();
+    fn hardware_cursor_is_enabled_without_enabling_overlay_planes() {
+        let flags = frame_flags(false);
+        assert!(flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY));
+        assert!(flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT));
+        assert!(!flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT));
+    }
+
+    #[test]
+    fn disabling_hardware_cursor_retains_primary_scanout() {
+        let flags = frame_flags(true);
         assert!(flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY));
         assert!(!flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT));
         assert!(!flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT));
@@ -78,9 +92,18 @@ mod tests {
 
     #[test]
     fn framebuffer_effects_disable_primary_scanout() {
-        let flags = frame_flags_for_scene(true);
-        assert!(!flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT));
-        assert!(!flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY));
-        assert!(frame_flags_for_scene(false).contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY));
+        for disabled in [false, true] {
+            let flags = frame_flags_for_scene(true, disabled);
+            assert!(!flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT));
+            assert!(!flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY));
+            assert_eq!(
+                flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT),
+                !disabled
+            );
+            assert!(
+                frame_flags_for_scene(false, disabled)
+                    .contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY)
+            );
+        }
     }
 }

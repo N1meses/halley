@@ -76,9 +76,11 @@ Transient coordinates are honored. Override-redirect clients remain
 self-configuring and are mirrored into Halley's scene by their notify path.
 
 Managed geometry has an explicit coordinate boundary: `Space` positions are
-Field/source coordinates, while `X11Surface::geometry()` positions are X root
-desktop coordinates. Halley maps the root-surface origin through the same live
-presentation transform used for rendering and input, publishes it only after
+Field/source coordinates, while `X11Surface::last_configure()` positions are X root
+desktop coordinates. `X11Surface::geometry()` is surface-local visible geometry
+and must not be used for X root placement or configure comparisons. Halley maps
+the root-surface origin through the same live presentation transform used for
+rendering and input, publishes it only after
 geometry motion settles, and never copies a managed `ConfigureNotify` root
 position back into `Space`. Native client size is kept unchanged under Field
 zoom. Transient root positions are inverted into Field coordinates before

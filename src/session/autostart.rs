@@ -88,7 +88,7 @@ impl Autostart {
             eventline::debug!(
                 "autostart: launching {command:?} (WAYLAND_DISPLAY={wayland_display:?}, DISPLAY={x11_display:?})"
             );
-            super::spawn::spawn_detached(
+            super::spawn::spawn_autostart(
                 command,
                 wayland_display,
                 x11_display,
@@ -136,13 +136,13 @@ mod tests {
         let (environment, display) = context();
         let mut autostart = Autostart::enabled();
         autostart.arm_once(&display, Vec::new());
-        autostart.run_reload(&["true".to_string()], None, 24, &environment);
+        autostart.run_reload(&["  ".to_string()], None, 24, &environment);
 
         assert!(matches!(autostart.once, OnceState::Pending(_)));
     }
 
     #[test]
-    fn dropping_autostart_does_not_stop_launched_commands() {
+    fn dropping_launcher_does_not_stop_launched_commands() {
         let (environment, display) = context();
         let marker = std::env::temp_dir().join(format!(
             "halley-autostart-detached-{}-{}",
@@ -157,12 +157,9 @@ mod tests {
             marker.display(),
             marker.display()
         );
-        let mut autostart = Autostart::enabled();
-        autostart.arm_once(&display, vec![command]);
-        autostart.run_once(None, 24, &environment);
+        super::super::spawn::spawn_detached(&command, &display, None, 24, &environment);
 
         assert!(wait_for_marker(&marker, "started"));
-        drop(autostart);
         assert!(wait_for_marker(&marker, "finished"));
         let _ = std::fs::remove_file(marker);
     }

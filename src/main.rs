@@ -3,6 +3,7 @@
 mod accessibility;
 mod animation;
 mod appearance;
+mod autostart_log;
 mod backend;
 mod capture;
 mod clusters;
@@ -19,6 +20,8 @@ mod session;
 mod shell;
 mod titlebar;
 mod trail;
+#[path = "wayland/dispatch.rs"]
+mod upstream_protocols;
 mod wayland;
 mod window;
 #[cfg(feature = "xwayland")]
@@ -28,6 +31,9 @@ mod xwayland;
 mod xwayland;
 
 fn main() {
+    if let Some(status) = autostart_log::run_worker_if_requested() {
+        std::process::exit(status);
+    }
     logging::init();
     let args = match StartupArgs::parse(std::env::args().skip(1)) {
         Ok(args) => args,
@@ -47,6 +53,7 @@ fn main() {
     }
 
     if args.session {
+        let _session = session::environment::NativeSession;
         session::environment::prepare_session();
         session::tty::run(args.config_path);
     } else if args.force_winit || detect_nested_session() {
@@ -62,6 +69,7 @@ fn main() {
         // Reaching the DRM/KMS backend means this process is the desktop
         // session even when it was launched directly from a tty instead of
         // through the display-manager `--session` entry point.
+        let _session = session::environment::NativeSession;
         session::environment::prepare_session();
         session::tty::run(args.config_path);
     }

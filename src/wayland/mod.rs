@@ -1,13 +1,16 @@
 pub mod background_effect;
+pub(crate) mod clipboard_helper;
 pub mod compositor;
 pub mod decoration;
 pub mod dmabuf;
 pub mod dnd;
 pub mod ext_workspace;
 pub mod focus;
+pub mod foreign_toplevel;
 pub mod frame_callbacks;
 pub mod fullscreen;
 pub mod idle_inhibit;
+mod ime_clients;
 pub mod layer_shell;
 pub mod permissions;
 pub mod popup;
@@ -34,6 +37,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::background_effect::BackgroundEffectState;
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
+use smithay::wayland::content_type::ContentTypeState;
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufState};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
@@ -51,10 +55,12 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::ShmState;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
+use smithay::wayland::xdg_toplevel_icon::XdgToplevelIconManager;
 
 /// The one output responsible for painting a window. Smithay's `Space`
 /// still owns output geometry and pointer routing; this is only Halley's
@@ -202,6 +208,7 @@ mod window_output_tests {
 /// of this type. That keeps the Smithay globals and shell lifecycle together
 /// without creating a compositor-wide god object.
 pub struct WaylandState {
+    pub ime_clients: ime_clients::ImeClients,
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub dmabuf_state: DmabufState,
@@ -212,6 +219,9 @@ pub struct WaylandState {
     // Retained for the lifetime of the advertised ext-background-effect
     // global. Committed per-surface regions live in Smithay's surface cache.
     _background_effect_state: BackgroundEffectState,
+    _single_pixel_buffer_state: SinglePixelBufferState,
+    _content_type_state: ContentTypeState,
+    _xdg_toplevel_icon_manager: XdgToplevelIconManager,
     // Retained for the lifetime of its advertised global.
     _xdg_decoration_state: XdgDecorationState,
     _viewporter_state: ViewporterState,
@@ -251,6 +261,7 @@ pub struct WaylandState {
     /// workspace handle the compositor has advertised lives here; the cluster
     /// model itself stays in `Session::clusters`.
     pub ext_workspace_state: ext_workspace::State,
+    pub foreign_toplevel_state: foreign_toplevel::State,
     /// Tracks popup trees once for both xdg-toplevel and layer-shell roots.
     /// Rendering and input can then ask Smithay for the same canonical tree
     /// instead of each subsystem inventing its own parent/offset bookkeeping.
@@ -306,6 +317,9 @@ impl WaylandState {
         xdg_activation_state: XdgActivationState,
         layer_shell_state: WlrLayerShellState,
         background_effect_state: BackgroundEffectState,
+        single_pixel_buffer_state: SinglePixelBufferState,
+        content_type_state: ContentTypeState,
+        xdg_toplevel_icon_manager: XdgToplevelIconManager,
         xdg_decoration_state: XdgDecorationState,
         viewporter_state: ViewporterState,
         fractional_scale_manager_state: FractionalScaleManagerState,
@@ -328,6 +342,7 @@ impl WaylandState {
         primary_selection_state: PrimarySelectionState,
         ext_data_control_state: DataControlState,
         ext_workspace_state: ext_workspace::State,
+        foreign_toplevel_state: foreign_toplevel::State,
     ) -> Self {
         Self {
             display_handle,
@@ -338,6 +353,9 @@ impl WaylandState {
             xdg_activation_state,
             layer_shell_state,
             _background_effect_state: background_effect_state,
+            _single_pixel_buffer_state: single_pixel_buffer_state,
+            _content_type_state: content_type_state,
+            _xdg_toplevel_icon_manager: xdg_toplevel_icon_manager,
             _xdg_decoration_state: xdg_decoration_state,
             _viewporter_state: viewporter_state,
             _fractional_scale_manager_state: fractional_scale_manager_state,
@@ -347,6 +365,7 @@ impl WaylandState {
             _pointer_gestures_state: pointer_gestures_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
             _virtual_keyboard_manager_state: virtual_keyboard_manager_state,
+            ime_clients: Default::default(),
             _text_input_manager_state: text_input_manager_state,
             _input_method_manager_state: input_method_manager_state,
             keyboard_shortcuts_inhibit_state,
@@ -362,6 +381,7 @@ impl WaylandState {
             primary_selection_state,
             ext_data_control_state,
             ext_workspace_state,
+            foreign_toplevel_state,
             popup_manager: PopupManager::default(),
             space: Space::default(),
             managed_windows: crate::window::ManagedWindowStack::default(),

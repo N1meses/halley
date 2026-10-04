@@ -1044,7 +1044,18 @@ fn texture_matrix(
             transformed_size.w as f32,
         )),
     };
-    matrix = transform.matrix() * matrix;
+    let transform = transform.matrix().to_cols_array();
+    matrix = Matrix3::new(
+        transform[0],
+        transform[1],
+        0.0,
+        transform[2],
+        transform[3],
+        0.0,
+        transform[4],
+        transform[5],
+        1.0,
+    ) * matrix;
     matrix = translation * matrix;
     matrix = Matrix3::from_translation(Vector2::new(src.loc.x as f32, src.loc.y as f32)) * matrix;
     matrix = Matrix3::from_nonuniform_scale(

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use smithay::backend::input::KeyState;
+use smithay::backend::input::{InputTime, KeyState};
 use smithay::desktop::{PopupKind, Window};
 use smithay::input::Seat;
 use smithay::input::keyboard::{KeyboardTarget, KeysymHandle, ModifiersState};
@@ -144,7 +144,7 @@ impl<D: SessionDriver> KeyboardTarget<Session<D>> for KeyboardFocusTarget {
         key: KeysymHandle<'_>,
         state: KeyState,
         serial: Serial,
-        time: u32,
+        time: InputTime,
     ) {
         self.target().key(seat, session, key, state, serial, time);
     }

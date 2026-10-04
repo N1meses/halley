@@ -177,8 +177,8 @@ mod tests {
             Modifier::Linear,
             DmabufFlags::empty(),
         );
-        assert!(builder.add_plane(read_a.into(), 0, 0, 64));
-        assert!(builder.add_plane(read_b.into(), 1, 0, 64));
+        assert!(builder.add_plane(std::os::fd::OwnedFd::from(read_a), 0, 64));
+        assert!(builder.add_plane(std::os::fd::OwnedFd::from(read_b), 0, 64));
         (builder.build().unwrap(), [write_a, write_b])
     }
 

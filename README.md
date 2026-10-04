@@ -380,10 +380,8 @@ action string is a command line, so replacing one line is enough:
 ```
 
 Existing 0.6-or-newer configurations keep whatever launcher they already bind.
-Only a newly generated config defaults to Halley Lift, and routine structural
-migration does not rewrite a launcher binding. Migrating an incompatible
-pre-0.6 config is the exception: after making a timestamped backup, Halley
-replaces that file with the current default config.
+Only a newly generated config defaults to Halley Lift. Change the launcher
+binding yourself to use a different launcher.
 
 ---
 
@@ -393,15 +391,11 @@ On first launch Halley creates
 `$XDG_CONFIG_HOME/halley/halley.rune`, falling back to
 `~/.config/halley/halley.rune`, from the canonical
 [`examples/halley.rune`](examples/halley.rune) template. Startup never modifies
-an existing config, and configs need no version marker. Optional compatibility
-updates are explicit and structurally detected: use `halleyctl config migrate
---dry-run` to inspect them before running `halleyctl config migrate`. Migration
-adds only a finite set of known missing bindings or sections to compatible
-0.6-or-newer configs, skips conflicting custom chords, validates the complete
-candidate, writes atomically, and retains a timestamped backup. An incompatible
-pre-0.6 config is instead backed up and replaced with the current default. A
-gathered root reports that the file owning the affected section must be migrated
-directly rather than guessing where to write.
+an existing config, and configs need no version marker. Halley does not back up,
+migrate, or replace existing configs. Update settings and bindings yourself,
+using the example as a reference, and check the result with
+`halleyctl config verify`. Omitted settings use built-in defaults; an
+incompatible config reports an error and remains unchanged.
 
 Pass `-c PATH` or `--config PATH` to select another file. Valid edits reload as
 one atomic snapshot; invalid edits leave the last valid runtime state active.
@@ -415,12 +409,15 @@ declarations. See
 [startup clusters](docs/clusters.md#startup-clusters) for syntax, launch
 attribution, output placement, and restart behavior.
 
+Autostart command output and exit status are saved in private, bounded logs
+under `~/.local/state/halley/autostart` (or `$XDG_STATE_HOME/halley/autostart`).
+See [autostart logs](docs/autostart.md) for startup diagnostics and retention.
+
 Useful controls:
 
 ```sh
 halleyctl config verify
 halleyctl config edit
-halleyctl config migrate --dry-run
 halleyctl reload
 ```
 

@@ -10,6 +10,7 @@ struct FocusSuccession {
     output: Option<String>,
     preferred: Option<WlSurface>,
     pan: halley_config::CloseRestorePan,
+    clipboard_return: Option<crate::wayland::clipboard_helper::SavedFocus>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,9 @@ pub(crate) fn prepare_window_unmap<D: SessionDriver>(
     session: &mut Session<D>,
     surface: &WlSurface,
 ) -> WindowUnmapPreparation {
+    if let Some(id) = session.nodes.id_for_surface(surface) {
+        session.wayland.foreign_toplevel_state.unmap(id.as_u64());
+    }
     super::touch::cancel_surface(session, surface);
     super::gesture::cancel_surface(session, surface);
     super::pointer::prepare_unmap(session, surface);
@@ -264,6 +268,7 @@ pub(crate) fn prepare_window_unmap<D: SessionDriver>(
             output,
             preferred,
             pan: session.settings.field.close_restore_pan,
+            clipboard_return: crate::wayland::clipboard_helper::saved_focus(surface),
         }
     });
     WindowUnmapPreparation {
@@ -306,6 +311,45 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
         .as_ref()
         .is_some_and(|focused| focused != &surface)
     {
+        return;
+    }
+
+    if let Some(saved) = focus.clipboard_return {
+        // This is the end of a borrowed clipboard serial, not an application
+        // close. Restore its exact caller without cluster succession or camera
+        // motion, independently of the user's ordinary close-focus policy.
+        let window = saved.window.as_ref().and_then(|surface| {
+            session
+                .wayland
+                .space
+                .elements()
+                .find(|window| {
+                    window
+                        .wl_surface()
+                        .is_some_and(|candidate| candidate.as_ref() == surface)
+                        && crate::wayland::window_output_name(window).is_some_and(|output| {
+                            crate::presentation::surface_workspace_is_active(
+                                &session.clusters,
+                                &session.nodes,
+                                surface,
+                                &output,
+                                crate::frame_clock::monotonic_now(),
+                            )
+                        })
+                })
+                .cloned()
+        });
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(window) = window {
+            super::focus_window_after_close(session, &window, serial);
+        } else {
+            crate::window::clear_focus(&mut session.wayland);
+        }
+        if saved.layer.is_some() {
+            super::focus::focus_layer(session, saved.layer, serial);
+        } else {
+            super::sync_keyboard_focus(session, serial);
+        }
         return;
     }
 

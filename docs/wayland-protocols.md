@@ -13,18 +13,19 @@ X11 applications keep using X11 IME and do not participate in this pair.
 This is interface version 1 of the v3 protocol; the newer interface-version-2
 requests and events are not advertised.
 
-Halley's vendored Smithay buffers IME edits until commit, uses each text-input
-object's commit count for `done`, resets pending state on enable and focus loss,
-and rejects additional IMEs without disturbing the active one. Candidate popups
-are visible only while a text input is enabled; all live popups receive caret
-updates, including the current rectangle at creation. Destroying an IME releases
-its keyboard grab and removes its popups. Old keyboard objects cannot release a
-replacement grab. Socket-level
-regressions in `tests/text_input_protocol.rs` exercise these transitions with
-real Wayland requests and events. Run them with
-`cargo test -p halley --test text_input_protocol`. These tests validate protocol
-handling; candidate-window rendering and toolkit integration still require a
-live IME session.
+Halley uses unmodified Smithay pinned to revision
+`79bbed5e1199090d787115614847a79c76607181`, matching the Niri revision checked
+for this change. Native composition and candidate popups use its basic
+text-input/input-method implementation. Halley no longer carries the IME
+state, commit-buffering, keyboard-grab teardown, or multiple-popup patches.
+Socket-level smoke tests live in `tests/text_input_protocol.rs`; toolkit and
+candidate-window integration still require a live IME session.
+
+When the screen locks, Halley disconnects clients that created an input method
+and rejects new input-method requests until unlock. This prevents the IME from
+receiving lock-screen input without modifying Smithay. The IME must reconnect
+or be restarted after unlock; composition does not resume automatically on the
+old connection. X11 applications continue to use their X11 IME.
 
 Halley advertises `ext_background_effect_manager_v1` version 1 with the blur
 capability. A committed `set_blur_region` is clipped to the requesting
@@ -53,6 +54,12 @@ reopening as an ordinary output-sized window. Explicit initial-size window
 rules take precedence, and surfaces already known when the hint is retained
 are never resized by it. The hint is cleared after a normal close and is never
 written to disk.
+
+With the unmodified Smithay pin, Halley uses conservative full-output
+framebuffer capture and blur processing. Halley's custom foreground-only invalidation and padded regional
+damage hooks have been removed, so blur may require more GPU work. Local
+animations likewise repaint their output fully; unrelated outputs and the FPS
+overlay alone retain their existing redraw policy.
 
 All blur effects on one output share one persistent output-sized texture pool.
 Each stack depth still performs its own framebuffer capture, so an upper
@@ -167,3 +174,54 @@ fields, and restarting the IME. An already running compositor keeps its old
 protocol implementation until it is restarted. `wayland-info` should list
 `zwp_input_method_manager_v2` at version 1; the `v2` in the interface name is the
 protocol generation, not the advertised interface version.
+
+Halley advertises `wp_single_pixel_buffer_manager_v1` version 1. Clients can
+create a solid-color buffer without shared-memory storage; Smithay handles
+its lifecycle and rendering.
+
+Exclusive layer-shell focus controls which client receives forwarded keyboard
+input. Halley still evaluates compositor shortcuts unless the session is locked
+or the focused surface has an active keyboard-shortcuts inhibitor.
+
+Halley advertises `wp_content_type_manager_v1` and
+`xdg_toplevel_icon_manager_v1` version 1. Smithay stores content hints and icon
+metadata with committed surface state. These hints do not change maximization,
+fullscreen, or focus policy, and accepting icon metadata does not yet display
+client-supplied icons in Halley UI.
+
+Native outputs use hardware cursor planes when the cursor and driver support
+them. Set `disable-hardware-cursor true` in the `cursor` section and reload to
+force software composition if cursor artifacts appear. Winit has no DRM cursor
+plane, and cross-GPU outputs retain software cursor composition inside the
+transferred scene texture.
+
+Halley advertises `ext_foreign_toplevel_list_v1` version 1 and
+`zwlr_foreign_toplevel_manager_v1` version 3 for window lists, taskbars and docks.
+Both enumerate native Wayland and managed XWayland windows, including collapsed
+nodes and windows in inactive clusters. Popups, layer surfaces and X11
+override-redirect menus are excluded. Titles and app IDs follow client metadata;
+X11 app IDs use the window class. The ext list uses Smithay's stable identifiers.
+
+The wlr protocol publishes activated, minimized (collapsed), maximized and
+fullscreen states, owning-output associations, and transient parents. Every
+manager binding gets its own handles. Output associations refer to the owning
+monitor even while its window is collapsed or its cluster is inactive. Later
+`wl_output` bindings receive the association too. Window unmaps and destruction
+close the handles; remapping creates fresh handles and an ext identifier.
+Destroyed handles are never recreated during the same mapping.
+
+Taskbars can activate, close, minimize/restore, maximize/unmaximize and
+fullscreen/unfullscreen windows through Halley's existing window actions.
+Activation switches to the window's cluster or Field and restores collapsed
+nodes; stack and overflow members are brought into view. Requests are ignored
+while the session is locked or an interactive compositor grab is active.
+Activation must name Halley's seat. Fullscreen keeps the window on its current
+output (the requested output is an optional hint). Taskbar rectangles are
+validated but do not replace Halley's spatial node collapse destination.
+Minimizing a fullscreen window follows the existing policy and may be declined.
+
+`tests/foreign_toplevel_protocol.rs` checks lifecycle, properties, versions,
+multiple bindings and clients, output and parent updates, and request dispatch
+through real sockets. Its optional nested-session test additionally exercises
+native window actions against a running Halley; provide
+`HALLEY_TEST_WAYLAND_DISPLAY` as the absolute path to that test session's socket.

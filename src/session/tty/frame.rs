@@ -4,6 +4,22 @@ use calloop::RegistrationToken;
 
 use crate::frame_clock::FrameClock;
 
+/// Animations repaint conservatively with unmodified Smithay; diagnostics
+/// alone still request another sample without resetting buffer ages.
+pub(crate) struct FrameDemand {
+    pub keep_redrawing: bool,
+    pub force_full_repaint: bool,
+}
+
+impl FrameDemand {
+    pub fn new(geometry_animating: bool, local_animating: bool, fps_overlay_visible: bool) -> Self {
+        Self {
+            keep_redrawing: geometry_animating || local_animating || fps_overlay_visible,
+            force_full_repaint: geometry_animating || local_animating,
+        }
+    }
+}
+
 /// The redraw work an output owes and the kernel/timer event that currently
 /// gates it. Keeping these transitions together prevents input, DRM, and
 /// timer handlers from independently interpreting the same state.
@@ -28,9 +44,9 @@ pub(super) enum EstimatedVblankTimer {
 
 /// Work that becomes safe when the kernel reports a page flip.
 ///
-/// A queued redraw takes precedence over releasing another client frame
-/// callback: the buffers for that redraw have not been latched yet. Once a
-/// frame is submitted, its callbacks are released immediately instead.
+/// A queued scene change takes precedence over releasing another client frame
+/// callback: its buffers have not been latched yet. A successful unchanged
+/// sample can release callbacks and queue the next continuous sample together.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum VblankAction {
     Ignore,
@@ -52,7 +68,8 @@ pub(super) struct OutputFrameState {
     clock: FrameClock,
     redraw: RedrawState,
     last_camera_sample: Duration,
-    unfinished_animations: bool,
+    keep_redrawing: bool,
+    skipped_scene_ready: bool,
     frame_callback_sequence: u32,
     last_vblank_timestamp: Option<Duration>,
     vblank_throttle_timer: Option<RegistrationToken>,
@@ -65,7 +82,8 @@ impl OutputFrameState {
             clock: FrameClock::new(Some(refresh_interval)),
             redraw: RedrawState::default(),
             last_camera_sample: crate::frame_clock::monotonic_now(),
-            unfinished_animations: false,
+            keep_redrawing: false,
+            skipped_scene_ready: false,
             frame_callback_sequence: 0,
             last_vblank_timestamp: None,
             vblank_throttle_timer: None,
@@ -150,7 +168,8 @@ impl OutputFrameState {
     pub fn replace_clock(&mut self, refresh_interval: Duration) {
         self.clock = FrameClock::new(Some(refresh_interval));
         self.last_camera_sample = crate::frame_clock::monotonic_now();
-        self.unfinished_animations = false;
+        self.keep_redrawing = false;
+        self.skipped_scene_ready = false;
     }
 
     pub fn set_vrr(&mut self, vrr: bool) {
@@ -172,7 +191,7 @@ impl OutputFrameState {
                 return (VblankAction::Ignore, None);
             }
             RedrawState::WaitingForVBlank { redraw_needed } => {
-                (redraw_needed || self.unfinished_animations, None)
+                (redraw_needed || self.keep_redrawing, None)
             }
             other => (true, Some(format!("{other:?}"))),
         };
@@ -192,23 +211,31 @@ impl OutputFrameState {
 
     /// Records a real page flip and returns an estimated-VBlank timer that
     /// became obsolete, if one was armed.
-    pub fn frame_submitted(&mut self, animating: bool) -> Option<RegistrationToken> {
+    pub fn frame_submitted(&mut self, keep_redrawing: bool) -> Option<RegistrationToken> {
         let timer = match std::mem::take(&mut self.redraw) {
             RedrawState::WaitingForEstimatedVBlank(token)
             | RedrawState::WaitingForEstimatedVBlankAndQueued(token) => Some(token),
             _ => None,
         };
-        self.unfinished_animations = animating;
+        self.keep_redrawing = keep_redrawing;
         self.redraw = RedrawState::WaitingForVBlank {
-            redraw_needed: animating,
+            redraw_needed: keep_redrawing,
         };
         timer
     }
 
     /// Records a render with no page flip. A previously armed fallback is
     /// reused; otherwise the caller receives the delay for one new timer.
-    pub fn frame_skipped(&mut self, animating: bool, now: Duration) -> EstimatedVblankTimer {
-        self.unfinished_animations = animating;
+    /// `scene_ready` distinguishes successful unchanged scenes from render
+    /// failures, whose client callbacks must wait until rendering succeeds.
+    pub fn frame_skipped(
+        &mut self,
+        keep_redrawing: bool,
+        scene_ready: bool,
+        now: Duration,
+    ) -> EstimatedVblankTimer {
+        self.keep_redrawing = keep_redrawing;
+        self.skipped_scene_ready = scene_ready;
         match std::mem::take(&mut self.redraw) {
             RedrawState::Queued => {}
             RedrawState::WaitingForEstimatedVBlank(token)
@@ -222,7 +249,19 @@ impl OutputFrameState {
         }
 
         let due = self.clock.next_presentation_time(now);
-        EstimatedVblankTimer::ArmAfter(due.saturating_sub(now).max(Duration::from_millis(1)))
+        let delay = due.saturating_sub(now);
+        // Without a presentation timestamp the clock samples at `now`.
+        // A continuously sampled, unchanged scene must still wait a refresh
+        // interval, rather than turning the one-shot callback fallback into
+        // a repeating 1 ms timer.
+        let delay = if keep_redrawing && delay.is_zero() {
+            self.clock
+                .refresh_interval()
+                .unwrap_or(Duration::from_secs_f64(1.0 / 60.0))
+        } else {
+            delay
+        };
+        EstimatedVblankTimer::ArmAfter(delay.max(Duration::from_millis(1)))
     }
 
     pub fn timer_armed(&mut self, token: RegistrationToken) {
@@ -235,9 +274,11 @@ impl OutputFrameState {
                 self.redraw = RedrawState::Suspended;
                 Ok(false)
             }
-            RedrawState::WaitingForEstimatedVBlank(_) if self.unfinished_animations => {
+            RedrawState::WaitingForEstimatedVBlank(_) if self.keep_redrawing => {
                 self.redraw = RedrawState::Queued;
-                Ok(false)
+                // No new pixels were needed, so clients can advance while
+                // the diagnostic samples again. A failed render cannot do this.
+                Ok(self.skipped_scene_ready)
             }
             RedrawState::WaitingForEstimatedVBlank(_) => Ok(true),
             RedrawState::WaitingForEstimatedVBlankAndQueued(_) => {
@@ -263,7 +304,8 @@ impl OutputFrameState {
         self.clock.reset();
         self.last_vblank_timestamp = None;
         self.last_camera_sample = now;
-        self.unfinished_animations = false;
+        self.keep_redrawing = false;
+        self.skipped_scene_ready = false;
         self.redraw = RedrawState::Suspended;
         timers
     }
@@ -273,7 +315,8 @@ impl OutputFrameState {
         self.clock.reset();
         self.last_vblank_timestamp = None;
         self.last_camera_sample = now;
-        self.unfinished_animations = false;
+        self.keep_redrawing = false;
+        self.skipped_scene_ready = false;
         self.redraw = RedrawState::Queued;
     }
 }
@@ -330,6 +373,109 @@ mod tests {
     }
 
     #[test]
+    fn local_animation_keeps_vblank_cadence_with_conservative_repaints() {
+        let animation = FrameDemand::new(false, true, false);
+        assert!(animation.force_full_repaint);
+        let mut state = state();
+        state.queue_redraw();
+        state.frame_submitted(animation.keep_redrawing);
+        assert_eq!(state.on_vblank(None), (VblankAction::Redraw, None));
+        // A label may still be advancing below its visible threshold. Such a
+        // sample owes another paced frame even when no pixels changed.
+        assert_eq!(
+            state.frame_skipped(animation.keep_redrawing, true, Duration::from_millis(100)),
+            EstimatedVblankTimer::ArmAfter(Duration::from_millis(10))
+        );
+        state.timer_armed(registration_token());
+        assert_eq!(state.estimated_vblank_fired(), Ok(true));
+        let settled = FrameDemand::new(false, false, false);
+        state.frame_submitted(settled.keep_redrawing);
+        assert_eq!(state.on_vblank(None), (VblankAction::SendCallbacks, None));
+        assert!(!state.is_redraw_queued());
+    }
+
+    #[test]
+    fn fps_samples_continue_after_submitted_and_unchanged_frames_then_stop_when_disabled() {
+        let fps = FrameDemand::new(false, false, true);
+        assert!(!fps.force_full_repaint);
+        let mut state = state();
+        state.queue_redraw();
+        state.frame_submitted(fps.keep_redrawing);
+        assert!(!state.is_redraw_queued());
+        assert_eq!(
+            state.on_vblank(Some(Duration::from_millis(100))),
+            (VblankAction::Redraw, None)
+        );
+
+        // Selective damage can submit no pixels while FPS sampling remains
+        // active. Every sample still waits for a refresh-paced timer.
+        for tick in 0..100 {
+            let now = Duration::from_millis(100 + tick * 10);
+            assert_eq!(
+                state.frame_skipped(fps.keep_redrawing, true, now),
+                EstimatedVblankTimer::ArmAfter(Duration::from_millis(10))
+            );
+            state.timer_armed(registration_token());
+            assert!(!state.is_redraw_queued());
+            assert_eq!(
+                state.frame_skipped(fps.keep_redrawing, true, now + Duration::from_millis(1)),
+                EstimatedVblankTimer::AlreadyArmed
+            );
+            assert_eq!(state.estimated_vblank_fired(), Ok(true));
+            assert!(state.is_redraw_queued());
+        }
+
+        let disabled = FrameDemand::new(false, false, false);
+        state.frame_skipped(disabled.keep_redrawing, true, Duration::from_millis(1100));
+        state.timer_armed(registration_token());
+        assert_eq!(state.estimated_vblank_fired(), Ok(true));
+        assert!(!state.is_redraw_queued());
+    }
+
+    #[test]
+    fn continuous_samples_without_presentation_timestamps_wait_for_current_refresh() {
+        let fps = FrameDemand::new(false, false, true);
+        let mut state = state();
+        state.queue_redraw();
+        for tick in 0..3 {
+            assert_eq!(
+                state.frame_skipped(
+                    fps.keep_redrawing,
+                    true,
+                    Duration::from_millis(100 + tick * 10)
+                ),
+                EstimatedVblankTimer::ArmAfter(Duration::from_millis(10))
+            );
+            state.timer_armed(registration_token());
+            assert!(!state.is_redraw_queued());
+            assert_eq!(state.estimated_vblank_fired(), Ok(true));
+        }
+        state.replace_clock(Duration::from_millis(20));
+        assert_eq!(
+            state.frame_skipped(fps.keep_redrawing, true, Duration::from_millis(130)),
+            EstimatedVblankTimer::ArmAfter(Duration::from_millis(20))
+        );
+    }
+
+    #[test]
+    fn failed_sample_and_queued_scene_change_wait_for_rendering_before_callbacks() {
+        let fps = FrameDemand::new(false, false, true);
+        let mut state = state();
+        state.queue_redraw();
+        state.frame_skipped(fps.keep_redrawing, false, Duration::from_secs(5));
+        state.timer_armed(registration_token());
+        assert_eq!(state.estimated_vblank_fired(), Ok(false));
+        assert!(state.is_redraw_queued());
+
+        state.frame_skipped(fps.keep_redrawing, true, Duration::from_secs(5));
+        state.timer_armed(registration_token());
+        // Input or a client commit after the sample owes a fresh scene first.
+        state.queue_redraw();
+        assert_eq!(state.estimated_vblank_fired(), Ok(false));
+        assert!(state.is_redraw_queued());
+    }
+
+    #[test]
     fn settled_frame_returns_to_idle_after_vblank() {
         let mut state = state();
         state.queue_redraw();
@@ -345,7 +491,7 @@ mod tests {
         state.queue_redraw();
 
         assert_eq!(
-            state.frame_skipped(false, Duration::from_secs(5)),
+            state.frame_skipped(false, true, Duration::from_secs(5)),
             EstimatedVblankTimer::ArmAfter(Duration::from_millis(1))
         );
     }
@@ -354,7 +500,7 @@ mod tests {
     fn estimated_vblank_releases_callbacks_after_a_settled_skipped_frame() {
         let mut state = state();
         state.queue_redraw();
-        state.frame_skipped(false, Duration::from_secs(5));
+        state.frame_skipped(false, true, Duration::from_secs(5));
         state.timer_armed(registration_token());
 
         assert_eq!(state.estimated_vblank_fired(), Ok(true));
@@ -365,7 +511,7 @@ mod tests {
     fn redraw_queued_during_estimated_wait_takes_precedence_over_callbacks() {
         let mut state = state();
         state.queue_redraw();
-        state.frame_skipped(false, Duration::from_secs(5));
+        state.frame_skipped(false, true, Duration::from_secs(5));
         state.timer_armed(registration_token());
         state.queue_redraw();
 

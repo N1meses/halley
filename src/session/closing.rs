@@ -167,6 +167,9 @@ fn capture_window_inner<D: SessionDriver>(
     let Some(surface) = window.wl_surface().map(|surface| surface.into_owned()) else {
         return false;
     };
+    if crate::wayland::clipboard_helper::saved_focus(&surface).is_some() {
+        return false;
+    }
     if session.render.window_close_animations.has_pending(&surface) {
         return true;
     }

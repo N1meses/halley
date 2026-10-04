@@ -165,6 +165,7 @@ mod tests {
 
 /// Only standalone normal/utility pop-outs may be explicitly moved. This does
 /// not grant WM focus or resize privileges to override-redirect surfaces.
+#[cfg(feature = "xwayland")]
 pub fn accepts_popup_move(window: &Window) -> bool {
     window.x11_surface().is_some_and(|surface| {
         popup_move_policy(
@@ -176,6 +177,12 @@ pub fn accepts_popup_move(window: &Window) -> bool {
     })
 }
 
+#[cfg(not(feature = "xwayland"))]
+pub fn accepts_popup_move(_window: &Window) -> bool {
+    false
+}
+
+#[cfg(feature = "xwayland")]
 fn popup_move_policy(
     override_redirect: bool,
     attached: bool,
@@ -187,7 +194,7 @@ fn popup_move_policy(
         && matches!(kind, Some(WmWindowType::Normal | WmWindowType::Utility))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "xwayland"))]
 mod popup_move_tests {
     use super::popup_move_policy;
     use smithay::xwayland::xwm::WmWindowType::*;
