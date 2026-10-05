@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Include `examples/shaders/close-wave.frag`, the inward spiral counterpart to
+  the wave opening shader, with matching 900 ms timing and setup instructions.
 - Include `examples/shaders/open-wave.frag`, a custom opening shader with spiral
   ripples, refraction, a cyan/violet crest, and a pixel fringe. Document its
   recommended 900 ms linear timing in `docs/window-shaders.md`.

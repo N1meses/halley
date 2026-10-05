@@ -48,6 +48,23 @@ end
 The example settles to the current client texture before the animation ends.
 Client content can continue loading and animating while the wave runs.
 
+The matching [wave closing shader](../examples/shaders/close-wave.frag) reverses
+the effect, drawing the window inward through the same ripples, refraction,
+and cyan/violet crest. Copy it to `~/.config/halley/close-wave.frag` and use:
+
+```rune
+window-close:
+  enabled true
+  type "shrink"
+  duration-ms 900
+  curve "linear"
+  custom-shader "close-wave.frag"
+end
+```
+
+Both blocks belong inside `animations:`. Keep any existing shader files when
+switching examples so you can restore them by changing `custom-shader`.
+
 The file is not a full program. Halley wraps it with Smithay's texture-shader
 header (`//_DEFINES_`, `v_coords`, `tex`, `alpha`) and an epilogue `main`.
 Your source must define one function:
