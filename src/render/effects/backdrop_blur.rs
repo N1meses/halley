@@ -12,7 +12,9 @@ use smithay::backend::renderer::gles::{
     UniformName, UniformType, ffi, link_program,
 };
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::backend::renderer::{ContextId, Offscreen, Renderer, Texture};
+use smithay::backend::renderer::{
+    Bind, ContextId, Frame, FrameContext, Offscreen, Renderer, Texture,
+};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
 
@@ -693,6 +695,45 @@ fn run_blur(
     })?
 }
 
+impl BackdropBlurElement {
+    pub(crate) fn visible_geometry(&self) -> Rectangle<i32, Physical> {
+        self.patches
+            .iter()
+            .map(|patch| patch.rect)
+            .reduce(|a, b| a.merge(b))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn capture_with_background(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        background: &[crate::render::scene::SceneElement],
+        cache: &UserDataMap,
+    ) -> Result<(), GlesError> {
+        self.capture_framebuffer(frame, self.src(), self.geometry, cache)?;
+        if !self.element.captured.get() || background.is_empty() {
+            return Ok(());
+        }
+        let transform = frame.transformation();
+        let mode_size = transform.invert().transform_size(self.size);
+        let mut guard = FrameContext::renderer(frame);
+        let renderer = guard.as_mut();
+        let mut textures = self.textures.borrow_mut();
+        let mut target = renderer.bind(&mut textures.accum)?;
+        let mut backdrop = renderer.render(&mut target, mode_size, transform)?;
+        // Preserve the normal background-to-foreground order in the blur's
+        // existing capture, while leaving the actual output untouched.
+        smithay::backend::renderer::utils::draw_render_elements(
+            &mut backdrop,
+            1.0,
+            background,
+            &[Rectangle::from_size(self.size)],
+        )?;
+        let _ = backdrop.finish()?;
+        Ok(())
+    }
+}
+
 impl Element for BackdropBlurElement {
     fn id(&self) -> &Id {
         &self.id
@@ -878,6 +919,7 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                 &damage,
                 self.saturation,
                 self.noise,
+                dst.loc - self.geometry.loc,
             ) {
                 suspend_blur(&self.retry, "composite pass", &error);
                 return Ok(());
@@ -899,6 +941,7 @@ fn suspend_blur(retry: &Rc<RefCell<RetryState>>, stage: &str, error: &GlesError)
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn composite_patch(
     frame: &mut GlesFrame<'_, '_>,
     texture: &GlesTexture,
@@ -907,15 +950,19 @@ fn composite_patch(
     damage: &[Rectangle<i32, Physical>],
     saturation: f32,
     noise: f32,
+    destination_offset: smithay::utils::Point<i32, Physical>,
 ) -> Result<(), GlesError> {
+    // Sampling and clipping remain in output coordinates. Only the drawn
+    // quad moves when a window scene is relocated into an offscreen texture.
+    let destination = Rectangle::new(patch.rect.loc + destination_offset, patch.rect.size);
     let local_damage = damage
         .iter()
         .filter_map(|damage| {
-            patch.rect.intersection(*damage).map(|visible| {
+            destination.intersection(*damage).map(|visible| {
                 Rectangle::new(
                     (
-                        visible.loc.x - patch.rect.loc.x,
-                        visible.loc.y - patch.rect.loc.y,
+                        visible.loc.x - destination.loc.x,
+                        visible.loc.y - destination.loc.y,
                     )
                         .into(),
                     visible.size,
@@ -944,7 +991,7 @@ fn composite_patch(
             (f64::from(patch.rect.loc.x), f64::from(patch.rect.loc.y)).into(),
             (f64::from(patch.rect.size.w), f64::from(patch.rect.size.h)).into(),
         ),
-        patch.rect,
+        destination,
         &local_damage,
         &[],
         Transform::Normal,

@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Include `examples/shaders/open-wave.frag`, a custom opening shader with spiral
+  ripples, refraction, a cyan/violet crest, and a pixel fringe. Document its
+  recommended 900 ms linear timing in `docs/window-shaders.md`.
 - Advertise `ext_foreign_toplevel_list_v1` and
   `zwlr_foreign_toplevel_manager_v1` for taskbars and docks to list windows,
   track their state, and request activation, close, minimize, maximize, and
@@ -171,6 +174,18 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Render custom opening shaders from the complete live window scene, including
+  backdrop blur, themed shadows, and independently faded client content and
+  decorations. The final shader frame now matches normal composition instead
+  of revealing those effects abruptly when the animation finishes.
+- Keep rounded client and decoration masks attached to their pixels when
+  cropped or moved into an opening snapshot, preventing empty top/left regions
+  and displaced textures in Wayland and XWayland windows.
+- Preserve client visibility and presentation feedback through custom opening
+  shaders, so applications keep loading and animating at the output's callback
+  cadence instead of being throttled as hidden windows.
+- Limit overlay animation redraw demand to the output that owns the overlay,
+  preventing local notices and cards from keeping other monitors repainting.
 - Clear native output state, then pause DRM devices before releasing GPU
   access on logout. Leave console restoration to the seat/VT manager instead
   of replaying the startup DRM snapshot rejected by AMD with `EINVAL`.

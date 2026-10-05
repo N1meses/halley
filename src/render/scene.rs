@@ -69,6 +69,7 @@ render_elements! {
     RoundedCropped=CropRenderElement<super::window_decoration::RoundedSurfaceElement>,
     WindowResize=super::resize::ResizeRenderElement,
     WindowShader=super::window_shader::WindowShaderRenderElement,
+    WindowOpen=super::window_open::WindowOpenElement,
     WindowBorder=super::window_decoration::RoundedBorderElement,
     RoundedTexture=super::window_decoration::RoundedTextureElement,
     ClusterCore=crate::clusters::render::ClusterCoreElement,

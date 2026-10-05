@@ -224,6 +224,7 @@ impl Renderable for WinitBackend {
                     },
                 );
             }
+            crate::render::window_open::extend_render_states(&elements, &mut element_states);
             let _ = frame.finish()?;
         }
 

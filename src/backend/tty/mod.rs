@@ -1449,7 +1449,7 @@ impl Renderable for TtyBackend {
                 .drm_output
                 .with_compositor(|compositor| compositor.reset_buffer_ages());
         }
-        let (element_states, direct_scanout, is_empty) = if !is_cross_gpu {
+        let (mut element_states, direct_scanout, is_empty) = if !is_cross_gpu {
             let mut renderer = self
                 .gpu_manager
                 .single_renderer(&self.primary_render_node)
@@ -1564,6 +1564,7 @@ impl Renderable for TtyBackend {
             }
             (element_states, false, result.is_empty)
         };
+        crate::render::window_open::extend_render_states(&elements, &mut element_states);
         if is_empty {
             return Ok(RenderOutcome::new(
                 RenderStatus::Skipped,

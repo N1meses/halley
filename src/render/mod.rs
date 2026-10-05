@@ -17,6 +17,7 @@ mod selection_check;
 pub mod text;
 pub mod titlebar;
 pub mod window_decoration;
+pub mod window_open;
 pub mod window_shader;
 pub mod window_texture;
 
