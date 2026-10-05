@@ -1597,6 +1597,15 @@ where
         crate::wayland::session_lock::handle_input(session, event);
         return;
     }
+    if let InputEvent::PointerButton { event } = event
+        && event.state() == ButtonState::Released
+        && session
+            .interactions
+            .screenshot_buttons
+            .release_is_suppressed(event.button_code())
+    {
+        return;
+    }
     if session.shell.overlays.confirmation_modal_active()
         && !matches!(event, InputEvent::Keyboard { .. })
     {
@@ -1941,6 +1950,9 @@ where
             session.request_redraw();
             return;
         }
+    }
+    if super::screenshot::handle_pointer(session, event) {
+        return;
     }
     let constrained_motion = super::pointer::constrain_motion(session, &pointer_handle);
 

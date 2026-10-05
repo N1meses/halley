@@ -9,3 +9,5 @@ pub(crate) mod fps;
 pub mod preview;
 pub mod shell;
 pub(crate) mod source_chooser;
+
+pub(crate) mod screenshot;

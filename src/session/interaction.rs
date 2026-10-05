@@ -17,6 +17,8 @@ pub struct InteractionState {
     /// from card visibility lets the matching release remain suppressed after
     /// the fade finishes without swallowing a new press during the fade.
     pub(crate) basics_buttons: SuppressedButtons,
+    pub(crate) screenshot_buttons: SuppressedButtons,
+    pub(crate) screenshot_touches: SuppressedReleases<smithay::backend::input::TouchSlot>,
     pub(crate) basics_touches: SuppressedReleases<smithay::backend::input::TouchSlot>,
     pub(crate) wheel_accumulator: WheelAccumulator,
     pub(crate) field_arrange: super::arrange::ArrangeTransactions,
@@ -36,6 +38,8 @@ impl Default for InteractionState {
             suppressed_buttons: SuppressedButtons::default(),
             suppressed_keys: SuppressedKeys::default(),
             basics_buttons: SuppressedButtons::default(),
+            screenshot_buttons: SuppressedButtons::default(),
+            screenshot_touches: SuppressedReleases::default(),
             basics_touches: SuppressedReleases::default(),
             wheel_accumulator: WheelAccumulator::default(),
             field_arrange: super::arrange::ArrangeTransactions::default(),

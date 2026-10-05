@@ -1443,7 +1443,7 @@ impl<D: SessionDriver> KeyboardShortcutsInhibitHandler for Session<D> {
 }
 
 impl<D: SessionDriver> SelectionHandler for Session<D> {
-    type SelectionUserData = ();
+    type SelectionUserData = crate::wayland::screenshot_clipboard::SelectionData;
 
     #[cfg(feature = "xwayland")]
     fn new_selection(
@@ -1456,16 +1456,27 @@ impl<D: SessionDriver> SelectionHandler for Session<D> {
             .update_selection(target, source.map(|source| source.mime_types()));
     }
 
-    #[cfg(feature = "xwayland")]
     fn send_selection(
         &mut self,
         target: smithay::wayland::selection::SelectionTarget,
         mime_type: String,
         fd: std::os::fd::OwnedFd,
         _seat: Seat<Self>,
-        _user_data: &(),
+        user_data: &Self::SelectionUserData,
     ) {
-        self.xwayland.request_selection(target, mime_type, fd);
+        match user_data {
+            crate::wayland::screenshot_clipboard::SelectionData::Png(png) => {
+                if target == smithay::wayland::selection::SelectionTarget::Clipboard
+                    && mime_type == "image/png"
+                {
+                    crate::wayland::screenshot_clipboard::send(png.clone(), fd);
+                }
+            }
+            crate::wayland::screenshot_clipboard::SelectionData::X11 => {
+                #[cfg(feature = "xwayland")]
+                self.xwayland.request_selection(target, mime_type, fd);
+            }
+        }
     }
 }
 

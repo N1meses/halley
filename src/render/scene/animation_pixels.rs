@@ -296,3 +296,148 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
         "{comparisons} local-animation GLES comparisons passed, buffer ages 1-3, max permitted channel error=1/255"
     );
 }
+
+#[test]
+#[ignore = "requires surfaceless GLES; run with LIBGL_ALWAYS_SOFTWARE=1 and --ignored"]
+fn screenshot_preview_pixels_and_fade_match_full_repaint() {
+    use halley_config::NotificationPosition::*;
+    let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
+    let context = EGLContext::new(&display).unwrap();
+    let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+    let actual_output = output("actual");
+    let reference_output = output("reference");
+    let directory =
+        std::env::temp_dir().join(format!("halley-preview-pixels-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("test.png");
+    let pixels = [30, 160, 210, 255].repeat(160 * 90);
+    image::save_buffer(&path, &pixels, 160, 90, image::ColorType::Rgba8).unwrap();
+    let preview = crate::capture::preview::prepare(path.clone(), 160, 90, pixels).unwrap();
+    let mut comparisons = 0;
+    for position in [
+        TopLeft,
+        TopCenter,
+        TopRight,
+        BottomLeft,
+        BottomCenter,
+        BottomRight,
+    ] {
+        for buffers in 1..=3 {
+            let config = halley_config::Overlays {
+                notifications: halley_config::Notifications {
+                    position,
+                    offset_x: -12,
+                    offset_y: 16,
+                    success_duration_ms: 300,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut overlays = OverlayManager::default();
+            overlays.show_screenshot_saved("actual".into(), &directory, 300, Duration::ZERO);
+            overlays.attach_screenshot_preview(Some(preview.clone()));
+            let mut actual_resources = SceneResources::new();
+            let mut reference_resources = SceneResources::new();
+            let font = halley_config::Font {
+                size: 16,
+                ..Default::default()
+            };
+            actual_resources.text.reload_font(&font);
+            reference_resources.text.reload_font(&font);
+            let mut targets: Vec<GlesTexture> = (0..buffers)
+                .map(|_| {
+                    renderer
+                        .create_buffer(Fourcc::Abgr8888, SIZE.into())
+                        .unwrap()
+                })
+                .collect();
+            let mut reference = renderer
+                .create_buffer(Fourcc::Abgr8888, SIZE.into())
+                .unwrap();
+            let mut tracker = OutputDamageTracker::new(SIZE, 1.0, Transform::Normal);
+            for tick in 0..42 {
+                let now = Duration::from_millis(tick as u64 * 15);
+                overlays.wakeup(now);
+                let snapshot = overlays.snapshot("actual", now);
+                let scene = actual_resources.scene(
+                    &mut renderer,
+                    &actual_output,
+                    snapshot.clone(),
+                    &config,
+                    None,
+                );
+                let age = if tick < buffers { 0 } else { buffers };
+                let (actual, _) = read_pixels(
+                    &mut renderer,
+                    &mut targets[tick % buffers],
+                    &mut tracker,
+                    &scene,
+                    age,
+                );
+                if tick == 12 {
+                    let layout = crate::shell::screenshot::layout(
+                        Rectangle::from_size(SIZE.into()),
+                        config.notifications,
+                        1.0,
+                        font.size,
+                    );
+                    let x = layout.preview.loc.x + layout.preview.size.w / 2;
+                    let y = layout.preview.loc.y + layout.preview.size.h / 2;
+                    let start = ((y * SIZE.0 + x) * 4) as usize;
+                    assert_eq!(
+                        &actual[start..start + 4],
+                        &[30, 160, 210, 255],
+                        "preview channels and position"
+                    );
+                    if position == TopRight
+                        && buffers == 1
+                        && let Ok(path) = std::env::var("HALLEY_SCREENSHOT_TEST_RENDER")
+                    {
+                        image::save_buffer(
+                            path,
+                            &actual,
+                            SIZE.0 as u32,
+                            SIZE.1 as u32,
+                            image::ColorType::Rgba8,
+                        )
+                        .unwrap();
+                    }
+                }
+                let reference_scene = reference_resources.scene(
+                    &mut renderer,
+                    &reference_output,
+                    snapshot,
+                    &config,
+                    None,
+                );
+                let (expected, _) = read_pixels(
+                    &mut renderer,
+                    &mut reference,
+                    &mut OutputDamageTracker::new(SIZE, 1.0, Transform::Normal),
+                    &reference_scene,
+                    0,
+                );
+                let max_error = actual
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(
+                    max_error <= 1,
+                    "position={position:?} buffers={buffers} tick={tick} max_error={max_error}"
+                );
+                comparisons += 1;
+            }
+            assert!(
+                overlays
+                    .snapshot("actual", Duration::from_millis(600))
+                    .notification
+                    .is_none()
+            );
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+    eprintln!("screenshot preview: {comparisons} rendered frame comparisons");
+}

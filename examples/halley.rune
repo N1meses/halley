@@ -353,6 +353,9 @@ overlays:
 
   notifications:
     position "top-center"
+    # Offset from the selected position; positive moves right/down.
+    offset-x 0
+    offset-y 0
     success-duration-ms 4000
     error-duration-ms 9000
   end

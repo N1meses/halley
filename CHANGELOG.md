@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Show a screenshot preview with Copy, Open, and dismiss controls after native
+  captures. Copy provides the PNG image to Wayland and XWayland applications;
+  hovering keeps the card visible, and clipboard contents outlive the card.
+- Add signed `overlays.notifications.offset-x` and `offset-y` settings relative
+  to the selected position, both defaulting to zero in bootstrap configs.
 - Save autostart command output and exit status in private, persistent logs
   under `$XDG_STATE_HOME/halley/autostart`, with three generations capped at
   1 MiB each per command. Detached loggers preserve service independence from
