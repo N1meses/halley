@@ -12,12 +12,18 @@ pub struct EncodeJob {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    pub preview: bool,
 }
 
 /// The outcome of an [`EncodeJob`], delivered back on the compositor loop.
+pub struct EncodedCapture {
+    pub path: PathBuf,
+    pub preview: Option<std::sync::Arc<super::preview::ScreenshotPreview>>,
+}
+
 pub struct EncodeDone {
     pub id: u64,
-    pub result: Result<PathBuf, String>,
+    pub result: Result<EncodedCapture, String>,
 }
 
 /// Off-loop PNG encoder.
@@ -51,6 +57,20 @@ impl ScreenshotEncoder {
                         job.height,
                         &job.pixels,
                     )
+                    .map(|path| {
+                        let preview = job
+                            .preview
+                            .then(|| {
+                                super::preview::prepare(
+                                    path.clone(),
+                                    job.width,
+                                    job.height,
+                                    job.pixels,
+                                )
+                            })
+                            .flatten();
+                        EncodedCapture { path, preview }
+                    })
                     .map_err(|err| err.to_string());
                     if done_tx.send(EncodeDone { id: job.id, result }).is_err() {
                         break;
@@ -76,6 +96,7 @@ impl ScreenshotEncoder {
         width: u32,
         height: u32,
         pixels: Vec<u8>,
+        preview: bool,
     ) -> Result<u64, String> {
         self.next_id = self.next_id.wrapping_add(1);
         let id = self.next_id;
@@ -86,6 +107,7 @@ impl ScreenshotEncoder {
                 width,
                 height,
                 pixels,
+                preview,
             })
             .map_err(|_| "screenshot encoder thread is gone".to_string())?;
         Ok(id)
@@ -112,7 +134,7 @@ mod tests {
             .expect("spawn encoder");
 
         let id = encoder
-            .submit(directory.clone(), 2, 2, vec![255u8; 2 * 2 * 4])
+            .submit(directory.clone(), 2, 2, vec![255u8; 2 * 2 * 4], true)
             .expect("submit");
 
         let mut done = Vec::new();
@@ -127,7 +149,11 @@ mod tests {
 
         assert_eq!(done.len(), 1, "expected exactly one completion");
         assert_eq!(done[0].id, id);
-        let path = done[0].result.as_ref().expect("encode succeeded");
+        let capture = done[0].result.as_ref().expect("encode succeeded");
+        let path = &capture.path;
+        let preview = capture.preview.as_ref().expect("preview prepared");
+        assert_eq!(preview.size, (2, 2));
+        assert_eq!(&*preview.png, std::fs::read(path).unwrap());
         assert!(path.is_file(), "{path:?} should exist");
         assert!(std::fs::metadata(path).expect("metadata").len() > 0);
 

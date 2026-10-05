@@ -84,6 +84,7 @@ render_elements! {
     Closing=smithay::backend::renderer::element::texture::TextureRenderElement<
         smithay::backend::renderer::gles::GlesTexture
     >,
+    ScreenshotPreview=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
     CaptureOverlay=super::overlays::capture::CaptureOverlayElement,
     SourceChooser=super::overlays::source_chooser::SourceChooserElement,
     Border=SolidColorRenderElement,

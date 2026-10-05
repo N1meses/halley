@@ -15,6 +15,7 @@ pub mod layer_shell;
 pub mod permissions;
 pub mod popup;
 pub mod presentation;
+pub(crate) mod screenshot_clipboard;
 pub mod selection;
 pub mod session_lock;
 pub mod text_input;

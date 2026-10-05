@@ -268,7 +268,7 @@ pub fn elements(
             renderer,
             screen,
             notification,
-            config.notifications.position,
+            config.notifications,
             visuals,
             node_renderer,
             ui_text,
@@ -436,12 +436,24 @@ fn notification_elements(
     renderer: &mut GlesRenderer,
     screen: Rectangle<i32, Physical>,
     notification: crate::shell::overlay::NotificationSnapshot,
-    position: halley_config::NotificationPosition,
+    config: halley_config::Notifications,
     visuals: OverlayVisuals,
     node_renderer: &mut NodeRenderer,
     ui_text: &mut UiTextRenderer,
     elements: &mut Vec<SceneElement>,
 ) -> Result<(), Box<dyn Error>> {
+    if notification.screenshot.is_some() {
+        return super::screenshot::elements(
+            renderer,
+            screen,
+            notification,
+            config,
+            visuals,
+            node_renderer,
+            ui_text,
+            elements,
+        );
+    }
     let max_text_width = ((screen.size.w as f32 * 0.70).round() as i32 - 32).max(80);
     let color = match notification.kind {
         crate::shell::overlay::NotificationKind::Success => visuals.text,
@@ -456,27 +468,13 @@ fn notification_elements(
     )?;
     let card =
         Rectangle::<i32, Physical>::new((0, 0).into(), (text_size.w + 32, text_size.h + 16).into());
-    let margin = 24;
-    let slide = ((1.0 - notification.mix) * 8.0).round() as i32;
-    let x = match position {
-        halley_config::NotificationPosition::TopLeft
-        | halley_config::NotificationPosition::BottomLeft => margin,
-        halley_config::NotificationPosition::TopCenter
-        | halley_config::NotificationPosition::BottomCenter => (screen.size.w - card.size.w) / 2,
-        halley_config::NotificationPosition::TopRight
-        | halley_config::NotificationPosition::BottomRight => screen.size.w - card.size.w - margin,
-    };
-    let y = match position {
-        halley_config::NotificationPosition::TopLeft
-        | halley_config::NotificationPosition::TopCenter
-        | halley_config::NotificationPosition::TopRight => margin - slide,
-        halley_config::NotificationPosition::BottomLeft
-        | halley_config::NotificationPosition::BottomCenter
-        | halley_config::NotificationPosition::BottomRight => {
-            screen.size.h - card.size.h - margin + slide
-        }
-    };
-    let card = Rectangle::new((x, y).into(), card.size);
+    let card = crate::shell::screenshot::notification_rect(
+        Rectangle::<i32, Logical>::from_size(screen.size.to_logical(1)),
+        card.size.to_logical(1),
+        config,
+        notification.mix,
+    )
+    .to_physical(1);
     if let Some(text) = ui_text.element(
         renderer,
         (
@@ -672,7 +670,7 @@ fn zoom_indicator_card_rect(
     Rectangle::new((x, y).into(), card_size)
 }
 
-fn fit_middle(
+pub(super) fn fit_middle(
     renderer: &mut GlesRenderer,
     ui_text: &mut UiTextRenderer,
     value: &str,

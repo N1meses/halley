@@ -212,6 +212,14 @@ where
     ) else {
         return;
     };
+    if let Some(hit) = super::screenshot::hit(session, screen) {
+        session
+            .interactions
+            .screenshot_touches
+            .suppress(event.slot());
+        super::screenshot::activate(session, hit);
+        return;
+    }
     let Some(route) = route(session, screen) else {
         return;
     };
@@ -291,6 +299,14 @@ where
     D: SessionDriver,
     B: InputBackend,
 {
+    if session
+        .interactions
+        .screenshot_touches
+        .contains(event.slot())
+    {
+        return;
+    }
+
     let Some(screen) = screen_position(
         &session.settings.input,
         &session.wayland,
@@ -366,6 +382,13 @@ where
     D: SessionDriver,
     B: InputBackend,
 {
+    if session
+        .interactions
+        .screenshot_touches
+        .release_is_suppressed(event.slot())
+    {
+        return;
+    }
     if let Some(decoration) = session.touch.finish_decoration(event.slot()) {
         session.interactions.titlebar_pressed = None;
         let activates = route(session, decoration.screen).is_some_and(|route| {
@@ -415,6 +438,7 @@ fn frame<D: SessionDriver>(session: &mut Session<D>) {
 }
 
 pub(crate) fn cancel_all<D: SessionDriver>(session: &mut Session<D>) {
+    session.interactions.screenshot_touches.clear();
     let provisional_closes = session
         .touch
         .decorations

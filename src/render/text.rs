@@ -90,6 +90,10 @@ impl UiTextRenderer {
         }
     }
 
+    pub fn font_size(&self) -> u16 {
+        configured_font_size(&self.font)
+    }
+
     /// Resets per-frame label numbering and ages out unused identities.
     pub fn begin_scene(&mut self) {
         self.occurrences.clear();

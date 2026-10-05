@@ -23,6 +23,8 @@ overlays:
 
   notifications:
     position "top-center"
+    offset-x 0
+    offset-y 0
     success-duration-ms 4000
     error-duration-ms 9000
   end
@@ -69,9 +71,25 @@ Notification positions are `top-left`, `top-center`, `top-right`,
 `bottom-left`, `bottom-center`, and `bottom-right`. Durations are positive
 milliseconds. The renderer builds every card at its final pixel dimensions,
 so changing its radius or output scale does not stretch a small blurred texture.
-After a native screenshot is saved, a success notification shows its destination
-directory for `success-duration-ms`. The one-time automatic-decay explanation
-(see below) uses the same surface and the same `success-duration-ms`.
+`offset-x` and `offset-y` are signed pixel offsets from the selected notification
+position. Both default to `0`, including generated/bootstrap configurations.
+Positive values move right/down; negative values move left/up. They apply to
+all notification cards and can be changed through normal configuration reload.
+
+After a screenshot is saved from the native Print menu or `halleyctl capture`,
+a notification shows an aspect-preserving image preview, its destination
+directory, and **Copy** and **Open** buttons. Copy places the actual PNG image
+on the clipboard for pasting into applications; the clipboard remains available after the card disappears.
+Open launches the saved image with `xdg-open`, using the system's image viewer.
+Pointer clicks and touches on the card are consumed without changing keyboard
+focus or reaching the window beneath it.
+Existing application drags and pointer constraints retain their input ownership.
+
+The card stays visible while hovered, then restarts `success-duration-ms` when
+the pointer leaves. Other notifications retain their normal timeout. The
+one-time automatic-decay explanation (see below) uses the same notification
+position, offsets, and `success-duration-ms`. Portal screenshot requests
+return their saved path to the requesting application without displaying this local card.
 
 ## Zoom indicator
 

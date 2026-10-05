@@ -225,6 +225,14 @@ pub(super) fn route_client<D: SessionDriver>(
         },
         session.pointer.position(),
     )?;
+    if super::screenshot::hit(session, Point::from(session.pointer.position())).is_some() {
+        route.location = Point::from(session.pointer.position());
+        route.focus = None;
+        route.target = crate::input::pointer::PointerTarget::Background;
+        route.visual_geometry = None;
+        route.is_desktop_popup = false;
+        return Some(route);
+    }
     let output_geometry = session.wayland.space.output_geometry(&route.output)?;
     let camera = session.cameras.get(&route.output.name())?;
     let cluster_exclusive = crate::presentation::window::cluster_exclusive_presentation(

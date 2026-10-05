@@ -1,6 +1,7 @@
 pub mod encoder;
 pub mod menu;
 pub mod picker;
+pub(crate) mod preview;
 pub mod screencast;
 mod screenshot;
 pub mod source_chooser;
@@ -883,7 +884,13 @@ fn queue_capture<D: SessionDriver>(
                 || -> Box<dyn std::error::Error> { "screenshot encoder is not running".into() },
             )?;
             encoder
-                .submit(directory, image.width, image.height, image.pixels)
+                .submit(
+                    directory,
+                    image.width,
+                    image.height,
+                    image.pixels,
+                    matches!(&reply, PendingCaptureReply::Local { .. }),
+                )
                 .map_err(|err| -> Box<dyn std::error::Error> { err.into() })
         });
     match submitted {
@@ -896,19 +903,20 @@ fn queue_capture<D: SessionDriver>(
 
 /// What to do once a queued screenshot finishes encoding.
 pub enum PendingCaptureReply {
-    Local { output_name: String },
+    Local {
+        output_name: String,
+        reply: Option<crate::ipc::ReplySender>,
+    },
     Ipc(crate::ipc::ReplySender),
 }
 
 impl From<PendingCapture> for PendingCaptureReply {
     fn from(pending: PendingCapture) -> Self {
         match pending {
-            PendingCapture::Local { menu, reply } => reply.map_or_else(
-                || Self::Local {
-                    output_name: menu.output_name().to_string(),
-                },
-                Self::Ipc,
-            ),
+            PendingCapture::Local { menu, reply } => Self::Local {
+                output_name: menu.output_name().to_string(),
+                reply,
+            },
             PendingCapture::Screenshot { reply, .. } => Self::Ipc(reply),
             PendingCapture::Source { .. } => {
                 unreachable!("source selection returned a screenshot target")
@@ -932,24 +940,42 @@ pub fn finish_encode<D: SessionDriver>(
 fn finish_capture_reply<D: SessionDriver>(
     session: &mut Session<D>,
     reply: PendingCaptureReply,
-    result: Result<PathBuf, String>,
+    result: Result<encoder::EncodedCapture, String>,
 ) {
     match reply {
-        PendingCaptureReply::Local { output_name } => match result {
-            Ok(path) => {
-                eventline::info!("screenshot saved to {}", path.display());
-                let directory = path.parent().unwrap_or(path.as_path()).to_path_buf();
-                session.shell.overlays.show_screenshot_saved(
-                    output_name,
-                    &directory,
-                    session.settings.overlays.notifications.success_duration_ms,
-                    crate::frame_clock::monotonic_now(),
+        PendingCaptureReply::Local { output_name, reply } => {
+            if let Some(reply) = reply {
+                reply_with_capture(
+                    reply,
+                    result
+                        .as_ref()
+                        .map(|capture| capture.path.clone())
+                        .map_err(Clone::clone),
                 );
-                session.request_redraw();
             }
-            Err(err) => eventline::error!("screenshot failed: {err}"),
-        },
-        PendingCaptureReply::Ipc(reply) => reply_with_capture(reply, result),
+            match result {
+                Ok(capture) => {
+                    let path = capture.path;
+                    eventline::info!("screenshot saved to {}", path.display());
+                    let directory = path.parent().unwrap_or(path.as_path()).to_path_buf();
+                    session.shell.overlays.show_screenshot_saved(
+                        output_name,
+                        &directory,
+                        session.settings.overlays.notifications.success_duration_ms,
+                        crate::frame_clock::monotonic_now(),
+                    );
+                    session
+                        .shell
+                        .overlays
+                        .attach_screenshot_preview(capture.preview);
+                    session.request_redraw();
+                }
+                Err(err) => eventline::error!("screenshot failed: {err}"),
+            }
+        }
+        PendingCaptureReply::Ipc(reply) => {
+            reply_with_capture(reply, result.map(|capture| capture.path))
+        }
     }
 }
 
@@ -1002,6 +1028,7 @@ fn desktop_bounds(space: &Space<Window>) -> Option<Rectangle<i32, Logical>> {
 }
 
 fn begin_modal_capture<D: SessionDriver>(session: &mut Session<D>) {
+    session.shell.overlays.clear_screenshot();
     let moving_node = match &session.interactions.grab {
         crate::input::grab::Grab::MoveNode { id, .. } => Some(*id),
         _ => None,
