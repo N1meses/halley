@@ -166,6 +166,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Start direct TTY graphical sessions through `halley-direct-session.target`,
+  avoiding systemd's refusal to start `graphical-session.target` manually and
+  restoring session-service activation and logout environment cleanup.
 - Keep the cursor updating while moving across a screenshot preview, even when
   its hover state stays unchanged. Only the affected output needs that redraw.
 - Restore portal capture startup by removing the frontend bus-name and executable

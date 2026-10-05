@@ -43,6 +43,7 @@ impl Drop for NativeSession {
             stop.args([
                 "--user",
                 "stop",
+                "halley-direct-session.target",
                 "graphical-session.target",
                 "graphical-session-pre.target",
             ]);
@@ -278,7 +279,14 @@ pub fn notify_ready() {
         // Enqueue rather than wait: services may connect to Wayland before
         // this function returns and the compositor begins dispatching events.
         let mut start = Command::new("systemctl");
-        start.args(["--user", "start", "--no-block", "graphical-session.target"]);
+        // graphical-session.target refuses direct starts. Pull it in through
+        // our own target, without starting halley.service a second time.
+        start.args([
+            "--user",
+            "start",
+            "--no-block",
+            "halley-direct-session.target",
+        ]);
         DIRECT_SESSION_ACTIVE.store(
             run("direct graphical session", &mut start),
             Ordering::SeqCst,

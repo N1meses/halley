@@ -84,8 +84,11 @@ before Halley starts may instead appear on the terminal or in
 `journalctl --user -u halley.service`.
 
 A direct native `halley` or `halley --session` launch also owns the systemd
-graphical-session lifecycle: it starts `graphical-session.target` after its
-listeners are ready and stops session services and clears display variables
+graphical-session lifecycle: it starts `halley-direct-session.target` after its
+listeners are ready. That target pulls in `graphical-session.target`, which
+refuses manual starts, without launching another compositor. Install the direct
+session target alongside the other systemd resources. Halley stops session
+services and clears display variables
 on exit. A managed launch leaves that cleanup to the launcher. Nested sessions
 do not start or stop host session targets. `HALLEY_NO_INIT_INTEGRATION=1`
 disables this target management too.

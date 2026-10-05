@@ -1,0 +1,7 @@
+[Unit]
+Description=Halley graphical session started directly
+BindsTo=graphical-session.target
+Before=graphical-session.target
+Wants=graphical-session-pre.target xdg-desktop-autostart.target
+After=graphical-session-pre.target
+Before=xdg-desktop-autostart.target
