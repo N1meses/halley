@@ -166,6 +166,9 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Clear native output state, then pause DRM devices before releasing GPU
+  access on logout. Leave console restoration to the seat/VT manager instead
+  of replaying the startup DRM snapshot rejected by AMD with `EINVAL`.
 - Start direct TTY graphical sessions through `halley-direct-session.target`,
   avoiding systemd's refusal to start `graphical-session.target` manually and
   restoring session-service activation and logout environment cleanup.

@@ -1322,9 +1322,19 @@ impl TtyBackend {
 
 impl Drop for TtyBackend {
     fn drop(&mut self) {
-        // Smithay clears each output's KMS state on drop. Keep libseat's GPU
-        // access until those surfaces and the device's saved state are gone.
+        // Clear our output KMS state while the seat still grants GPU access.
         self.drm_outputs.clear();
+        // This native desktop owns the seat until logout. Once its outputs
+        // have been cleared, hand the display back to the seat/VT manager
+        // rather than replaying Smithay's startup property snapshot. That
+        // snapshot can reference obsolete framebuffers or mode blobs and
+        // the kernel rejects its restoration with EINVAL on this AMD setup.
+        // Pause only after surface drop: inactive surfaces skip KMS cleanup.
+        // Device pause also prevents notifier-held device references from
+        // issuing a late restoration after GPU access has been released.
+        for gpu in &mut self.gpus {
+            gpu.drm_output_manager.pause();
+        }
         for gpu in self.gpus.drain(..) {
             let TtyGpu {
                 render_node,
