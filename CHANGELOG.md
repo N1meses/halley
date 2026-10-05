@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Advertise `ext_foreign_toplevel_list_v1` and
+  `zwlr_foreign_toplevel_manager_v1` for taskbars and docks to list windows,
+  track their state, and request activation, close, minimize, maximize, and
+  fullscreen through Halley's existing window actions.
 - Show a screenshot preview with Copy and Open controls after native
   captures. Copy provides the PNG image to Wayland and XWayland applications;
   hovering keeps the card visible, and clipboard contents outlive the card.
@@ -87,6 +91,8 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Simplify screenshot previews to Copy and Open controls, removing the close
+  button; previews expire automatically after their configured duration.
 - Keep compositor shortcuts available while exclusive layer-shell surfaces
   have keyboard focus. Session locks and active shortcut inhibitors continue
   to block bindings. Adapted from noervthere's layer-focus fix.
@@ -107,9 +113,8 @@ All notable changes to this project will be documented in this file.
 - Apply window-rule `opacity` to client content and popups only. Titlebars,
   borders, pin badges, and compositor shadows stay fully opaque. Open and
   close animations still fade chrome with the window.
-- Start the systemd session without waiting for a compositor readiness signal,
-  while still reporting executable startup failures. Keep session output and
-  errors in `$XDG_RUNTIME_DIR/halley-session.log` after the service stops.
+- Keep session output and errors in `$XDG_RUNTIME_DIR/halley-session.log`
+  after the service stops, while reporting executable startup failures.
 - Keep directional `Mod+Arrow` Field focus from panning the camera while a
   `Mod+A` arrangement is active on that output.
 - Pause automatic decay for windows in an active Field arrangement; undoing the
@@ -216,10 +221,8 @@ All notable changes to this project will be documented in this file.
 - Deny raw Wayland screen capture, clipboard data control, virtual keyboards,
   and input-method registration by default. Grant each capability separately
   to explicitly approved executable identities at connection admission.
-- Authenticate portal backend calls against the frontend bus owner and executable
-  file identity (including across mount namespaces),
-  pin requests and sessions to their creator, enforce application ownership, and
-  bound session allocation. Remove completed request objects.
+- Pin portal requests and sessions to their creator, enforce application
+  ownership, and bound session allocation. Remove completed request objects.
 - Require explicit approval of a unique D-Bus connection for accessibility
   keyboard monitoring; owning the public Orca bus name no longer grants access.
 - Revert the dedicated synchronized DPMS wake modeset after reports of black
