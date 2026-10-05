@@ -78,12 +78,11 @@ all notification cards and can be changed through normal configuration reload.
 
 After a screenshot is saved from the native Print menu or `halleyctl capture`,
 a notification shows an aspect-preserving image preview, its destination
-directory, and **Copy** and
-**Open** buttons. Copy places the actual PNG image on the clipboard for pasting
-into applications; the clipboard remains available after the card disappears.
+directory, and **Copy** and **Open** buttons. Copy places the actual PNG image
+on the clipboard for pasting into applications; the clipboard remains available after the card disappears.
 Open launches the saved image with `xdg-open`, using the system's image viewer.
-The **×** button dismisses the card. Pointer clicks and touches on the card are
-consumed without changing keyboard focus or reaching the window beneath it.
+Pointer clicks and touches on the card are consumed without changing keyboard
+focus or reaching the window beneath it.
 Existing application drags and pointer constraints retain their input ownership.
 
 The card stays visible while hovered, then restarts `success-duration-ms` when

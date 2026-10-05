@@ -68,7 +68,6 @@ pub fn elements(
     for (rect, label, action) in [
         (layout.copy, "Copy", ScreenshotAction::Copy),
         (layout.open, "Open", ScreenshotAction::Open),
-        (layout.dismiss, "×", ScreenshotAction::Dismiss),
     ] {
         let rect = physical(rect);
         let hovered = snapshot.hovered_action == Some(action);

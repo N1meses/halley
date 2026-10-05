@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Show a screenshot preview with Copy, Open, and dismiss controls after native
+- Show a screenshot preview with Copy and Open controls after native
   captures. Copy provides the PNG image to Wayland and XWayland applications;
   hovering keeps the card visible, and clipboard contents outlive the card.
 - Add signed `overlays.notifications.offset-x` and `offset-y` settings relative
@@ -166,6 +166,8 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Keep the cursor updating while moving across a screenshot preview, even when
+  its hover state stays unchanged. Only the affected output needs that redraw.
 - Restore portal capture startup by removing the frontend bus-name and executable
   gate. Keep chooser consent and request/session ownership, and run blocking
   portal work off the D-Bus executor so capture and cancellation remain responsive.

@@ -5,7 +5,6 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 pub enum ScreenshotAction {
     Copy,
     Open,
-    Dismiss,
 }
 
 pub struct ScreenshotLayout {
@@ -15,7 +14,6 @@ pub struct ScreenshotLayout {
     pub subtitle: Rectangle<i32, Logical>,
     pub copy: Rectangle<i32, Logical>,
     pub open: Rectangle<i32, Logical>,
-    pub dismiss: Rectangle<i32, Logical>,
 }
 
 /// Positive offsets move right/down, regardless of the selected anchor.
@@ -76,7 +74,7 @@ pub fn layout(
     ScreenshotLayout {
         card,
         preview: rect(padding, padding, inner, preview_height),
-        title: rect(padding, title_y, inner - 28, line),
+        title: rect(padding, title_y, inner, line),
         subtitle: rect(padding, title_y + line + 4, inner, line),
         copy: rect(padding, buttons_y, button_width, button_height),
         open: rect(
@@ -85,7 +83,6 @@ pub fn layout(
             button_width,
             button_height,
         ),
-        dismiss: rect(width - padding - 24, title_y - 4, 24, line + 8),
     }
 }
 
@@ -94,7 +91,6 @@ impl ScreenshotLayout {
         [
             (&self.copy, ScreenshotAction::Copy),
             (&self.open, ScreenshotAction::Open),
-            (&self.dismiss, ScreenshotAction::Dismiss),
         ]
         .into_iter()
         .find_map(|(rect, action)| rect.to_f64().contains(point).then_some(action))
@@ -136,7 +132,6 @@ mod tests {
             for (rect, action) in [
                 (moved.copy, ScreenshotAction::Copy),
                 (moved.open, ScreenshotAction::Open),
-                (moved.dismiss, ScreenshotAction::Dismiss),
             ] {
                 let center = rect.loc.to_f64()
                     + Point::from((rect.size.w as f64 / 2.0, rect.size.h as f64 / 2.0));

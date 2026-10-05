@@ -396,17 +396,6 @@ impl OverlayManager {
         }
     }
 
-    pub fn dismiss_screenshot(&mut self, now: Duration) {
-        if let Some(notification) = self
-            .notification
-            .as_mut()
-            .filter(|n| n.screenshot.is_some())
-        {
-            notification.dismissed = Some((now, notification.mix(now)));
-            notification.hovered = false;
-        }
-    }
-
     /// Shows the one-time explanation for the first automatic decay collapse.
     ///
     /// It uses the ordinary non-modal notification surface: it appears on the
@@ -809,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_hover_holds_the_card_and_dismissal_retires_input() {
+    fn screenshot_hover_holds_the_card_and_expiry_retires_input() {
         let mut overlays = OverlayManager::default();
         overlays.show_screenshot_saved(
             "DP-1".into(),
@@ -855,8 +844,6 @@ mod tests {
         overlays.screenshot_hover(false, None, Duration::from_secs(31));
         assert!(overlays.screenshot_accepts_input("DP-1", Duration::from_secs(34)));
         assert!(!overlays.screenshot_accepts_input("DP-1", Duration::from_secs(35)));
-        overlays.dismiss_screenshot(Duration::from_secs(34));
-        assert!(!overlays.screenshot_accepts_input("DP-1", Duration::from_secs(34)));
         overlays.wakeup(Duration::from_secs(36));
         assert!(
             overlays

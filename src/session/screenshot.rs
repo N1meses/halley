@@ -11,6 +11,7 @@ use crate::capture::preview::ScreenshotPreview;
 use crate::shell::screenshot::ScreenshotAction;
 
 pub struct Hit {
+    pub output: smithay::output::Output,
     pub preview: Arc<ScreenshotPreview>,
     pub action: Option<ScreenshotAction>,
 }
@@ -54,6 +55,7 @@ pub fn hit<D: SessionDriver>(session: &Session<D>, position: Point<f64, Logical>
         );
         if layout.card.to_f64().contains(position) {
             return Some(Hit {
+                output: output.clone(),
                 preview,
                 action: layout.action_at(position),
             });
@@ -112,7 +114,6 @@ pub fn activate<D: SessionDriver>(session: &mut Session<D>, hit: Hit) {
                 }
             }
         }
-        Some(ScreenshotAction::Dismiss) => session.shell.overlays.dismiss_screenshot(now),
         None => {}
     }
     session.request_redraw();
@@ -153,6 +154,14 @@ pub fn handle_pointer<D: SessionDriver, B: InputBackend>(
     let Some(hit) = hit else {
         return false;
     };
+    // No client beneath the card receives motion to trigger a surface commit.
+    // Queue every cursor move even when the hovered button is unchanged.
+    if matches!(
+        event,
+        InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
+    ) {
+        session.request_output_redraw(&hit.output);
+    }
     // The route shares this hit test, so clients receive a leave rather than
     // retaining hover/focus beneath the card. Keyboard focus is untouched.
     let time = match event {
