@@ -141,6 +141,7 @@ struct ClusterDeleteConfirmation {
 
 #[derive(Clone, Debug, Default)]
 pub struct OverlayManager {
+    pub(crate) empty_cluster: super::empty_cluster::Prompt,
     exit: bool,
     cluster_delete: Option<ClusterDeleteConfirmation>,
     basics: Option<BasicsCard>,
@@ -193,6 +194,7 @@ pub struct OverlaySnapshot {
     pub notification: Option<NotificationSnapshot>,
     pub zoom_indicator: Option<ZoomIndicatorSnapshot>,
     pub cluster_indicator: Option<ClusterIndicatorSnapshot>,
+    pub empty_cluster: Option<super::empty_cluster::Snapshot>,
 }
 
 impl OverlayManager {
@@ -549,6 +551,7 @@ impl OverlayManager {
 
     pub fn snapshot(&self, output: &str, now: Duration) -> OverlaySnapshot {
         OverlaySnapshot {
+            empty_cluster: self.empty_cluster.snapshot(output),
             exit_mix: self.exit.then_some(1.0),
             confirmation: self.cluster_delete.as_ref().and_then(|confirmation| {
                 (confirmation.output == output).then(|| ConfirmationSnapshot {
@@ -581,12 +584,16 @@ impl OverlayManager {
                     mix: indicator.mix(now),
                 })
             }),
-            cluster_indicator: self.cluster_indicators.get(output).and_then(|indicator| {
-                (!indicator.finished(now)).then(|| ClusterIndicatorSnapshot {
-                    label: indicator.label.clone(),
-                    mix: indicator.mix(now),
-                })
-            }),
+            cluster_indicator: self
+                .cluster_indicators
+                .get(output)
+                .filter(|_| !self.empty_cluster.owns_output(output))
+                .and_then(|indicator| {
+                    (!indicator.finished(now)).then(|| ClusterIndicatorSnapshot {
+                        label: indicator.label.clone(),
+                        mix: indicator.mix(now),
+                    })
+                }),
         }
     }
 

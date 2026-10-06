@@ -275,6 +275,44 @@ pub fn elements(
             &mut elements,
         )?;
     }
+    if let Some(empty) = snapshot.empty_cluster {
+        let title = format!("{} is empty", empty.name.trim());
+        let (title, _) = fit_middle(
+            renderer,
+            ui_text,
+            &title,
+            visuals.text.bytes(),
+            (screen.size.w - 84).max(80),
+        )?;
+        let (shortcut, _) = fit_middle(
+            renderer,
+            ui_text,
+            &empty.shortcut,
+            visuals.text.bytes(),
+            (screen.size.w - 260).max(80),
+        )?;
+        let actions = if empty.armed {
+            vec![
+                (shortcut.as_str(), "press again to delete"),
+                ("Esc", "cancel"),
+            ]
+        } else {
+            vec![(shortcut.as_str(), "press to delete cluster")]
+        };
+        shortcut_card_elements(
+            renderer,
+            screen,
+            1.0,
+            &title,
+            None,
+            &actions,
+            false,
+            visuals,
+            node_renderer,
+            ui_text,
+            &mut elements,
+        )?;
+    }
     if let Some(indicator) = snapshot.cluster_indicator {
         cluster_indicator_elements(
             renderer,
@@ -318,7 +356,35 @@ fn confirmation_elements(
     ui_text: &mut UiTextRenderer,
     elements: &mut Vec<SceneElement>,
 ) -> Result<(), Box<dyn Error>> {
-    let actions = [("Enter", confirm_label), ("Esc", "cancel")];
+    shortcut_card_elements(
+        renderer,
+        screen,
+        mix,
+        title,
+        message,
+        &[("Enter", confirm_label), ("Esc", "cancel")],
+        true,
+        visuals,
+        node_renderer,
+        ui_text,
+        elements,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shortcut_card_elements(
+    renderer: &mut GlesRenderer,
+    screen: Rectangle<i32, Physical>,
+    mix: f32,
+    title: &str,
+    message: Option<&str>,
+    actions: &[(&str, &str)],
+    dim: bool,
+    visuals: OverlayVisuals,
+    node_renderer: &mut NodeRenderer,
+    ui_text: &mut UiTextRenderer,
+    elements: &mut Vec<SceneElement>,
+) -> Result<(), Box<dyn Error>> {
     let title_size = ui_text
         .measure(renderer, title, visuals.text.bytes())?
         .unwrap_or((0, 0).into());
@@ -330,7 +396,7 @@ fn confirmation_elements(
     let mut action_width = 0;
     let mut action_height = 0;
     let mut action_sizes = Vec::new();
-    for (key, label) in actions {
+    for &(key, label) in actions {
         let key_size = ui_text
             .measure(renderer, key, visuals.text.bytes())?
             .unwrap_or((0, 0).into());
@@ -422,12 +488,14 @@ fn confirmation_elements(
         visuals.fill,
         0.97 * mix,
     )?));
-    let color = backdrop_dim(0.62 * mix);
-    elements.push(SceneElement::Border(crate::render::solid_color_element(
-        node_renderer.active_slot_id(crate::render::node::NodeSlot::ShellBackdrop),
-        screen,
-        color,
-    )));
+    if dim {
+        let color = backdrop_dim(0.62 * mix);
+        elements.push(SceneElement::Border(crate::render::solid_color_element(
+            node_renderer.active_slot_id(crate::render::node::NodeSlot::ShellBackdrop),
+            screen,
+            color,
+        )));
+    }
     Ok(())
 }
 

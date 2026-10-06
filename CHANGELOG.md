@@ -4,9 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [0.8.0] - 2026-10-05
 
-- Show the non-modal basics introduction once per compositor version, including for existing configurations; preserve dismissal when reinstalling the same version.
-
 ### Added
+- Delete an empty active cluster with two deliberate presses of the configured
+  close shortcut. Its non-modal card shows the resolved binding; Escape cancels,
+  and launchers, interactive overlays, new members, or leaving the cluster clear
+  confirmation. Held keys cannot confirm deletion.
 - Share text shaping, glyph rasterization, and cached notification layout with
   Halley UI. Native GPU rendering, Wayland buffers, and the blur-capable Smithay
   revision remain in Halley.
@@ -69,7 +71,7 @@ All notable changes to this project will be documented in this file.
 - Add compact startup cluster declarations under `autostart`, with persistent
   named cores, optional layout/output selection, empty `members []` support,
   and launch attribution for native Wayland and XWayland windows.
-- Flash an empty active cluster's name and layout at the center of its output;
+- Show an empty active cluster's name and close shortcut in a centered card;
   populated clusters reveal their windows directly without an activation card.
   Explicit layout changes still flash the updated name and layout.
 - Delete runtime workspaces from a bloomed core's compact close control or by
@@ -82,16 +84,13 @@ All notable changes to this project will be documented in this file.
   window rectangle. The shader replaces scale and fade. Node collapse stays on
   the CPU path. A missing or invalid shader is logged once and the configured
   type draws instead. See `docs/window-shaders.md`.
-- Show a one-time **Halley basics** card on a freshly generated configuration's
-  first native session: the Field-first mental model plus only the five
-  essential operations (`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange,
-  `Mod+N` collapse/restore, `Mod+O` Apogee). It reuses the compositor-owned
-  overlay styling, is non-modal (only `Enter`, `Escape`, and the first pointer
-  press or touch are captured), and records its dismissal in
-  `$XDG_STATE_HOME/halley/state.rune`. Existing configurations, explicitly
-  selected paths, and nested `--winit` sessions never show it automatically.
-  Reopen it any time from Halley Lift's new **Show Halley basics** action or with
-  `halleyctl basics`. See `docs/overlays.md`.
+- Show the non-modal **Halley basics** introduction once per compositor version,
+  including for existing configurations. It explains the Field and the five
+  essential operations, records dismissal in
+  `$XDG_STATE_HOME/halley/state.rune`, and stays dismissed when reinstalling the
+  same version. Nested `--winit` sessions never show it automatically. Reopen it
+  from Lift's **Show Halley basics** action or with `halleyctl basics`.
+  See `docs/overlays.md`.
 - Explain the first automatic decay collapse once, in a non-modal notice:
   `<Application> was collapsed into a node. Click the node or press Mod+N to
   restore it.` The name is the collapsed window's title, falling back to its
@@ -183,6 +182,12 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Keep focus inside the active cluster when its final window closes. Closing an
+  empty cluster can no longer reach a hidden Field window, including through
+  remembered per-output focus.
+- Suppress the specific XWayland attribute-lookup race for helper windows that
+  have already disappeared, preventing harmless warnings from flooding either
+  log. Other X11, connection, and device failures remain visible.
 - Render custom opening shaders from the complete live window scene, including
   backdrop blur, themed shadows, and independently faded client content and
   decorations. The final shader frame now matches normal composition instead

@@ -9,10 +9,10 @@ either tiling or stacking layout. A cluster remains valid when it has no
 members: closing the final member leaves its name, slot, layout, and core
 available for later use.
 
-Opening or selecting an empty cluster briefly shows a centered `name · layout`
-label so the otherwise blank workspace remains identifiable. A populated
-cluster reveals its windows without showing that activation label. Explicitly
-changing a cluster's layout still flashes its updated name and layout.
+An active empty cluster shows a centered, non-modal hint naming the cluster
+and the configured close shortcut. A populated cluster reveals its windows
+without showing that hint. Explicitly changing a populated cluster's layout
+still flashes its updated name and layout.
 
 A collapsed core's hover label prefers the right side, then searches the other
 sides and corners for space not occupied by a visible window, ordinary node, or
@@ -32,7 +32,18 @@ Rest a pointer on a collapsed core until its bloom opens. Two compact controls
 appear beside it: close above edit. Select close, or give the collapsed core
 logical focus and press `Mod+Q`, to delete the runtime workspace.
 
-An empty workspace disappears immediately. A populated workspace asks for
+You can also delete an empty cluster while inside it: press the configured
+`close-focused` keyboard shortcut once to arm deletion, release the key, then
+press it again to confirm and return to the Field. `Esc` cancels confirmation.
+The hint shows the actual resolved binding, including custom modifiers. Holding
+the shortcut cannot confirm. Opening a launcher or interactive overlay hides
+the hint and clears confirmation; it returns unarmed if the cluster is still
+empty when that interface closes. A new member, another action, or leaving the
+cluster also clears confirmation. No close shortcut is advertised if none is
+bound in the current context.
+
+An empty workspace deleted through its collapsed core disappears immediately.
+A populated workspace asks for
 confirmation first and explains that its windows will return to the Field.
 Confirming removes the workspace, its slot, and its synthetic core without
 closing any application; window geometry and focus return to ordinary Field
