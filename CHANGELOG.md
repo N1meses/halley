@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Remove X11 windows, collapsed nodes, cluster membership, and stale focus when
+  the XWayland window-manager connection is lost. Match destroyed surfaces by
+  their shared identity so cleanup still works after Smithay marks them dead.
+
 ## [0.8.0] - 2026-10-05
 
 ### Added

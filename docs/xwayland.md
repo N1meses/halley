@@ -140,7 +140,18 @@ inert example configuration, and use a disposable X11 client. Verify:
 5. `xrandr --listmonitors` shows no compositor-appointed primary output;
 6. after Field pan/zoom and a fullscreen cycle, X root geometry matches the
    settled visual root origin even when the stored Field position differs;
-7. client exit empties the client/stack lists without protocol warning bursts.
+7. client exit empties the client/stack lists without protocol warning bursts;
+8. losing the disposable XWayland server removes its mapped and collapsed
+   windows, cluster members, and focus targets without removing native clients.
+
+The connection-loss regression starts its own nested compositor with a private
+runtime directory and terminates only that compositor's XWayland child. It
+checks both cluster layouts, collapsed Field windows, native-client survival,
+and focus after disconnect. Run it from an existing Wayland session:
+
+```sh
+cargo test -p halley --test xwayland_disconnect -- --ignored --nocapture
+```
 
 Run the normal repository gates after the nested check:
 

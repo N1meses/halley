@@ -65,7 +65,7 @@ fn window_for_surface(
         .find(|window| {
             window
                 .x11_surface()
-                .is_some_and(|candidate| candidate == surface)
+                .is_some_and(|candidate| same_surface(candidate, surface))
         })
         .cloned()
         .or_else(|| {
@@ -75,10 +75,16 @@ fn window_for_surface(
                     record
                         .window
                         .x11_surface()
-                        .is_some_and(|candidate| candidate == surface)
+                        .is_some_and(|candidate| same_surface(candidate, surface))
                 })
                 .map(|record| record.window.clone())
         })
+}
+
+fn same_surface(left: &X11Surface, right: &X11Surface) -> bool {
+    // Smithay's PartialEq intentionally stops matching after destruction.
+    // Clones still share this allocation, including during teardown and XID reuse.
+    std::ptr::eq(left.user_data(), right.user_data())
 }
 
 fn window_identity(surface: &X11Surface) -> Option<WindowIdentity> {
