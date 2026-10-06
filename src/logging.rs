@@ -84,7 +84,9 @@ impl<S: tracing::Subscriber> Layer<S> for EventlineLayer {
             return;
         }
         let target = event.metadata().target();
-        if repeated_smithay_warning(target, &message) {
+        if destroyed_x11_attribute_race(target, &message)
+            || repeated_smithay_warning(target, &message)
+        {
             return;
         }
         match *event.metadata().level() {
@@ -114,6 +116,19 @@ fn known_benign_smithay_warning(target: &str, message: &str) -> bool {
             && message.starts_with("Failed to handle X11 event")
             && message.contains("error_kind: Drawable")
             && message.contains("request_name: Some(\"GetGeometry\")"))
+}
+
+/// A helper window can disappear between CreateNotify and Smithay's attribute
+/// lookup. It returns before registering the window, leaving no stale state;
+/// a native create/destroy fixture confirms this. Drop only this exact race so
+/// it cannot flood either log. Other X11 requests and connection errors remain
+/// visible, as do device failures.
+fn destroyed_x11_attribute_race(target: &str, message: &str) -> bool {
+    target == "smithay::xwayland::xwm"
+        && message.starts_with("Failed to handle X11 event")
+        && message.contains("error_kind: Window, error_code: 3,")
+        && message.contains("major_opcode: 3,")
+        && message.contains("request_name: Some(\"GetWindowAttributes\")")
 }
 
 /// Keep Smithay's structured context. Its XWM failure event puts the useful
@@ -199,7 +214,7 @@ pub fn flush() {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventFields, known_benign_smithay_warning};
+    use super::{EventFields, destroyed_x11_attribute_race, known_benign_smithay_warning};
 
     #[test]
     fn only_the_known_new_kernel_drm_fallback_is_downgraded() {
@@ -229,6 +244,29 @@ mod tests {
             "Failed to handle X11 event id=0 err=BadWindow"
         ));
         assert!(!known_benign_smithay_warning("some::other::target", race));
+    }
+
+    #[test]
+    fn destroyed_window_attribute_race_is_suppressed_but_other_x11_failures_stay_visible() {
+        let race = concat!(
+            "Failed to handle X11 event id=0 err=X11Error(X11Error { ",
+            "error_kind: Window, error_code: 3, sequence: 20, bad_value: 30, ",
+            "minor_opcode: 0, major_opcode: 3, extension_name: None, ",
+            "request_name: Some(\"GetWindowAttributes\") })"
+        );
+        assert!(destroyed_x11_attribute_race("smithay::xwayland::xwm", race));
+        assert!(!destroyed_x11_attribute_race("some::other::target", race));
+        for other in [
+            race.replace("GetWindowAttributes", "ConfigureWindow"),
+            race.replace("error_code: 3", "error_code: 10"),
+            race.replace("major_opcode: 3,", "major_opcode: 12,"),
+            "Failed to handle X11 event id=0 err=ConnectionError".into(),
+        ] {
+            assert!(!destroyed_x11_attribute_race(
+                "smithay::xwayland::xwm",
+                &other
+            ));
+        }
     }
 
     #[test]

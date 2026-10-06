@@ -178,6 +178,39 @@ pub(crate) fn dispatch<D: SessionDriver>(
     held_keycode: Option<u32>,
     origin: DispatchOrigin,
 ) {
+    let now = crate::frame_clock::monotonic_now();
+    super::super::empty_cluster::sync(session, now);
+    if action == halley_config::Action::CloseFocusedWindow
+        && origin == DispatchOrigin::Keyboard
+        && session.shell.overlays.empty_cluster.visible()
+    {
+        // Repeated timer actions have no physical press and cannot arm/delete.
+        if let Some(keycode) = held_keycode {
+            match session.shell.overlays.empty_cluster.press(keycode) {
+                crate::shell::empty_cluster::Press::Delete(cluster) => {
+                    // Recheck membership immediately before destructive action.
+                    if session.clusters.member_ids(cluster).is_empty() {
+                        super::super::dissolve_cluster(session, cluster);
+                    }
+                }
+                crate::shell::empty_cluster::Press::Armed => session.request_redraw(),
+                crate::shell::empty_cluster::Press::Ignored => {}
+            }
+        }
+        return;
+    }
+    if action != halley_config::Action::CloseFocusedWindow {
+        if session.shell.overlays.empty_cluster.cancel() {
+            session.request_redraw();
+        }
+        if matches!(
+            action,
+            halley_config::Action::Spawn(_) | halley_config::Action::OpenTerminal
+        ) {
+            session.shell.overlays.empty_cluster.suspend(now);
+            session.request_redraw();
+        }
+    }
     if origin == DispatchOrigin::Keyboard
         && action_hides_cursor_for_keyboard_navigation(&action)
         && session.cursor_policy.keyboard_navigation()

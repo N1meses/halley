@@ -190,6 +190,15 @@ fn repeat_tick<D: SessionDriver>(session: &mut Session<D>, generation: u64) -> T
 }
 
 fn repeat_allowed<D: SessionDriver>(session: &Session<D>, action: &halley_config::Action) -> bool {
+    // Once the final window is gone, holding its close shortcut must never
+    // turn the repeat timer into a cluster deletion confirmation.
+    if *action == halley_config::Action::CloseFocusedWindow
+        && crate::wayland::focus::selected_output(&session.wayland)
+            .and_then(|output| session.clusters.active_on(&output.name()))
+            .is_some_and(|id| session.clusters.member_ids(id).is_empty())
+    {
+        return false;
+    }
     if session.session_lock.active() || !super::bindings_enabled(session) {
         return false;
     }

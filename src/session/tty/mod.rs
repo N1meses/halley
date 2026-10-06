@@ -1490,6 +1490,7 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
         || overlays.notification.is_some()
         || overlays.zoom_indicator.is_some()
         || overlays.cluster_indicator.is_some()
+        || overlays.empty_cluster.is_some()
     {
         return false;
     }

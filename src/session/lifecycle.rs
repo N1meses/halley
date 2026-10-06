@@ -8,6 +8,7 @@ use crate::wayland::WaylandState;
 
 struct FocusSuccession {
     output: Option<String>,
+    cluster: Option<halley_core::cluster::ClusterId>,
     preferred: Option<WlSurface>,
     pan: halley_config::CloseRestorePan,
     clipboard_return: Option<crate::wayland::clipboard_helper::SavedFocus>,
@@ -139,6 +140,16 @@ fn select_focus_successor(
     )
 }
 
+fn active_cluster_for_closing<D: SessionDriver>(
+    session: &Session<D>,
+    surface: &WlSurface,
+) -> Option<halley_core::cluster::ClusterId> {
+    let member = session.nodes.id_for_surface(surface)?;
+    let cluster = session.clusters.cluster_for_member(member)?;
+    let output = &session.clusters.metadata(cluster)?.output;
+    (session.clusters.active_on(output) == Some(cluster)).then_some(cluster)
+}
+
 fn cluster_focus_successor<D: SessionDriver>(
     session: &Session<D>,
     closing: &WlSurface,
@@ -249,23 +260,27 @@ pub(crate) fn prepare_window_unmap<D: SessionDriver>(
     let focus = (session.wayland.focused_window.as_ref() == Some(surface)).then(|| {
         let output = mapped_managed_window(&session.wayland, surface)
             .and_then(|window| crate::wayland::window_output_name(&window));
+        let cluster = active_cluster_for_closing(session, surface);
         let preferred = session
             .settings
             .field
             .close_restore_focus
             .then(|| {
-                cluster_focus_successor(session, surface).or_else(|| {
+                if cluster.is_some() {
+                    cluster_focus_successor(session, surface)
+                } else {
                     select_focus_successor(
                         &session.wayland,
                         &session.nodes,
                         surface,
                         output.as_deref(),
                     )
-                })
+                }
             })
             .flatten();
         FocusSuccession {
             output,
+            cluster,
             preferred,
             pan: session.settings.field.close_restore_pan,
             clipboard_return: crate::wayland::clipboard_helper::saved_focus(surface),
@@ -353,6 +368,28 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
         return;
     }
 
+    // A workspace keeps focus ownership even after its final client closes.
+    // Never let an empty cluster fall through to Field close succession: those
+    // windows are hidden and must not receive the next close shortcut.
+    let active_cluster = focus.cluster.filter(|id| {
+        session
+            .clusters
+            .metadata(*id)
+            .is_some_and(|metadata| session.clusters.active_on(&metadata.output) == Some(*id))
+    });
+    if let Some(cluster) = active_cluster
+        && cluster_focus_successor(session, &surface).is_none()
+    {
+        crate::window::clear_focus(&mut session.wayland);
+        session.nodes.focus(
+            session.clusters.core_node(cluster),
+            session.start_time.elapsed().as_millis() as u64,
+        );
+        super::sync_keyboard_focus(session, SERIAL_COUNTER.next_serial());
+        session.request_redraw();
+        return;
+    }
+
     if !session.settings.field.close_restore_focus {
         crate::window::clear_focus(&mut session.wayland);
         session
@@ -361,14 +398,16 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
         return;
     }
 
-    let revalidated = cluster_focus_successor(session, &surface).or_else(|| {
+    let revalidated = if active_cluster.is_some() {
+        cluster_focus_successor(session, &surface)
+    } else {
         select_focus_successor(
             &session.wayland,
             &session.nodes,
             &surface,
             focus.output.as_deref(),
         )
-    });
+    };
     if revalidated != focus.preferred {
         eventline::debug!("focus: successor changed while window teardown completed");
     }
