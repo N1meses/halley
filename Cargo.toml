@@ -45,7 +45,7 @@ smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", r
 smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "79bbed5e1199090d787115614847a79c76607181" }
 calloop = "0.14.4"
 cgmath = "0.18"
-cosmic-text = { version = "0.19", features = ["swash"] }
+halley-ui = "=0.1.0"
 eventline = "0.9.0"
 futures-util = { version = "0.3", optional = true }
 drm-ffi = "0.9.1"
