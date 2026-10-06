@@ -239,7 +239,7 @@ unchanged Field.
 | **Trail** | Per-output recent-focus navigation and remote inspection |
 | **Bearings** | Directional overlays and offscreen navigation |
 | **Apogee** | Multi-monitor overview and live previews |
-| [**Halley Lift**](https://github.com/saltnpepper97/halley-lift) | Separately packaged search and action launcher, bound to `Super+D` in fresh configs |
+| [**Lift**](https://github.com/saltnpepper97/halley-lift) | Separately packaged search and action launcher, bound to `Super+D` in fresh configs |
 | **Capture** | Native menu, region, screen, and window screenshots plus portal screencasting |
 | **IPC/API** | Persistent typed clients, capability discovery, subscriptions, and `halleyctl` |
 | **XWayland** | Native embedded XWayland and compositor-owned X11 window management |
