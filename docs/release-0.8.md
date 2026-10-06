@@ -50,3 +50,7 @@ owns GPU and Wayland integration.
 Compilation and frame comparisons do not establish fresh live-hardware
 performance parity. Installation and restarting the compositor are separate
 steps, outside this preparation request.
+
+The basics card dismissal is scoped to the compositor package version. Bumping
+Halley in Cargo.toml re-offers it on the next native launch; same-version
+reinstalls and nested sessions do not reset it. User configuration stays intact.
