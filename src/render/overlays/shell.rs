@@ -466,11 +466,15 @@ fn notification_elements(
         color.bytes(),
         max_text_width,
     )?;
-    let card =
-        Rectangle::<i32, Physical>::new((0, 0).into(), (text_size.w + 32, text_size.h + 16).into());
+    let layout = ui_text.padded_label_layout(text_size)?;
+    let card_size: smithay::utils::Size<i32, Logical> = (
+        layout.card.width.round() as i32,
+        layout.card.height.round() as i32,
+    )
+        .into();
     let card = crate::shell::screenshot::notification_rect(
         Rectangle::<i32, Logical>::from_size(screen.size.to_logical(1)),
-        card.size.to_logical(1),
+        card_size,
         config,
         notification.mix,
     )
@@ -478,8 +482,8 @@ fn notification_elements(
     if let Some(text) = ui_text.element(
         renderer,
         (
-            card.loc.x + 16,
-            card.loc.y + (card.size.h - text_size.h) / 2,
+            card.loc.x + layout.label.origin.x.round() as i32,
+            card.loc.y + layout.label.origin.y.round() as i32,
         )
             .into(),
         &message,

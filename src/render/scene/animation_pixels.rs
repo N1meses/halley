@@ -3,6 +3,7 @@ use std::time::Duration;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::egl::{EGLContext, EGLDisplay, native::EGLSurfacelessDisplay};
 use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen, Texture};
 use smithay::output::{Mode, PhysicalProperties, Subpixel};
@@ -17,6 +18,124 @@ use crate::session::tty::FrameDemand;
 use crate::shell::overlay::{OverlayManager, OverlaySnapshot};
 
 const SIZE: (i32, i32) = (641, 481);
+
+/// Explicit before/after extraction check on the same renderer/font installation.
+/// Record before changing a renderer, then compare using the same baseline file.
+#[test]
+#[ignore = "requires surfaceless GLES and HALLEY_UI_PARITY_BASELINE plus HALLEY_UI_PARITY_MODE=record|compare"]
+fn ui_library_migration_matches_recorded_frames() {
+    use halley_config::NotificationPosition::*;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let baseline = std::env::var("HALLEY_UI_PARITY_BASELINE").expect("baseline path");
+    let mode = std::env::var("HALLEY_UI_PARITY_MODE").expect("record or compare");
+    assert!(matches!(mode.as_str(), "record" | "compare"));
+    let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
+    let context = EGLContext::new(&display).unwrap();
+    let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+    let output = output("ui-extraction");
+    let mut target = renderer
+        .create_buffer(Fourcc::Abgr8888, SIZE.into())
+        .unwrap();
+    let mut fingerprints = String::new();
+    for font_size in [11, 18] {
+        for position in [
+            TopLeft,
+            TopCenter,
+            TopRight,
+            BottomLeft,
+            BottomCenter,
+            BottomRight,
+        ] {
+            for kind in ["notification", "screenshot", "zoom"] {
+                let config = halley_config::Overlays {
+                    notifications: halley_config::Notifications {
+                        position,
+                        offset_x: -12,
+                        offset_y: 16,
+                        ..Default::default()
+                    },
+                    zoom_indicator: halley_config::ZoomIndicator {
+                        position,
+                        hold_duration_ms: 500,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut overlays = OverlayManager::default();
+                let mut resources = SceneResources::new();
+                resources.text.reload_font(&halley_config::Font {
+                    family: "monospace".into(),
+                    size: font_size,
+                });
+                match kind {
+                    "notification" => {
+                        overlays.show_config_error(output.name(), 500, Duration::ZERO)
+                    }
+                    "screenshot" => {
+                        let pixels = [30, 160, 210, 255].repeat(160 * 90);
+                        let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+                            &pixels, Fourcc::Abgr8888, (160, 90), 1, Transform::Normal, None);
+                        overlays.show_screenshot_saved(
+                            output.name(),
+                            std::path::Path::new("/screenshots"),
+                            500,
+                            Duration::ZERO,
+                        );
+                        overlays.attach_screenshot_preview(Some(std::sync::Arc::new(
+                            crate::capture::preview::ScreenshotPreview {
+                                path: "/screenshots/test.png".into(),
+                                buffer,
+                                size: (160, 90),
+                                png: pixels.into(),
+                            },
+                        )));
+                    }
+                    _ => {
+                        overlays.show_zoom_indicator(
+                            &output.name(),
+                            0.75,
+                            &config.zoom_indicator,
+                            Duration::ZERO,
+                        );
+                    }
+                }
+                for millis in [0, 45, 90, 180, 500, 590, 700] {
+                    let snapshot = overlays.snapshot(&output.name(), Duration::from_millis(millis));
+                    let scene = resources.scene(&mut renderer, &output, snapshot, &config, None);
+                    let (pixels, _) = read_pixels(
+                        &mut renderer,
+                        &mut target,
+                        &mut OutputDamageTracker::new(SIZE, 1.0, Transform::Normal),
+                        &scene,
+                        0,
+                    );
+                    let mut hash = DefaultHasher::new();
+                    pixels.hash(&mut hash);
+                    fingerprints.push_str(&format!(
+                        "{font_size} {position:?} {kind} {millis} {:016x}\n",
+                        hash.finish()
+                    ));
+                }
+            }
+        }
+    }
+    if mode == "record" {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(baseline)
+            .expect("record requires a new baseline file; existing evidence is preserved")
+            .write_all(fingerprints.as_bytes())
+            .unwrap();
+    } else {
+        assert_eq!(
+            fingerprints,
+            std::fs::read_to_string(baseline).unwrap(),
+            "UI extraction changed rendered pixels"
+        );
+    }
+}
 
 fn output(name: &str) -> Output {
     let output = Output::new(
@@ -148,11 +267,11 @@ impl SceneResources {
     }
 }
 
-fn read_pixels(
+fn read_pixels<E: RenderElement<GlesRenderer>>(
     renderer: &mut GlesRenderer,
     target: &mut GlesTexture,
     tracker: &mut OutputDamageTracker,
-    scene: &[SceneElement],
+    scene: &[E],
     age: usize,
 ) -> (Vec<u8>, Vec<Rectangle<i32, Physical>>) {
     let size = target.size();
@@ -170,7 +289,7 @@ fn read_pixels(
 
 #[test]
 #[ignore = "requires surfaceless GLES; run with LIBGL_ALWAYS_SOFTWARE=1 and --ignored"]
-fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffers() {
+fn conservative_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffers() {
     let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
     let context = EGLContext::new(&display).unwrap();
     let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
@@ -215,22 +334,25 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
                 .create_buffer(Fourcc::Abgr8888, SIZE.into())
                 .unwrap();
             let mut tracker = OutputDamageTracker::new(SIZE, 1.0, Transform::Normal);
-            let mut saw_partial = false;
+            let mut saw_forced_full = false;
+            let mut saw_reused = false;
             let mut saw_settled = false;
             let mut saw_visible = false;
-            let ticks = if case == "cluster-label" { 150 } else { 42 };
+            // Include enough settled frames to drain damage history for all buffer ages.
+            let ticks = if case == "cluster-label" { 160 } else { 42 };
             for tick in 0..ticks {
                 let now = Duration::from_millis(tick as u64 * 15);
                 overlays.wakeup(now);
                 let label_mix = (case == "cluster-label").then(|| {
                     clusters.label_hover_mix(halley_core::cluster::ClusterId::new(1), tick < 90)
                 });
-                let demand = FrameDemand::new(
-                    false,
-                    overlays.animating_on_output("actual", now) || label_mix.is_some(),
-                    false,
-                );
-                assert!(!demand.force_full_repaint);
+                let label_animating =
+                    label_mix.is_some_and(|mix| mix != if tick < 90 { 1.0 } else { 0.0 });
+                let local_animating =
+                    overlays.animating_on_output("actual", now) || label_animating;
+                let demand = FrameDemand::new(false, local_animating, false);
+                assert_eq!(demand.keep_redrawing, local_animating);
+                assert_eq!(demand.force_full_repaint, local_animating);
                 let snapshot = overlays.snapshot("actual", now);
                 let scene = actual_resources.scene(
                     &mut renderer,
@@ -242,16 +364,24 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
                 saw_visible |= scene
                     .iter()
                     .any(|e| matches!(e, SceneElement::UiText(_)) && e.alpha() > 0.1);
-                let age = if tick < buffers { 0 } else { buffers };
+                // Use the same upstream blur wrapper and age reset as both host backends.
+                let (prepared, blur) = crate::render::conservative::prepare(&scene);
+                let forced_full = demand.force_full_repaint || blur;
+                let age = if tick < buffers || forced_full {
+                    0
+                } else {
+                    buffers
+                };
+                saw_reused |= age == buffers;
                 let (actual, damage) = read_pixels(
                     &mut renderer,
                     &mut targets[tick % buffers],
                     &mut tracker,
-                    &scene,
+                    &prepared,
                     age,
                 );
-                // Separate effect caches prevent the reference repaint from
-                // refreshing or repairing the incrementally rendered scene.
+                // Independent effect caches keep the always-full reference from
+                // refreshing or repairing the scene under test.
                 let reference_scene = reference_resources.scene(
                     &mut renderer,
                     &reference_output,
@@ -259,11 +389,13 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
                     &config,
                     label_mix,
                 );
+                let (reference_prepared, _) =
+                    crate::render::conservative::prepare(&reference_scene);
                 let (expected, _) = read_pixels(
                     &mut renderer,
                     &mut reference,
                     &mut OutputDamageTracker::new(SIZE, 1.0, Transform::Normal),
-                    &reference_scene,
+                    &reference_prepared,
                     0,
                 );
                 let max_error = actual
@@ -277,23 +409,28 @@ fn local_animation_pixels_match_full_repaint_with_blur_shadows_and_reused_buffer
                     "case={case} buffers={buffers} tick={tick} max_error={max_error}"
                 );
                 if tick >= buffers {
-                    assert!(
-                        damage.iter().all(|r| r.size.w * r.size.h < SIZE.0 * SIZE.1),
-                        "local {case} must not repaint the entire output"
-                    );
-                    saw_partial |= !damage.is_empty();
-                    saw_settled |= damage.is_empty();
+                    if forced_full {
+                        assert!(
+                            damage
+                                .iter()
+                                .any(|r| r.size.w * r.size.h == SIZE.0 * SIZE.1),
+                            "animated/blurred {case} must repaint the entire output"
+                        );
+                        saw_forced_full = true;
+                    } else {
+                        saw_settled |= !demand.keep_redrawing && damage.is_empty();
+                    }
                 }
                 comparisons += 1;
             }
             assert!(
-                saw_visible && saw_partial && saw_settled,
+                saw_visible && saw_forced_full && saw_reused && saw_settled,
                 "case={case} buffers={buffers}"
             );
         }
     }
     eprintln!(
-        "{comparisons} local-animation GLES comparisons passed, buffer ages 1-3, max permitted channel error=1/255"
+        "{comparisons} conservative-animation GLES comparisons passed, buffer ages 1-3, max permitted channel error=1/255"
     );
 }
 
@@ -358,6 +495,8 @@ fn screenshot_preview_pixels_and_fade_match_full_repaint() {
             for tick in 0..42 {
                 let now = Duration::from_millis(tick as u64 * 15);
                 overlays.wakeup(now);
+                let demand =
+                    FrameDemand::new(false, overlays.animating_on_output("actual", now), false);
                 let snapshot = overlays.snapshot("actual", now);
                 let scene = actual_resources.scene(
                     &mut renderer,
@@ -366,12 +505,17 @@ fn screenshot_preview_pixels_and_fade_match_full_repaint() {
                     &config,
                     None,
                 );
-                let age = if tick < buffers { 0 } else { buffers };
+                let (prepared, blur) = crate::render::conservative::prepare(&scene);
+                let age = if tick < buffers || demand.force_full_repaint || blur {
+                    0
+                } else {
+                    buffers
+                };
                 let (actual, _) = read_pixels(
                     &mut renderer,
                     &mut targets[tick % buffers],
                     &mut tracker,
-                    &scene,
+                    &prepared,
                     age,
                 );
                 if tick == 12 {
@@ -410,11 +554,13 @@ fn screenshot_preview_pixels_and_fade_match_full_repaint() {
                     &config,
                     None,
                 );
+                let (reference_prepared, _) =
+                    crate::render::conservative::prepare(&reference_scene);
                 let (expected, _) = read_pixels(
                     &mut renderer,
                     &mut reference,
                     &mut OutputDamageTracker::new(SIZE, 1.0, Transform::Normal),
-                    &reference_scene,
+                    &reference_prepared,
                     0,
                 );
                 let max_error = actual
