@@ -40,7 +40,7 @@ daily workflow is one loop:
 > Field becomes messy → collapse work intentionally → retrieve it spatially →
 > use clusters later only when deliberately configured.
 
-1. **Launch freely.** `Super+D` opens [Halley Lift](https://github.com/saltnpepper97/halley-lift), the separately installed launcher, so whatever you start lands
+1. **Launch freely.** `Super+D` opens [Lift](https://github.com/saltnpepper97/halley-lift), the separately installed launcher, so whatever you start lands
    directly on the Field.
 2. **Position and overlap naturally.** `Super+Left-drag` moves a window, and
    ordinary windows are free to overlap instead of being solved into slots.
@@ -81,7 +81,7 @@ questions. They are layers, not replacements for each other.
 | Focus carousel | `Alt+Tab` / `Alt+Shift+Tab` | Recent-work navigation — what did I just come from? |
 | Bearings | `Super+Z` hold / `Super+Shift+Z` toggle | Offscreen spatial retrieval — where did work go beyond this monitor's view? |
 | Apogee | `Super+O` | Visual inventory across monitors — what is open on every display? |
-| Halley Lift | `Super+D` | Direct search by application, node, cluster, or compositor action — what is this called? |
+| Lift | `Super+D` | Direct search by application, node, cluster, or compositor action — what is this called? |
 
 The escalation is deliberate: the arrows move one step, `Alt+Tab` recalls recent
 work, Bearings and Apogee show where things are, and Lift finds something by
@@ -195,7 +195,7 @@ reinstalling the same version preserves dismissal. The dismissed version is
 remembered in `$XDG_STATE_HOME/halley/state.rune`, falling back to
 `~/.local/state/halley/state.rune`; that file is user state, not configuration,
 is never migrated, and is safe to delete. Reopen the card whenever you like from
-Halley Lift's **Show Halley basics** action or with `halleyctl basics`.
+Lift's **Show Halley basics** action or with `halleyctl basics`.
 
 ---
 
@@ -295,7 +295,7 @@ cargo build --release --workspace
 ```
 
 The compositor workspace builds Halley, its CLI, and its portal. Install
-[Halley Lift](https://github.com/saltnpepper97/halley-lift) separately with
+[Lift](https://github.com/saltnpepper97/halley-lift) separately with
 `cargo install halley-lift --version 0.3.0 --locked`, or through its own package.
 
 The build produces:
@@ -357,7 +357,7 @@ swipe, and hold actions.
 | Clusters | `Super+0..9` | Open a per-monitor cluster slot |
 | Bearings | `Super+Z` / `Super+Shift+Z` | Offscreen retrieval: hold or toggle Bearings |
 | Launch | `Super+T` | Open the first supported terminal |
-| Launch | `Super+D` | Open Halley Lift to search applications, nodes, clusters, and compositor actions (Fuzzel is a commented alternative) |
+| Launch | `Super+D` | Open Lift to search applications, nodes, clusters, and compositor actions (Fuzzel is a commented alternative) |
 | Reload | `Super+Shift+R` | Reload the selected configuration |
 | Zoom | `Super+-` / `Super+=` / `Super+Shift+0` | Zoom out, in, or reset |
 | Pointer | `Super+Left Mouse` | Move a window |
@@ -379,7 +379,7 @@ and `stack` scopes. Left/right Super, Alt, Ctrl, and Shift can be matched
 independently. Compositor move, resize, and pan grabs are ordinary remappable
 bindings rather than hardcoded mouse policy.
 
-`Super+D` opens [Halley Lift](https://github.com/saltnpepper97/halley-lift),
+`Super+D` opens [Lift](https://github.com/saltnpepper97/halley-lift),
 the independently packaged search and action launcher. It searches applications,
 running nodes, clusters, compositor actions, and config files from one field,
 and it can run terminal commands. Prefer a separate launcher? Any non-built-in
@@ -390,7 +390,7 @@ action string is a command line, so replacing one line is enough:
 ```
 
 Existing 0.6-or-newer configurations keep whatever launcher they already bind.
-Only a newly generated config defaults to Halley Lift. Change the launcher
+Only a newly generated config defaults to Lift. Change the launcher
 binding yourself to use a different launcher.
 
 ---
@@ -446,7 +446,7 @@ and sequenced state subscriptions.
 
 The postcard-based `halley-ipc` crate is Halley's private transport codec, not
 an external compatibility contract. External programs should use
-`halley-api`; `halleyctl` and Halley Lift are reference consumers of that API.
+`halley-api`; `halleyctl` and Lift are reference consumers of that API.
 
 ---
 
