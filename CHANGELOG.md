@@ -102,6 +102,13 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Refresh the README demonstrations with two new screenshots and link standalone
+  Lift installation and launcher references to its own repository.
+- End an output's saved `Mod+A` arrangement when a participating window is
+  manually moved, resized, or closed. The next press arranges the current Field
+  windows instead of restoring stale geometry. Untouched arrangements still
+  toggle back, including during their animation; unrelated windows and other
+  outputs retain their existing restore state.
 - Simplify screenshot previews to Copy and Open controls, removing the close
   button; previews expire automatically after their configured duration.
 - Keep compositor shortcuts available while exclusive layer-shell surfaces

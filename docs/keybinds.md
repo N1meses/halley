@@ -301,8 +301,13 @@ transaction is active, its windows are protected from automatic decay. Pressing
 `Mod+A` again restores the exact geometry/output
 snapshot captured by that output's arrangement. The restore transaction is
 recorded before clients are configured, so an immediate or mid-animation second
-press reverses reliably without waiting for clients to commit. `undo-arrange` remains
-available as an unbound compatibility action for custom configurations.
+press reverses reliably without waiting for clients to commit. Moving, resizing,
+or closing any participating window ends that output's restore transaction and
+its decay protection. The current positions become ordinary Field geometry;
+the next `Mod+A` creates a new arrangement instead of restoring the old snapshot.
+Changes to non-participating windows or other outputs do not discard it.
+`undo-arrange` remains available as an unbound compatibility action for custom
+configurations and follows the same lifetime.
 
 `default-terminal` (also accepted as `open-terminal`) launches the first
 available built-in terminal in this order:
