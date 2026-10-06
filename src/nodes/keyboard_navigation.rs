@@ -109,6 +109,10 @@ pub(crate) fn transfer_window<D: crate::session::SessionDriver>(
         .output_geometry(&target)
         .ok_or("destination geometry unavailable")?;
     let center = transfer_center(center, (geometry.loc.x, geometry.loc.y));
+    session
+        .interactions
+        .field_arrange
+        .invalidate_surface(surface.as_ref());
     super::session_ops::set_collapsed_output(session, id, &target);
     super::session_ops::apply_dynamics_positions(
         session,

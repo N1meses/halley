@@ -297,6 +297,10 @@ pub(crate) fn finish_window_unmap<D: SessionDriver>(
     preparation: WindowUnmapPreparation,
 ) {
     let WindowUnmapPreparation { surface, focus } = preparation;
+    session
+        .interactions
+        .field_arrange
+        .invalidate_surface(&surface);
     session.wayland.managed_windows.remove(&surface);
     session
         .presentation_close_size_recovery

@@ -1323,6 +1323,14 @@ fn apply_active_resize<D: SessionDriver>(session: &mut Session<D>) -> bool {
             .prepare_surface_target(member, current, global);
         Some(global)
     });
+    if size != state.start_rect.size
+        && let Some(surface) = state.window.wl_surface()
+    {
+        session
+            .interactions
+            .field_arrange
+            .invalidate_surface(surface.as_ref());
+    }
     if let Some(toplevel) = state.window.toplevel() {
         let size = floating_target.map_or(size, |target| target.size);
         toplevel.with_pending_state(|pending| pending.size = Some(size));
@@ -2305,6 +2313,19 @@ where
                     },
                 );
                 let camera_scale = crate::presentation::camera::scale(camera).max(0.05);
+                if (output_changed
+                    || session
+                        .wayland
+                        .space
+                        .element_location(&window)
+                        .is_some_and(|location| location != desired_location))
+                    && let Some(surface) = window.wl_surface()
+                {
+                    session
+                        .interactions
+                        .field_arrange
+                        .invalidate_surface(surface.as_ref());
+                }
                 let now = crate::frame_clock::monotonic_now();
                 if let Some(placement) = edge_placement
                     && let crate::input::grab::Grab::MoveWindow {
