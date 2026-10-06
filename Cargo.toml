@@ -13,7 +13,7 @@ publish = false
 
 [workspace]
 resolver = "2"
-members = ["halley-api", "halley-cli", "halley-config", "halley-core", "halley-ipc", "halley-lift", "halley-portal"]
+members = ["halley-api", "halley-cli", "halley-config", "halley-core", "halley-ipc", "halley-portal"]
 
 [workspace.package]
 authors = ["Dustin Pilgrim <dustin.pilgrim1997@gmail.com>"]
@@ -51,7 +51,7 @@ futures-util = { version = "0.3", optional = true }
 drm-ffi = "0.9.1"
 halley-config = { version = "0.7.0", path = "halley-config" }
 halley-core = { version = "0.6.1", path = "halley-core" }
-halley-ipc = { version = "0.6.1", path = "halley-ipc" }
+halley-ipc = { version = "0.7.0", path = "halley-ipc" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"
 png = "0.17"
