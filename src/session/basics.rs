@@ -2,16 +2,12 @@
 //!
 //! Halley keeps one small user-state file outside the configuration:
 //! `$XDG_STATE_HOME/halley/state.rune`, falling back to
-//! `~/.local/state/halley/state.rune`. It records whether a freshly generated
-//! configuration still owes its first-run basics card, whether that card has
-//! already been dismissed, and whether the one-time automatic-decay explanation
-//! has already been shown. All of these are one-time onboarding facts, not
-//! runtime policy, so they do not belong in `halley.rune` and are never
-//! migrated or rewritten by configuration loading.
-//!
-//! Deleting the file is always safe: Halley then treats the card as neither
-//! pending nor dismissed and the decay explanation as never shown, so the card
-//! can only reappear if Halley generates another fresh configuration.
+//! `~/.local/state/halley/state.rune`. Dismissal is recorded against the
+//! compositor package version. Every new version offers the basics card again
+//! in a native session, including with an existing configuration; reinstalling
+//! the same version does not reset dismissal. The automatic-decay explanation
+//! remains a separate one-time fact. None of this state belongs in halley.rune.
+//! Deleting the state file forgets dismissal and offers the card again.
 
 use std::fs;
 use std::io;
@@ -21,6 +17,9 @@ const STATE_DIR: &str = "halley";
 const STATE_FILE: &str = "state.rune";
 const PENDING_CONFIG_KEY: &str = "basics-card-pending-config";
 const DISMISSED_KEY: &str = "basics-card-dismissed";
+const DISMISSED_VERSION_KEY: &str = "basics-card-dismissed-version";
+// A package version bump re-offers the card, without rewriting user config.
+const BASICS_CARD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DECAY_NOTICE_KEY: &str = "decay-notice-shown";
 
 const HEADER: &str = "\
@@ -39,6 +38,7 @@ pub(super) struct UserState {
     path: Option<PathBuf>,
     basics_card_pending_config: Option<String>,
     basics_card_dismissed: bool,
+    basics_card_dismissed_version: Option<String>,
     decay_notice_shown: bool,
 }
 
@@ -92,6 +92,9 @@ impl UserState {
                     state.basics_card_pending_config = unquote(value).map(str::to_string);
                 }
                 DISMISSED_KEY => state.basics_card_dismissed = value.eq_ignore_ascii_case("true"),
+                DISMISSED_VERSION_KEY => {
+                    state.basics_card_dismissed_version = unquote(value).map(str::to_string);
+                }
                 DECAY_NOTICE_KEY => state.decay_notice_shown = value.eq_ignore_ascii_case("true"),
                 _ => {}
             }
@@ -114,13 +117,18 @@ impl UserState {
     }
 
     /// Whether Halley still owes a first-run card to this exact configuration.
+    #[cfg(test)]
     pub fn basics_card_pending_for(&self, config_path: &Path) -> bool {
         plain(config_path)
             .is_some_and(|current| self.basics_card_pending_config.as_deref() == Some(current))
     }
 
     pub fn basics_card_dismissed(&self) -> bool {
-        self.basics_card_dismissed
+        self.basics_card_dismissed_for(BASICS_CARD_VERSION)
+    }
+
+    fn basics_card_dismissed_for(&self, version: &str) -> bool {
+        self.basics_card_dismissed_version.as_deref() == Some(version)
     }
 
     /// Whether the one-time automatic-decay explanation has already been shown
@@ -137,10 +145,11 @@ impl UserState {
         self.persist();
     }
 
-    /// Persists the one-time fact that the card was dismissed, so it never
-    /// reappears automatically. Manual reopening is unaffected.
+    /// Persists dismissal for this package version. Manual reopening and
+    /// upgrades to another version remain available.
     pub fn dismiss_basics_card(&mut self) {
         self.basics_card_dismissed = true;
+        self.basics_card_dismissed_version = Some(BASICS_CARD_VERSION.to_string());
         self.basics_card_pending_config = None;
         self.persist();
     }
@@ -173,6 +182,9 @@ impl UserState {
                 "false"
             }
         ));
+        if let Some(version) = self.basics_card_dismissed_version.as_deref() {
+            text.push_str(&format!("{DISMISSED_VERSION_KEY} \"{version}\"\n"));
+        }
         text.push_str(&format!(
             "{DECAY_NOTICE_KEY} {}\n",
             if self.decay_notice_shown {
@@ -189,18 +201,10 @@ impl UserState {
     }
 }
 
-/// Whether the one-time card may appear without the user asking for it.
-///
-/// Only a configuration Halley generated itself, reaching its first successful
-/// native session, and not yet dismissed, qualifies. Nested development
-/// sessions never show the card automatically, and neither do existing
-/// configurations.
-pub(super) fn first_run_eligible(
-    native_session: bool,
-    pending_for_this_config: bool,
-    dismissed: bool,
-) -> bool {
-    native_session && pending_for_this_config && !dismissed
+/// Offer the current version's card in native sessions until dismissed.
+/// Existing configurations qualify; nested development sessions do not.
+pub(super) fn first_run_eligible(native_session: bool, dismissed: bool) -> bool {
+    native_session && !dismissed
 }
 
 /// How a keybind base modifier is written on the card. Mirrors the names used
@@ -325,11 +329,7 @@ mod tests {
             "a dismissed card is no longer pending for its configuration"
         );
         assert!(
-            !first_run_eligible(
-                true,
-                reloaded.basics_card_pending_for(&config("halley.rune")),
-                reloaded.basics_card_dismissed()
-            ),
+            !first_run_eligible(true, reloaded.basics_card_dismissed()),
             "the card must never reappear automatically after dismissal"
         );
     }
@@ -385,21 +385,39 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_requires_a_fresh_config_a_native_session_and_no_dismissal() {
-        assert!(first_run_eligible(true, true, false));
-        assert!(
-            !first_run_eligible(false, true, false),
-            "nested development sessions never show the card automatically"
-        );
-        assert!(
-            !first_run_eligible(true, false, false),
-            "existing configurations never show the card automatically"
-        );
-        assert!(
-            !first_run_eligible(true, true, true),
-            "a dismissed card stays dismissed"
-        );
-        assert!(!first_run_eligible(false, false, true));
+    fn eligibility_requires_a_native_session_and_current_version_not_dismissed() {
+        assert!(first_run_eligible(true, false));
+        assert!(!first_run_eligible(false, false));
+        assert!(!first_run_eligible(true, true));
+        assert!(!first_run_eligible(false, true));
+    }
+
+    #[test]
+    fn upgrades_reoffer_the_card_and_same_version_reinstalls_keep_dismissal() {
+        let scratch = ScratchDir::new("version-upgrade");
+        let path = scratch.path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "basics-card-dismissed true\nbasics-card-dismissed-version \"0.7.0\"\ndecay-notice-shown true\n").unwrap();
+        let mut state = UserState::load_from(path.clone());
+        assert!(state.basics_card_dismissed_for("0.7.0"));
+        assert!(!state.basics_card_dismissed());
+        assert!(first_run_eligible(true, state.basics_card_dismissed()));
+        state.dismiss_basics_card();
+        let reloaded = UserState::load_from(path);
+        assert!(reloaded.basics_card_dismissed());
+        assert!(!reloaded.basics_card_dismissed_for("0.9.0"));
+        assert!(reloaded.decay_notice_shown());
+    }
+
+    #[test]
+    fn legacy_unversioned_dismissal_does_not_suppress_the_new_card() {
+        let scratch = ScratchDir::new("legacy-dismissal");
+        let path = scratch.path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "basics-card-dismissed true\n").unwrap();
+        let state = UserState::load_from(path);
+        assert!(!state.basics_card_dismissed());
+        assert!(first_run_eligible(true, state.basics_card_dismissed()));
     }
 
     #[test]

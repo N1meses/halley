@@ -311,7 +311,7 @@ available built-in terminal in this order:
 `terminator`, `mate-terminal`, `qterminal`, `lxterminal`, then `xterm`.
 To choose an exact terminal instead, bind its command directly—for example,
 `"$var.mod+t" "kitty"`.
-The default `$var.mod+d` binding launches `halley-lift`, Halley's bundled search
+The default `$var.mod+d` binding launches `halley-lift`, Halley's separately packaged search
 and action launcher. Lift searches applications, running nodes, clusters,
 compositor actions, and config files in one field, and its `term` mode runs a
 terminal command line. Any other launcher works the same way, because a
@@ -324,12 +324,12 @@ with the current default config.
 The interactive screenshot menu and its area, screen, and window selectors
 force the compositor cursor visible even if a client or inactivity policy had
 hidden it.
-A freshly generated configuration's first native session also shows the one-time
+The first native session of each Halley package version also shows the
 basics card: the Field-first mental model and only the five essential chords
 (`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange, `Mod+N` collapse/restore,
-`Mod+O` Apogee). It appears on that first native session only, captures just
+`Mod+O` Apogee). It appears until dismissed for that version, captures just
 `Enter`, `Escape`, and the first pointer press or touch, and records the
-dismissal so it never reappears automatically. Reopen it by hand from Lift's
+dismissed version so it stays hidden on later launches of that same version. Reopen it by hand from Lift's
 **Show Halley basics** action or `halleyctl basics`. See
 [Compositor overlays](overlays.md) for the card itself and the user-state file
 that remembers the dismissal.

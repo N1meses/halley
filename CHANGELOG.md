@@ -2,9 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] - 2026-10-05
+
+- Show the non-modal basics introduction once per compositor version, including for existing configurations; preserve dismissal when reinstalling the same version.
 
 ### Added
+- Share text shaping, glyph rasterization, and cached notification layout with
+  Halley UI. Native GPU rendering, Wayland buffers, and the blur-capable Smithay
+  revision remain in Halley.
+- Package Halley Lift independently from its own repository. The default
+  launcher binding remains `halley-lift`; install Lift separately.
 - Include `examples/shaders/close-wave.frag`, the inward spiral counterpart to
   the wave opening shader, with matching 900 ms timing and setup instructions.
 - Include `examples/shaders/open-wave.frag`, a custom opening shader with spiral

@@ -115,5 +115,5 @@ strings allow optional extensions to be detected without guessing from the
 compositor version. Changes to the private IPC codec do not by themselves
 change the API version.
 
-The workspace's `halleyctl` and `halley-lift` are reference consumers: neither
+The workspace's `halleyctl` and the standalone [Halley Lift](https://github.com/saltnpepper97/halley-lift) are reference consumers: neither
 constructs low-level node or cluster wire messages.
