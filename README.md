@@ -106,8 +106,8 @@ maintainer-directed.
 
 ## Demo
 
-![Halley Field with overlapping windows](assets/demo/demo1.png)
-![Halley desktop with an editor and browser](assets/demo/demo2.png)
+![Halley Field with overlapping windows](demo/demo1.png)
+![Halley desktop with an editor and browser](demo/demo2.png)
 
 ---
 
