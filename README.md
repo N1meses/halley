@@ -40,7 +40,7 @@ daily workflow is one loop:
 > Field becomes messy → collapse work intentionally → retrieve it spatially →
 > use clusters later only when deliberately configured.
 
-1. **Launch freely.** `Super+D` opens Halley Lift, so whatever you start lands
+1. **Launch freely.** `Super+D` opens [Halley Lift](https://github.com/saltnpepper97/halley-lift), the separately installed launcher, so whatever you start lands
    directly on the Field.
 2. **Position and overlap naturally.** `Super+Left-drag` moves a window, and
    ordinary windows are free to overlap instead of being solved into slots.
@@ -104,6 +104,13 @@ maintainer-directed.
 
 ---
 
+## Demo
+
+![Halley Field with overlapping windows](demo/demo1.png)
+![Halley desktop with an editor and browser](demo/demo2.png)
+
+---
+
 ## Concepts
 
 | Term | What it is |
@@ -163,7 +170,7 @@ declaring startup clusters in `autostart` or by creating them at runtime.
 
 ## First Run
 
-A newly generated configuration's first native session shows one compositor-owned
+The first native session of each Halley version shows a compositor-owned
 **Halley basics** card: the Field-first mental model, plus only the five
 operations it depends on.
 
@@ -177,14 +184,15 @@ The card names your configured `mod` key, so a nested `halley --winit` session
 shows `Alt+D` where a native session shows `Super+D`. It is a primer rather than
 a tutorial: it lists no zoom, Bearings, Trail, pinning, or cluster layouts, it
 never dims or blocks the desktop, and only its own dismissal keys are captured.
-`Enter`, `Escape`, or a click closes it for good. Clusters stay out of first-run
-training for 0.8.0 — the card names no cluster action, core, or layout — so you
+`Enter`, `Escape`, or a click dismisses it for that Halley version. Clusters
+stay out of first-run training for 0.8.0 — the card names no cluster action, core, or layout — so you
 only meet clusters when you deliberately configure them.
 
-It appears only for a configuration Halley generated itself. Existing
-configurations, nested `halley --winit` sessions, and explicitly selected
-`-c PATH` files never show it automatically. Dismissal is remembered in
-`$XDG_STATE_HOME/halley/state.rune`, falling back to
+Existing configurations and explicitly selected `-c PATH` files qualify too;
+nested `halley --winit` sessions never show it automatically. Bumping Halley's
+package version re-offers the introduction on the next native launch, while
+reinstalling the same version preserves dismissal. The dismissed version is
+remembered in `$XDG_STATE_HOME/halley/state.rune`, falling back to
 `~/.local/state/halley/state.rune`; that file is user state, not configuration,
 is never migrated, and is safe to delete. Reopen the card whenever you like from
 Halley Lift's **Show Halley basics** action or with `halleyctl basics`.
@@ -231,7 +239,7 @@ unchanged Field.
 | **Trail** | Per-output recent-focus navigation and remote inspection |
 | **Bearings** | Directional overlays and offscreen navigation |
 | **Apogee** | Multi-monitor overview and live previews |
-| **Lift** | Bundled search and action launcher, bound to `Super+D` in fresh configs |
+| [**Halley Lift**](https://github.com/saltnpepper97/halley-lift) | Separately packaged search and action launcher, bound to `Super+D` in fresh configs |
 | **Capture** | Native menu, region, screen, and window screenshots plus portal screencasting |
 | **IPC/API** | Persistent typed clients, capability discovery, subscriptions, and `halleyctl` |
 | **XWayland** | Native embedded XWayland and compositor-owned X11 window management |
