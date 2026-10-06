@@ -311,7 +311,7 @@ available built-in terminal in this order:
 `terminator`, `mate-terminal`, `qterminal`, `lxterminal`, then `xterm`.
 To choose an exact terminal instead, bind its command directly—for example,
 `"$var.mod+t" "kitty"`.
-The default `$var.mod+d` binding launches `halley-lift`, Halley's bundled search
+The default `$var.mod+d` binding launches `halley-lift`, Halley's separately packaged search
 and action launcher. Lift searches applications, running nodes, clusters,
 compositor actions, and config files in one field, and its `term` mode runs a
 terminal command line. Any other launcher works the same way, because a

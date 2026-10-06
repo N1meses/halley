@@ -41,13 +41,18 @@ Without `winit`, `--winit` and automatic nested-session selection report a
 clear error instead of attempting to acquire the real DRM session. An explicit
 `--session` still selects the TTY backend.
 
+Halley Lift is built and packaged separately from
+[its own repository](https://github.com/saltnpepper97/halley-lift). The default
+launcher binding still calls `halley-lift`; ecosystem bundles should depend on
+that package. Historical monorepo release tags continue to contain older Lift sources.
+
 ## Installed resources
 
 Packaged resources use the distribution `/usr` layout:
 
 | Resource | Destination |
 | --- | --- |
-| `halley`, `halleyctl`, `halley-lift`, `xdg-desktop-portal-halley` | `/usr/bin/` |
+| `halley`, `halleyctl`, `xdg-desktop-portal-halley` | `/usr/bin/` |
 | `packaging/wayland-sessions/halley-session` | `/usr/bin/` |
 | `packaging/wayland-sessions/halley.desktop` | `/usr/share/wayland-sessions/` |
 | `packaging/xdg-desktop-portal/halley-portals.conf` | `/usr/share/xdg-desktop-portal/` |

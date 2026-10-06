@@ -1,6 +1,6 @@
 [package]
 name = "halley"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Spatial Wayland compositor built around infinite workspace navigation"
 authors.workspace = true
@@ -24,8 +24,8 @@ keywords = ["wayland", "compositor", "rust", "linux"]
 categories = ["os::linux-apis", "gui"]
 
 [workspace.dependencies]
-# Upstream 0.7.1 includes signed numbers; crates.io currently has 0.7.0.
-rune-cfg = { version = "0.7.1", git = "https://github.com/saltnpepper97/rune-cfg", rev = "889cf38b061b0081edbd44147fb14f2d7deb81bb" }
+# 0.7.1 adds the signed numbers used by configuration offsets.
+rune-cfg = "0.7.1"
 
 [dependencies]
 smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", rev = "79bbed5e1199090d787115614847a79c76607181", default-features = false, features = [
@@ -45,12 +45,12 @@ smithay = { version = "0.7.0", git = "https://github.com/Smithay/smithay.git", r
 smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "79bbed5e1199090d787115614847a79c76607181" }
 calloop = "0.14.4"
 cgmath = "0.18"
-halley-ui = "=0.1.0"
+halley-ui = "=0.1.2"
 eventline = "0.9.0"
 futures-util = { version = "0.3", optional = true }
 drm-ffi = "0.9.1"
-halley-config = { version = "0.7.0", path = "halley-config" }
-halley-core = { version = "0.6.1", path = "halley-core" }
+halley-config = { version = "0.8.0", path = "halley-config" }
+halley-core = { version = "0.7.0", path = "halley-core" }
 halley-ipc = { version = "0.7.0", path = "halley-ipc" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"

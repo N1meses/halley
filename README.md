@@ -286,12 +286,15 @@ cd halley
 cargo build --release --workspace
 ```
 
+The compositor workspace builds Halley, its CLI, and its portal. Install
+[Halley Lift](https://github.com/saltnpepper97/halley-lift) separately with
+`cargo install halley-lift --version 0.3.0 --locked`, or through its own package.
+
 The build produces:
 
 ```text
 target/release/halley
 target/release/halleyctl
-target/release/halley-lift
 target/release/xdg-desktop-portal-halley
 ```
 
@@ -300,7 +303,6 @@ For user-local testing:
 ```sh
 install -Dm755 target/release/halley ~/.local/bin/halley
 install -Dm755 target/release/halleyctl ~/.local/bin/halleyctl
-install -Dm755 target/release/halley-lift ~/.local/bin/halley-lift
 install -Dm755 target/release/xdg-desktop-portal-halley \
   ~/.local/bin/xdg-desktop-portal-halley
 ```
@@ -369,8 +371,8 @@ and `stack` scopes. Left/right Super, Alt, Ctrl, and Shift can be matched
 independently. Compositor move, resize, and pan grabs are ordinary remappable
 bindings rather than hardcoded mouse policy.
 
-`Super+D` opens Halley Lift, the bundled search and action launcher documented
-in [`halley-lift/README.md`](halley-lift/README.md). It searches applications,
+`Super+D` opens [Halley Lift](https://github.com/saltnpepper97/halley-lift),
+the independently packaged search and action launcher. It searches applications,
 running nodes, clusters, compositor actions, and config files from one field,
 and it can run terminal commands. Prefer a separate launcher? Any non-built-in
 action string is a command line, so replacing one line is enough:
