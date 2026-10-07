@@ -251,7 +251,8 @@ impl Pointer {
                             .is_some_and(|geometry| geometry.to_f64().contains(position))
                     })
                     .map_or(1.0, |output| output.current_scale().fractional_scale());
-                self.position = clamp_to_outputs(
+                self.position = constrain_relative_motion(
+                    self.position,
                     (
                         self.position.0 + delta.x / scale,
                         self.position.1 + delta.y / scale,
@@ -780,6 +781,81 @@ fn desktop_bounds(outputs: &[Rectangle<i32, Logical>]) -> Option<Rectangle<i32, 
     outputs.iter().copied().reduce(Rectangle::merge)
 }
 
+/// Relative devices cannot accumulate motion inside a gap: clamping every
+/// event to the old edge would pin the pointer there forever. Cross to the
+/// nearest display along the exited edge, keeping the perpendicular coordinate
+/// and the motion remaining after that edge. Absolute devices keep using their
+/// existing desktop-coordinate mapping.
+fn constrain_relative_motion(
+    previous: (f64, f64),
+    position: (f64, f64),
+    outputs: &[Rectangle<i32, Logical>],
+) -> (f64, f64) {
+    let point = Point::<f64, Logical>::from(position);
+    if outputs.iter().any(|output| output.to_f64().contains(point)) {
+        return position;
+    }
+    let Some(source) = outputs
+        .iter()
+        .find(|output| output.to_f64().contains(Point::from(previous)))
+    else {
+        return clamp_to_outputs(position, outputs);
+    };
+    let source = source.to_f64();
+    let right = source.loc.x + source.size.w;
+    let bottom = source.loc.y + source.size.h;
+    let dx = position.0 - previous.0;
+    let dy = position.1 - previous.1;
+    let mut best: Option<(f64, f64, (f64, f64), Rectangle<i32, Logical>)> = None;
+    for output in outputs {
+        let rect = output.to_f64();
+        let end_x = rect.loc.x + rect.size.w;
+        let end_y = rect.loc.y + rect.size.h;
+        let horizontal_band = position.1 >= rect.loc.y && position.1 < end_y;
+        let vertical_band = position.0 >= rect.loc.x && position.0 < end_x;
+        let crossing = if dx > 0.0 && position.0 >= right && rect.loc.x >= right && horizontal_band
+        {
+            Some((
+                (right - previous.0) / dx,
+                rect.loc.x - right,
+                (rect.loc.x + position.0 - right, position.1),
+            ))
+        } else if dx < 0.0 && position.0 < source.loc.x && end_x <= source.loc.x && horizontal_band
+        {
+            Some((
+                (source.loc.x - previous.0) / dx,
+                source.loc.x - end_x,
+                (end_x + position.0 - source.loc.x, position.1),
+            ))
+        } else if dy > 0.0 && position.1 >= bottom && rect.loc.y >= bottom && vertical_band {
+            Some((
+                (bottom - previous.1) / dy,
+                rect.loc.y - bottom,
+                (position.0, rect.loc.y + position.1 - bottom),
+            ))
+        } else if dy < 0.0 && position.1 < source.loc.y && end_y <= source.loc.y && vertical_band {
+            Some((
+                (source.loc.y - previous.1) / dy,
+                source.loc.y - end_y,
+                (position.0, end_y + position.1 - source.loc.y),
+            ))
+        } else {
+            None
+        };
+        if let Some((time, gap, landing)) = crossing {
+            if best.as_ref().is_none_or(|(best_time, best_gap, _, _)| {
+                time < *best_time || (time == *best_time && gap < *best_gap)
+            }) {
+                best = Some((time, gap, landing, *output));
+            }
+        }
+    }
+    best.map_or_else(
+        || clamp_to_outputs(position, outputs),
+        |(_, _, landing, output)| clamp_to_outputs(landing, &[output]),
+    )
+}
+
 fn clamp_to_outputs(position: (f64, f64), outputs: &[Rectangle<i32, Logical>]) -> (f64, f64) {
     let point = Point::<f64, Logical>::from(position);
     if outputs.iter().any(|output| output.to_f64().contains(point)) {
@@ -1109,7 +1185,7 @@ mod tests {
         type KeyboardKeyEvent = UnusedEvent;
         type PointerAxisEvent = TestAxisEvent;
         type PointerButtonEvent = UnusedEvent;
-        type PointerMotionEvent = UnusedEvent;
+        type PointerMotionEvent = TestMotionEvent;
         type PointerMotionAbsoluteEvent = UnusedEvent;
         type GestureSwipeBeginEvent = UnusedEvent;
         type GestureSwipeUpdateEvent = UnusedEvent;
@@ -1130,6 +1206,30 @@ mod tests {
         type TabletToolButtonEvent = UnusedEvent;
         type SwitchToggleEvent = UnusedEvent;
         type SpecialEvent = ();
+    }
+
+    struct TestMotionEvent(f64, f64);
+    impl Event<TestBackend> for TestMotionEvent {
+        fn time(&self) -> smithay::backend::input::InputTime {
+            smithay::backend::input::InputTime::from_micros(42_000)
+        }
+        fn device(&self) -> TestDevice {
+            TestDevice
+        }
+    }
+    impl smithay::backend::input::PointerMotionEvent<TestBackend> for TestMotionEvent {
+        fn delta_x(&self) -> f64 {
+            self.0
+        }
+        fn delta_y(&self) -> f64 {
+            self.1
+        }
+        fn delta_x_unaccel(&self) -> f64 {
+            self.0
+        }
+        fn delta_y_unaccel(&self) -> f64 {
+            self.1
+        }
     }
 
     struct TestAxisEvent {
@@ -1177,6 +1277,122 @@ mod tests {
                 Axis::Vertical => self.vertical_direction,
             }
         }
+    }
+
+    fn scaled_output(name: &str, size: (i32, i32), scale: f64) -> smithay::output::Output {
+        use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(Scale::Fractional(scale)),
+            None,
+        );
+        output
+    }
+
+    #[test]
+    fn relative_pointer_crosses_scaled_monitor_gaps_in_both_directions() {
+        use smithay::backend::input::InputEvent;
+        for scale in [1.0, 1.2, 1.25, 1.5, 2.0, 3.0] {
+            let primary = scaled_output("DP-1", (2560, 1440), scale);
+            let secondary = scaled_output("DP-2", (1920, 1200), 1.0);
+            let mut space = smithay::desktop::Space::<smithay::desktop::Window>::default();
+            space.map_output(&primary, (0, 0));
+            space.map_output(&secondary, (2560, 0));
+            let width = space.output_geometry(&primary).unwrap().size.w as f64;
+            let mut pointer = super::Pointer::new((width - 0.5, 300.0));
+            // Two physical pixels become 2/scale logical pixels, including any
+            // remainder after the source edge; the invisible gap consumes none.
+            pointer.process_input_event::<TestBackend>(
+                &InputEvent::PointerMotion {
+                    event: TestMotionEvent(2.0, 0.0),
+                },
+                &space,
+            );
+            let expected = 2560.0 + 2.0 / scale - 0.5;
+            assert!(
+                (pointer.position().0 - expected).abs() < 1e-6,
+                "scale={scale}: {:?}",
+                pointer.position()
+            );
+            assert_eq!(pointer.position().1, 300.0);
+            assert_eq!(
+                space.output_under(pointer.position()).next(),
+                Some(&secondary)
+            );
+            pointer.set_position((2560.5, 300.0));
+            pointer.process_input_event::<TestBackend>(
+                &InputEvent::PointerMotion {
+                    event: TestMotionEvent(-2.0, 0.0),
+                },
+                &space,
+            );
+            assert_eq!(pointer.position(), (width - 1.5, 300.0));
+            assert_eq!(
+                space.output_under(pointer.position()).next(),
+                Some(&primary)
+            );
+        }
+    }
+
+    #[test]
+    fn gap_crossing_chooses_nearest_monitor_regardless_of_output_order() {
+        let outputs = [
+            Rectangle::new((500, -50).into(), (100, 100).into()),
+            Rectangle::new((-100, -50).into(), (100, 100).into()),
+            Rectangle::new((100, -50).into(), (100, 100).into()),
+        ];
+        assert_eq!(
+            super::constrain_relative_motion((-0.5, -10.0), (0.5, -10.0), &outputs),
+            (100.5, -10.0)
+        );
+        assert_eq!(
+            super::constrain_relative_motion((100.5, -10.0), (99.5, -10.0), &outputs),
+            (-0.5, -10.0)
+        );
+        // Reload can put the old pointer position in a gap. Re-anchor to a
+        // real monitor instead of inferring an edge from that stale position.
+        assert_eq!(
+            super::constrain_relative_motion((50.0, -10.0), (51.0, -10.0), &outputs),
+            (100.0, -10.0)
+        );
+    }
+
+    #[test]
+    fn gap_crossing_respects_vertical_layout_and_unshared_edges() {
+        let outputs = [
+            Rectangle::new((0, 0).into(), (100, 100).into()),
+            Rectangle::new((0, 200).into(), (80, 60).into()),
+        ];
+        assert_eq!(
+            super::constrain_relative_motion((40.0, 99.5), (40.0, 100.5), &outputs),
+            (40.0, 200.5)
+        );
+        assert_eq!(
+            super::constrain_relative_motion((40.0, 200.5), (40.0, 199.5), &outputs),
+            (40.0, 99.5)
+        );
+        assert_eq!(
+            super::constrain_relative_motion((90.0, 99.5), (90.0, 100.5), &outputs),
+            (90.0, 99.0)
+        );
+        assert_eq!(
+            super::constrain_relative_motion((40.0, 0.5), (40.0, -0.5), &outputs),
+            (40.0, 0.0)
+        );
     }
 
     #[test]

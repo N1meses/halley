@@ -13,6 +13,9 @@ All notable changes to this project will be documented in this file.
   private IPC wire version is now 23; rebuild companion tools with Halley.
 
 ### Fixed
+- Let the cursor and dragged windows cross gaps between configured monitors,
+  including gaps created by increasing display scale while keeping existing
+  monitor offsets.
 - Remove stale keybind documentation describing config migration and include
   zero notification offsets in the split-config example.
 - Dim Apogee and Cluster Composer backdrops without adding a blue tint or an

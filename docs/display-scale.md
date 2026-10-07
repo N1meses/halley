@@ -35,6 +35,11 @@ the next monitor at `offset-x 1920`, rather than `3840`. Existing positions
 remain unchanged when scale is `1.0`. Position, refresh, VRR, and transform
 settings still require an explicit width/height pair.
 
+If existing offsets leave a gap after scaling, relative mouse motion crosses
+that gap directly into the nearest monitor along the exited edge. Dragged
+windows follow the cursor. Crossing is possible where the monitors overlap
+along the other axis; the remaining outer edges still constrain the cursor.
+
 Halley's Field camera zoom is separate: display scale establishes normal UI
 size; camera zoom changes your view of the Field. Changing `font.size` affects
 only Halley text, while display scale also affects application content.
