@@ -322,10 +322,9 @@ compositor actions, and config files in one field, and its `term` mode runs a
 terminal command line. Any other launcher works the same way, because a
 non-built-in action string is a command line: replace the binding with
 `"$var.mod+d" "fuzzel"` to use Fuzzel instead. Freshly generated configs ship
-the Lift binding and keep Fuzzel as a comment. Existing 0.6-or-newer configs keep
-their own launcher binding during routine structural migration. The explicit
-migration of an incompatible pre-0.6 config instead backs it up and replaces it
-with the current default config.
+the Lift binding and keep Fuzzel as a comment. Existing configs keep their own
+launcher binding. Halley never backs up, migrates, or replaces an existing
+config; edit it manually and check it with `halleyctl config verify`.
 The interactive screenshot menu and its area, screen, and window selectors
 force the compositor cursor visible even if a client or inactivity policy had
 hidden it.

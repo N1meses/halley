@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Remove stale keybind documentation describing config migration and include
+  zero notification offsets in the split-config example.
 - Dim Apogee and Cluster Composer backdrops without adding a blue tint or an
   initial brightness jump. Zero `apogee.background-dim` leaves wallpaper colors
   unchanged throughout opening and closing transitions.
