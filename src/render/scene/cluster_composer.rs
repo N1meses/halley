@@ -214,12 +214,7 @@ pub(super) fn cluster_composer_elements(
     elements.push(SceneElement::Border(crate::render::solid_color_element(
         node_renderer.active_slot_id(crate::render::node::NodeSlot::ClusterComposerBackdrop),
         output_local,
-        smithay::backend::renderer::Color32F::new(
-            0.01,
-            0.018,
-            0.03,
-            config.background_dim * backdrop_progress,
-        ),
+        super::overview::apogee_backdrop_color(config.background_dim, backdrop_progress),
     )));
     if session.phase() == crate::shell::cluster_composer::Phase::CommitEndpointHeld {
         session.mark_endpoint_rendered();

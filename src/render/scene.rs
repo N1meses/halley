@@ -1104,12 +1104,7 @@ pub fn build(
                 .node_renderer
                 .active_slot_id(crate::render::node::NodeSlot::ClusterComposerBackdrop),
             Rectangle::<i32, Physical>::from_size(output_geometry.size.to_physical(1)),
-            smithay::backend::renderer::Color32F::new(
-                0.01,
-                0.018,
-                0.03,
-                request.overlays.apogee_config.background_dim * alpha,
-            ),
+            overview::apogee_backdrop_color(request.overlays.apogee_config.background_dim, alpha),
         ));
         elements.insert(0, veil);
         if let Some(prepared) = session.prepared() {

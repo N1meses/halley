@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Dim Apogee and Cluster Composer backdrops without adding a blue tint or an
+  initial brightness jump. Zero `apogee.background-dim` leaves wallpaper colors
+  unchanged throughout opening and closing transitions.
 - Remove X11 windows, collapsed nodes, cluster membership, and stale focus when
   the XWayland window-manager connection is lost. Match destroyed surfaces by
   their shared identity so cleanup still works after Smithay marks them dead.
