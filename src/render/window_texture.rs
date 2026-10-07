@@ -77,6 +77,15 @@ pub fn capture(
     window: &Window,
     reusable: Option<GlesTexture>,
 ) -> Result<WindowTexture, Box<dyn Error>> {
+    capture_at_scale(renderer, window, reusable, 1.0)
+}
+
+fn capture_at_scale(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    reusable: Option<GlesTexture>,
+    scale: f64,
+) -> Result<WindowTexture, Box<dyn Error>> {
     let surface = window
         .wl_surface()
         .ok_or("window snapshot has no surface")?;
@@ -95,7 +104,17 @@ pub fn capture(
             1.0,
             Kind::Unspecified,
         );
-    capture_surface_elements(renderer, geometry, &elements, reusable)
+    let elements = elements
+        .into_iter()
+        .map(|element| {
+            crate::render::display_scale::element(
+                crate::render::scene::SceneElement::Layer(element),
+                scale,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    capture_surface_elements(renderer, geometry, &elements, reusable, scale)
 }
 
 pub fn capture_for_resize(
@@ -262,19 +281,20 @@ pub(crate) fn rectangles_cover_size<Kind>(
     })
 }
 
-fn capture_surface_elements(
+fn capture_surface_elements<E: smithay::backend::renderer::element::RenderElement<GlesRenderer>>(
     renderer: &mut GlesRenderer,
     geometry: Rectangle<i32, Logical>,
-    elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+    elements: &[E],
     reusable: Option<GlesTexture>,
+    scale: f64,
 ) -> Result<WindowTexture, Box<dyn Error>> {
     if elements.is_empty() {
         return Err("window snapshot surface tree is empty".into());
     }
 
-    let size = geometry.size.to_physical(1);
+    let size = geometry.size.to_f64().to_physical(scale).to_i32_round();
     let context = renderer.context_id();
-    let buffer_size = geometry.size.to_buffer(1, Transform::Normal);
+    let buffer_size = size.to_logical(1).to_buffer(1, Transform::Normal);
     let mut reusable = reusable;
     let can_reuse = reusable
         .as_mut()
@@ -328,7 +348,42 @@ pub fn capture_decorated(
         window_decoration_renderer,
         node_renderer,
         ui_text,
+        1.0,
         |renderer, reusable| capture(renderer, window, reusable),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn capture_decorated_at_scale(
+    renderer: &mut GlesRenderer,
+    window: &Window,
+    reusable: Option<GlesTexture>,
+    scale: f64,
+    decorations: &halley_config::Decorations,
+    font: &halley_config::Font,
+    focused: bool,
+    chrome_visible: bool,
+    maximized: bool,
+    titlebar_renderer: &mut crate::render::titlebar::TitlebarRenderer,
+    window_decoration_renderer: &mut crate::render::window_decoration::WindowDecorationRenderer,
+    node_renderer: &mut crate::render::node::NodeRenderer,
+    ui_text: &mut crate::render::text::UiTextRenderer,
+) -> Result<WindowTexture, Box<dyn Error>> {
+    capture_decorated_inner(
+        renderer,
+        window,
+        reusable,
+        decorations,
+        font,
+        focused,
+        chrome_visible,
+        maximized,
+        titlebar_renderer,
+        window_decoration_renderer,
+        node_renderer,
+        ui_text,
+        scale,
+        |renderer, reusable| capture_at_scale(renderer, window, reusable, scale),
     )
 }
 
@@ -346,6 +401,7 @@ fn capture_decorated_inner(
     window_decoration_renderer: &mut crate::render::window_decoration::WindowDecorationRenderer,
     node_renderer: &mut crate::render::node::NodeRenderer,
     ui_text: &mut crate::render::text::UiTextRenderer,
+    scale: f64,
     capture_client: impl FnOnce(
         &mut GlesRenderer,
         Option<GlesTexture>,
@@ -356,7 +412,7 @@ fn capture_decorated_inner(
     }
     let client = capture_client(renderer, None)?;
 
-    let client_size = client.texture.size().to_logical(1, Transform::Normal);
+    let client_size = window.geometry().size;
     let native_client = Rectangle::<i32, Logical>::from_size(client_size);
     let chrome = crate::titlebar::WindowChrome::for_window(window, decorations, font);
     let native_outer = chrome.outer_rect(native_client);
@@ -364,13 +420,19 @@ fn capture_decorated_inner(
         (-native_outer.loc.x, -native_outer.loc.y).into(),
         client_size.to_physical(1),
     );
-    let output_size = native_outer.size.to_physical(1);
+    let output_size = native_outer.size.to_f64().to_physical(scale).to_i32_round();
     let damage = Rectangle::<i32, Physical>::from_size(output_size);
     let server_titlebar = chrome.has_server_titlebar();
     let border_width = chrome.border_width;
     let content_radius = decorations.border_radius_px.max(0) as f32;
     let rounded = content_radius > 0.0 && window_decoration_renderer.available(renderer);
-    let source = Rectangle::<f64, Logical>::from_size(client_size.to_f64());
+    let source = Rectangle::from_size(
+        client
+            .texture
+            .size()
+            .to_logical(1, Transform::Normal)
+            .to_f64(),
+    );
     let base = TextureRenderElement::from_static_texture(
         Id::new(),
         client.context.clone(),
@@ -487,6 +549,10 @@ fn capture_decorated_inner(
         }
     }
 
+    let elements = elements
+        .into_iter()
+        .map(|element| crate::render::display_scale::element(element, scale, false))
+        .collect::<Vec<_>>();
     let context = renderer.context_id();
     let buffer_size = output_size.to_logical(1).to_buffer(1, Transform::Normal);
     let mut reusable = reusable;

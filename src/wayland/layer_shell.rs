@@ -27,6 +27,7 @@ pub fn new_surface(
     let layer = LayerSurface::new(surface, namespace);
     match layer_map_for_output(&output).map_layer(&layer) {
         Ok(()) => {
+            super::display_scale::send_tree(&wl_surface, &output);
             wayland.unmapped_layers.insert(wl_surface);
         }
         Err(err) => {
@@ -51,6 +52,7 @@ pub fn handle_commit(wayland: &mut WaylandState, root: &WlSurface) -> bool {
 
     let mut map = layer_map_for_output(&output);
     map.arrange();
+    super::display_scale::send_tree(root, &output);
 
     let has_buffer =
         with_renderer_surface_state(root, |state| state.buffer().is_some()).unwrap_or(false);

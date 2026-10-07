@@ -63,8 +63,10 @@ pub fn validate_complete_configuration(
         if !config.output.modes().contains(&config.mode) {
             return Err(format!("output {name:?} requested an unadvertised mode"));
         }
-        if !config.scale.is_finite() || (config.scale - 1.0).abs() > f64::EPSILON {
-            return Err(format!("output {name:?} only supports scale 1.0"));
+        if halley_config::output::normalize_scale(config.scale).is_none() {
+            return Err(format!(
+                "output {name:?}: scale must be from 0.25 through 10.0"
+            ));
         }
         if config.adaptive_sync && !state.adaptive_sync_supported {
             return Err(format!("output {name:?} does not support adaptive sync"));
@@ -119,10 +121,16 @@ impl<D: SessionDriver> Session<D> {
                     .expect("newly enabled output is mapped");
                 if change.before.mode != change.after.mode
                     || change.before.transform != change.after.transform
+                    || change.before.scale != change.after.scale
                     || !change.before.enabled
                 {
-                    self.cameras
-                        .reset(output.name(), geometry.size.to_physical(1));
+                    if change.before.scale != change.after.scale && change.before.enabled {
+                        self.cameras
+                            .resize_for_display_scale(&output.name(), geometry.size.to_physical(1));
+                    } else {
+                        self.cameras
+                            .reset(output.name(), geometry.size.to_physical(1));
+                    }
                     let external = self.fullscreen.reconfigure_output(&self.wayland, output);
                     crate::xwayland::reconfigure_fullscreen(external);
                 }
@@ -161,6 +169,7 @@ impl<D: SessionDriver> Session<D> {
         }
 
         self.wayland.space.refresh();
+        crate::wayland::display_scale::refresh(&self.wayland, self.driver.primary_output());
         crate::xwayland::sync_positions(self);
         self.xwayland.sync_desktop_geometry(&self.wayland.space);
         self.capture.update_layout(&self.wayland.space);
@@ -240,14 +249,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_unit_scale_and_unsupported_vrr() {
+    fn accepts_fractional_scale_but_rejects_invalid_scale_and_unsupported_vrr() {
         let (output, mode) = output("DP-1");
         let mut state = state(output, mode);
         state.adaptive_sync_supported = false;
 
         let mut config = configuration(&state);
         config.scale = 1.25;
-        assert!(validate_complete_configuration(&[state.clone()], &[config.clone()]).is_err());
+        assert!(validate_complete_configuration(&[state.clone()], &[config.clone()]).is_ok());
+        for scale in [0.0, -1.0, 0.1, 11.0, f64::NAN, f64::INFINITY] {
+            config.scale = scale;
+            assert!(validate_complete_configuration(&[state.clone()], &[config.clone()]).is_err());
+        }
 
         config.scale = 1.0;
         config.adaptive_sync = true;

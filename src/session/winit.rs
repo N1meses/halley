@@ -21,7 +21,7 @@ use crate::render::{
 };
 use crate::wayland;
 
-use super::Session;
+use super::{Session, state::OutputDriver};
 
 struct WinitDriver {
     backend: WinitBackend,
@@ -158,7 +158,15 @@ impl super::OutputDriver for WinitDriver {
         configuration: &[super::output::OutputConfiguration],
     ) -> Result<Vec<super::output::OutputChange>, String> {
         self.test_output_configuration(configuration)?;
-        Ok(Vec::new())
+        let before = self.output_states().remove(0);
+        let scale = halley_config::output::normalize_scale(configuration[0].scale)
+            .expect("validated scale");
+        if before.scale == scale {
+            return Ok(Vec::new());
+        }
+        self.backend.set_display_scale(scale);
+        let after = self.output_states().remove(0);
+        Ok(vec![super::output::OutputChange { before, after }])
     }
 }
 
@@ -178,6 +186,24 @@ fn apply_runtime_config(app: &mut App, reload: crate::config::ConfigReload) {
         crate::config::ConfigReload::Loaded(config) => {
             let config = *config;
             app.apply_common_config(&config);
+            let scale = config
+                .outputs
+                .iter()
+                .find(|output| output.name == "winit")
+                .map_or(1.0, |output| output.scale);
+            let state = app.driver.output_states().remove(0);
+            let requested = super::output::OutputConfiguration {
+                output: state.output,
+                enabled: true,
+                mode: state.mode,
+                location: state.location,
+                transform: state.transform,
+                scale,
+                adaptive_sync: false,
+            };
+            if let Err(error) = app.apply_wayland_output_configuration(&[requested]) {
+                eventline::warn!("nested display scale: {error}");
+            }
             app.clear_config_reload_error();
         }
         crate::config::ConfigReload::Rejected(diagnostic) => {
@@ -224,8 +250,14 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
     seat.add_pointer();
 
     let winit_backend = WinitBackend::new(backend);
+    let scale = runtime_config
+        .outputs
+        .iter()
+        .find(|output| output.name == "winit")
+        .map_or(1.0, |output| output.scale);
+    winit_backend.set_display_scale(scale);
 
-    let output_size = winit_backend.window_size();
+    let output_size = winit_backend.logical_size();
     let mut cameras = crate::presentation::camera::OutputCameras::default();
     cameras.insert(winit_backend.output().name(), output_size);
 
@@ -826,7 +858,7 @@ pub fn run(explicit_config_path: Option<std::path::PathBuf>) {
                 // size rather than preserving the current state across a
                 // resize - resizing mid-zoom/pan is a rare dev-only edge
                 // case, not worth the extra math.
-                let output_size = app.driver.backend.window_size();
+                let output_size = app.driver.backend.logical_size();
                 app.cameras
                     .reset(app.driver.backend.output().name(), output_size);
                 let external = app

@@ -56,6 +56,10 @@ pub fn scene_bounds(elements: &[SceneElement]) -> Option<Rectangle<i32, Physical
 /// frame callbacks even though its pixels are visible through the shader.
 pub fn extend_render_states(elements: &[SceneElement], states: &mut RenderElementStates) {
     for element in elements {
+        if let SceneElement::DisplayScaled(scaled) = element {
+            extend_render_states(std::slice::from_ref(scaled.inner.as_ref()), states);
+            continue;
+        }
         let SceneElement::WindowOpen(opening) = element else {
             continue;
         };
@@ -104,6 +108,17 @@ fn extend_snapshot_states(
 }
 
 impl WindowOpenElement {
+    pub fn apply_display_scale(&mut self, scale: f64) {
+        if scale == 1.0 {
+            return;
+        }
+        self.bounds = super::display_scale::scale_rect(self.bounds, scale);
+        self.area = super::display_scale::scale_rect(self.area, scale);
+        self.elements = std::mem::take(&mut self.elements)
+            .into_iter()
+            .map(|element| super::display_scale::element(element, scale, false))
+            .collect();
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
@@ -191,7 +206,11 @@ impl RenderElement<GlesRenderer> for WindowOpenElement {
         cache: &UserDataMap,
     ) -> Result<(), GlesError> {
         for (index, element) in self.elements.iter().enumerate().rev() {
-            if let SceneElement::BackdropBlur(blur) = element {
+            let inner = match element {
+                SceneElement::DisplayScaled(scaled) => scaled.inner.as_ref(),
+                _ => element,
+            };
+            if let SceneElement::BackdropBlur(blur) = inner {
                 // The ordinary scene draws its shadow before the blur captures
                 // the backdrop. Preserve that order inside the captured blur
                 // without drawing a detached rectangular shadow to the output.

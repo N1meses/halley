@@ -7,6 +7,15 @@ gather "theme.rune"
 gather "field.rune"
 gather "input.rune"
 
+# Replace the connector with the name from `halleyctl outputs`.
+# A scale-only entry keeps the preferred native mode. 1.5 means 150%.
+view:
+  output:
+    name "DP-1"
+    scale 1.0
+  end
+end
+
 # Inline/raw sections are easiest to audit when kept in the root file.
 autostart:
   # once "waybar"

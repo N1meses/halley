@@ -295,6 +295,7 @@ pub struct AppliedOutputChange {
     pub mode_changed: bool,
     pub size_changed: bool,
     pub layout_changed: bool,
+    pub scale_changed: bool,
 }
 
 /// The tty (DRM/KMS) backend - real hardware output, no host compositor
@@ -428,7 +429,14 @@ impl TtyBackend {
                                 "output {name:?}: connected connector advertises no modes"
                             );
                             ipc_output_info.push(connector_output_info(
-                                name, &connector, None, offset, vrr, false, false,
+                                name,
+                                &connector,
+                                None,
+                                offset,
+                                vrr,
+                                false,
+                                false,
+                                target.scale,
                             ));
                             continue;
                         }
@@ -437,7 +445,14 @@ impl TtyBackend {
                                 "output {name:?}: connected connector has no available CRTC"
                             );
                             ipc_output_info.push(connector_output_info(
-                                name, &connector, None, offset, vrr, false, false,
+                                name,
+                                &connector,
+                                None,
+                                offset,
+                                vrr,
+                                false,
+                                false,
+                                target.scale,
                             ));
                             continue;
                         };
@@ -455,7 +470,7 @@ impl TtyBackend {
                         output.change_current_state(
                             Some(drm_output_mode(&mode)),
                             Some(target.transform),
-                            None,
+                            Some(smithay::output::Scale::Fractional(target.scale)),
                             Some(offset.into()),
                         );
                         output.set_preferred(drm_output_mode(&default_mode(&connector)));
@@ -498,6 +513,7 @@ impl TtyBackend {
                                     vrr,
                                     vrr_is_supported(vrr_support),
                                     vrr_active,
+                                    target.scale,
                                 ));
                                 let gamma = gamma::GammaState::new(manager.device(), crtc);
                                 entries.push(DrmOutputEntry {
@@ -524,7 +540,14 @@ impl TtyBackend {
                             Err(err) => {
                                 eventline::error!("failed to initialize output {name:?}: {err}");
                                 ipc_output_info.push(connector_output_info(
-                                    name, &connector, None, offset, vrr, false, false,
+                                    name,
+                                    &connector,
+                                    None,
+                                    offset,
+                                    vrr,
+                                    false,
+                                    false,
+                                    target.scale,
                                 ));
                             }
                         }
@@ -745,6 +768,7 @@ impl TtyBackend {
                     entry.current_mode,
                     entry.output.current_location(),
                     entry.output.current_transform(),
+                    entry.output.current_scale(),
                     entry.configured_vrr,
                     entry.enabled,
                 )
@@ -801,7 +825,9 @@ impl TtyBackend {
             entry.output.change_current_state(
                 Some(config.mode),
                 Some(config.transform),
-                None,
+                Some(smithay::output::Scale::Fractional(
+                    halley_config::output::normalize_scale(config.scale).expect("validated scale"),
+                )),
                 Some(config.location),
             );
             let requested_vrr =
@@ -813,7 +839,7 @@ impl TtyBackend {
         if let Some(error) = failure {
             let mut rollback_errors = Vec::new();
             for (index, snapshot) in snapshots.iter().enumerate() {
-                let (mode, location, transform, vrr, enabled) = *snapshot;
+                let (mode, location, transform, scale, vrr, enabled) = *snapshot;
                 let mode_restored = if self.drm_outputs[index].current_mode != mode {
                     match self.use_output_mode(index, mode) {
                         Ok(()) => true,
@@ -834,7 +860,7 @@ impl TtyBackend {
                     entry.output.change_current_state(
                         Some(drm_output_mode(&mode)),
                         Some(transform),
-                        None,
+                        Some(scale),
                         Some(location),
                     );
                 }
@@ -870,6 +896,7 @@ impl TtyBackend {
                 let location = entry.output.current_location();
                 info.offset_x = location.x;
                 info.offset_y = location.y;
+                info.scale = entry.output.current_scale().fractional_scale();
                 info.vrr = crate::ipc::vrr_str(entry.configured_vrr).to_string();
                 info.vrr_active = entry.vrr_active && entry.enabled && entry.dpms_enabled;
             }
@@ -883,6 +910,7 @@ impl TtyBackend {
                     || before.mode != after.mode
                     || before.location != after.location
                     || before.transform != after.transform
+                    || before.scale != after.scale
                     || before.adaptive_sync != after.adaptive_sync
             })
             .map(|(before, after)| crate::session::output::OutputChange { before, after })
@@ -1089,12 +1117,14 @@ impl TtyBackend {
                     offset: (location.x, location.y),
                     transform: entry.output.current_transform(),
                     vrr: entry.configured_vrr,
+                    scale: entry.output.current_scale().fractional_scale(),
                 };
                 let requested = HardwareOutputState {
                     mode: drm_output_mode(&target.mode),
                     offset: target.offset,
                     transform: target.transform,
                     vrr: target.vrr,
+                    scale: target.scale,
                 };
                 (target, output_diff(current, requested), !entry.enabled)
             };
@@ -1103,6 +1133,7 @@ impl TtyBackend {
                 || diff.offset_changed
                 || diff.transform_changed
                 || diff.vrr_changed
+                || diff.scale_changed
                 || enable_changed)
             {
                 continue;
@@ -1124,7 +1155,8 @@ impl TtyBackend {
                 entry.output.change_current_state(
                     diff.mode_changed.then(|| drm_output_mode(&target.mode)),
                     diff.transform_changed.then_some(target.transform),
-                    None,
+                    diff.scale_changed
+                        .then_some(smithay::output::Scale::Fractional(target.scale)),
                     diff.offset_changed.then(|| target.offset.into()),
                 );
                 entry.current_mode = target.mode;
@@ -1177,6 +1209,7 @@ impl TtyBackend {
                 configured_vrr,
                 vrr_supported,
                 vrr_active,
+                output.current_scale().fractional_scale(),
             );
             if let Some(existing) = self
                 .ipc_output_info
@@ -1189,9 +1222,11 @@ impl TtyBackend {
             changes.push(AppliedOutputChange {
                 output,
                 mode_changed: diff.mode_changed,
-                size_changed: enable_changed || diff.size_changed,
+                size_changed: enable_changed || diff.size_changed || diff.scale_changed,
+                scale_changed: diff.scale_changed,
                 layout_changed: enable_changed
                     || diff.size_changed
+                    || diff.scale_changed
                     || diff.offset_changed
                     || diff.transform_changed,
             });

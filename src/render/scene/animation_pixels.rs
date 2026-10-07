@@ -187,6 +187,13 @@ impl SceneResources {
         config: &halley_config::Overlays,
         label_mix: Option<f32>,
     ) -> Vec<SceneElement> {
+        let scale = output.current_scale().fractional_scale();
+        self.text.set_display_scale(scale);
+        self.blur.set_display_scale(
+            &output.name(),
+            scale,
+            crate::render::output_physical_size(output),
+        );
         self.nodes.begin_scene(&output.name());
         self.text.begin_scene();
         self.blur.begin_scene(&output.name());
@@ -264,6 +271,9 @@ impl SceneResources {
             )));
         }
         elements
+            .into_iter()
+            .map(|element| crate::render::display_scale::element(element, scale, false))
+            .collect()
     }
 }
 
@@ -648,4 +658,142 @@ fn screenshot_preview_pixels_and_fade_match_full_repaint() {
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(directory).unwrap();
     eprintln!("screenshot preview: {comparisons} rendered frame comparisons");
+}
+
+#[test]
+#[ignore = "requires surfaceless GLES; run with LIBGL_ALWAYS_SOFTWARE=1 and --ignored"]
+fn display_scaling_matches_full_repaint_with_text_blur_shadows_and_buffer_reuse() {
+    let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
+    let context = EGLContext::new(&display).unwrap();
+    let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+    let mut comparisons = 0;
+    for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
+        let size = (
+            (SIZE.0 as f64 * scale).round() as i32,
+            (SIZE.1 as f64 * scale).round() as i32,
+        );
+        let actual_output = output("scaled-actual");
+        let reference_output = output("scaled-reference");
+        for output in [&actual_output, &reference_output] {
+            output.change_current_state(
+                Some(Mode {
+                    size: size.into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(smithay::output::Scale::Fractional(scale)),
+                None,
+            );
+        }
+        let mut actual_resources = SceneResources::new();
+        let mut reference_resources = SceneResources::new();
+        let mut actual_target = renderer
+            .create_buffer(Fourcc::Abgr8888, size.into())
+            .unwrap();
+        let mut reference_target = renderer
+            .create_buffer(Fourcc::Abgr8888, size.into())
+            .unwrap();
+        let mut tracker = OutputDamageTracker::new(size, 1.0, Transform::Normal);
+        let config = halley_config::Overlays::default();
+        let mut overlays = OverlayManager::default();
+        overlays.show_config_error("scaled-actual".into(), 300, Duration::ZERO);
+        for tick in 0..45 {
+            let now = Duration::from_millis(tick * 20);
+            overlays.wakeup(now);
+            let snapshot = overlays.snapshot("scaled-actual", now);
+            let scene = actual_resources.scene(
+                &mut renderer,
+                &actual_output,
+                snapshot.clone(),
+                &config,
+                None,
+            );
+            let reference_scene = reference_resources.scene(
+                &mut renderer,
+                &reference_output,
+                snapshot,
+                &config,
+                None,
+            );
+            let (prepared, blur) = crate::render::conservative::prepare(&scene);
+            let (reference_prepared, _) = crate::render::conservative::prepare(&reference_scene);
+            let age = usize::from(
+                tick > 0 && !blur && !overlays.animating_on_output("scaled-actual", now),
+            );
+            let (actual, _) = read_pixels(
+                &mut renderer,
+                &mut actual_target,
+                &mut tracker,
+                &prepared,
+                age,
+            );
+            let (reference, _) = read_pixels(
+                &mut renderer,
+                &mut reference_target,
+                &mut OutputDamageTracker::new(size, 1.0, Transform::Normal),
+                &reference_prepared,
+                0,
+            );
+            assert_eq!(actual, reference, "scale={scale} tick={tick}");
+            // A stripe at logical x=210..310 must retain the configured width and position.
+            let (x, y) = (
+                (250.0 * scale).round() as usize,
+                (100.0 * scale).round() as usize,
+            );
+            let pixel = &actual[(y * size.0 as usize + x) * 4..][..4];
+            assert!(
+                pixel[1] > 150 && pixel[0] < 40 && pixel[2] < 80,
+                "stripe was misplaced at scale={scale}: {pixel:?}"
+            );
+            comparisons += 1;
+        }
+    }
+    println!("verified {comparisons} scaled frames with independent full-repaint references");
+}
+
+#[test]
+#[ignore = "requires surfaceless GLES; run with LIBGL_ALWAYS_SOFTWARE=1 and --ignored"]
+fn display_scale_preserves_native_client_pixels_without_double_scaling() {
+    use smithay::backend::renderer::element::memory::{
+        MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+    };
+    let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
+    let context = EGLContext::new(&display).unwrap();
+    let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+    let size = (32, 32);
+    let pixels = (0..size.1)
+        .flat_map(|_| {
+            (0..size.0).flat_map(|x| {
+                let value = if x % 2 == 0 { 0 } else { 255 };
+                [value, value, value, 255]
+            })
+        })
+        .collect::<Vec<u8>>();
+    let buffer =
+        MemoryRenderBuffer::from_slice(&pixels, Fourcc::Abgr8888, size, 2, Transform::Normal, None);
+    let inner = MemoryRenderBufferRenderElement::from_buffer(
+        &mut renderer,
+        (0.0, 0.0),
+        &buffer,
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    )
+    .unwrap();
+    let element =
+        crate::render::display_scale::element(SceneElement::ScreenshotPreview(inner), 2.0, false);
+    assert_eq!(element.geometry(1.0.into()).size, size.into());
+    assert_eq!(element.geometry(2.0.into()).size, size.into());
+    let mut target = renderer
+        .create_buffer(Fourcc::Abgr8888, size.into())
+        .unwrap();
+    let (actual, _) = read_pixels(
+        &mut renderer,
+        &mut target,
+        &mut OutputDamageTracker::new(size, 2.0, Transform::Normal),
+        &[element],
+        0,
+    );
+    assert_eq!(actual, pixels, "native one-pixel stripes must stay sharp");
 }

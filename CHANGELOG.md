@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Configure per-monitor display scaling with numeric `view.output.scale`
+  multipliers, including fractional values and live reload. Scale applications,
+  compositor UI, pointer coordinates, and native-resolution captures together;
+  report the effective scale in `halleyctl outputs`. Bootstrap and examples
+  include `scale 1.0`; existing configs keep that default when omitted. The
+  private IPC wire version is now 23; rebuild companion tools with Halley.
+
 ### Fixed
 - Remove stale keybind documentation describing config migration and include
   zero notification offsets in the split-config example.

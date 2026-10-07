@@ -301,6 +301,34 @@ end
     }
 
     #[test]
+    fn display_scale_can_be_configured_without_overriding_the_mode() {
+        let view =
+            parse("view:\n  output:\n    name \"eDP-1\"\n    scale 1.5\n  end\nend\n").unwrap();
+        assert_eq!(view.outputs[0].scale, 1.5);
+        assert_eq!(view.outputs[0].width, None);
+        assert_eq!(view.outputs[0].height, None);
+        let mode = parse(
+            "view:\n  output:\n    name \"DP-1\"\n    width 2560\n    height 1440\n  end\nend\n",
+        )
+        .unwrap();
+        assert_eq!(mode.outputs[0].scale, 1.0);
+    }
+
+    #[test]
+    fn display_scale_requires_a_valid_numeric_value_and_is_not_duplicated() {
+        for value in ["0", "-1", "0.1", "11", "\"150%\"", "true"] {
+            let source =
+                format!("view:\n  output:\n    name \"eDP-1\"\n    scale {value}\n  end\nend\n");
+            assert!(parse(&source).is_err(), "accepted {value}");
+        }
+        assert!(
+            parse("view:\n  output:\n    name \"eDP-1\"\n    scale 1\n    scale 2\n  end\nend\n")
+                .is_err()
+        );
+        assert_eq!(crate::output::normalize_scale(1.333), Some(160.0 / 120.0));
+    }
+
+    #[test]
     fn rejects_duplicate_outputs_and_unknown_view_settings() {
         let duplicate = r#"
 view:

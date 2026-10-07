@@ -127,6 +127,7 @@ pub struct BackdropBlurRenderer {
     program_retry: RetryState,
     unsupported_context: Option<ContextId<GlesTexture>>,
     outputs: HashMap<String, OutputResources>,
+    display_scales: HashMap<String, (f64, Size<i32, Physical>)>,
 }
 
 pub struct BackdropBlurElement {
@@ -134,6 +135,7 @@ pub struct BackdropBlurElement {
     commit: CommitCounter,
     size: Size<i32, Physical>,
     geometry: Rectangle<i32, Physical>,
+    display_scale: f64,
     partial: bool,
     patches: Vec<BlurPatch>,
     plan: RefCell<Option<BlurPlan>>,
@@ -149,6 +151,10 @@ pub struct BackdropBlurElement {
 }
 
 impl BackdropBlurRenderer {
+    pub fn set_display_scale(&mut self, output: &str, scale: f64, size: Size<i32, Physical>) {
+        self.display_scales
+            .insert(output.to_string(), (scale, size));
+    }
     pub fn begin_scene(&mut self, output: &str) {
         if let Some(resources) = self.outputs.get_mut(output) {
             resources.scene_identities.clear();
@@ -157,6 +163,7 @@ impl BackdropBlurRenderer {
 
     pub fn remove_output(&mut self, output: &str) {
         self.outputs.remove(output);
+        self.display_scales.remove(output);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -174,6 +181,28 @@ impl BackdropBlurRenderer {
         if patches.is_empty() {
             return Ok(None);
         }
+        let (display_scale, physical_size) = self
+            .display_scales
+            .get(output)
+            .copied()
+            .unwrap_or((1.0, size.to_physical(1)));
+        let patches = patches
+            .into_iter()
+            .map(|patch| BlurPatch {
+                rect: crate::render::display_scale::scale_rect(patch.rect, display_scale),
+                radius: patch.radius * display_scale as f32,
+                alpha: patch.alpha,
+                clip: patch.clip.map(|(rect, radii)| {
+                    (
+                        crate::render::display_scale::scale_rect(rect, display_scale),
+                        crate::render::window_decoration::CornerRadii {
+                            top: radii.top * display_scale as f32,
+                            bottom: radii.bottom * display_scale as f32,
+                        },
+                    )
+                }),
+            })
+            .collect::<Vec<_>>();
         let context = renderer.context_id();
         if self.program_context.as_ref() != Some(&context) {
             self.program_context = Some(context.clone());
@@ -207,7 +236,6 @@ impl BackdropBlurRenderer {
             }
             self.program_retry.recover();
         }
-        let physical_size = size.to_physical(1);
         let levels = config.passes.clamp(1, 5);
         let config_fingerprint = blur_config_fingerprint(config);
         let resources = self
@@ -295,7 +323,7 @@ impl BackdropBlurRenderer {
         let commit = blur_commit(&patches, config, presentation_epoch);
         // Upstream captures the whole effect geometry. Cover the output so
         // blur kernels have valid pixels beyond each displayed patch.
-        let geometry = Rectangle::from_size(physical_size);
+        let geometry = Rectangle::from_size(size.to_physical(1));
         let partial = false;
         let _ = output_transform;
         Ok(Some(BackdropBlurElement {
@@ -306,6 +334,7 @@ impl BackdropBlurRenderer {
             commit,
             size: physical_size,
             geometry,
+            display_scale,
             partial,
             patches,
             plan: RefCell::new(None),
@@ -701,6 +730,7 @@ impl BackdropBlurElement {
             .iter()
             .map(|patch| patch.rect)
             .reduce(|a, b| a.merge(b))
+            .map(|rect| crate::render::display_scale::scale_rect(rect, 1.0 / self.display_scale))
             .unwrap_or_default()
     }
 
@@ -786,7 +816,7 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                     textures.chain.len() as u32,
                     self.offset,
                     &self.patches,
-                    &[self.geometry],
+                    &[Rectangle::from_size(self.size)],
                 )
             } else {
                 regions::plan_for_outputs(

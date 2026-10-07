@@ -8,6 +8,7 @@ pub(super) struct OutputTarget {
     pub offset: (i32, i32),
     pub transform: Transform,
     pub vrr: halley_config::Vrr,
+    pub scale: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -16,6 +17,7 @@ pub(super) struct OutputState {
     pub offset: (i32, i32),
     pub transform: Transform,
     pub vrr: halley_config::Vrr,
+    pub scale: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub(super) struct OutputDiff {
     pub offset_changed: bool,
     pub transform_changed: bool,
     pub vrr_changed: bool,
+    pub scale_changed: bool,
 }
 
 pub(super) fn output_diff(current: OutputState, target: OutputState) -> OutputDiff {
@@ -35,6 +38,7 @@ pub(super) fn output_diff(current: OutputState, target: OutputState) -> OutputDi
         offset_changed: current.offset != target.offset,
         transform_changed: current.transform != target.transform,
         vrr_changed: current.vrr != target.vrr,
+        scale_changed: current.scale != target.scale,
     }
 }
 
@@ -80,6 +84,7 @@ pub(super) fn connector_output_info(
     vrr: halley_config::Vrr,
     vrr_supported: bool,
     vrr_active: bool,
+    scale: f64,
 ) -> halley_ipc::OutputInfo {
     let modes = connector
         .modes()
@@ -103,6 +108,7 @@ pub(super) fn connector_output_info(
         vrr: crate::ipc::vrr_str(vrr).to_string(),
         vrr_supported,
         vrr_active,
+        scale,
     }
 }
 
@@ -124,6 +130,9 @@ fn select_mode(
     let Some(configured) = configured else {
         return default_mode(connector);
     };
+    let (Some(width), Some(height)) = (configured.width, configured.height) else {
+        return default_mode(connector);
+    };
 
     let matched = matching_mode_index(
         connector.modes().iter().enumerate().map(|(index, mode)| {
@@ -135,8 +144,8 @@ fn select_mode(
                 output_mode.refresh,
             )
         }),
-        configured.width,
-        configured.height,
+        width,
+        height,
         configured.rate,
     )
     .and_then(|index| connector.modes().get(index));
@@ -160,8 +169,8 @@ fn select_mode(
                 .join(", ");
             eventline::warn!(
                 "output {name:?}: configured {}x{}{} not found on this connector; available modes: {available}",
-                configured.width,
-                configured.height,
+                width,
+                height,
                 configured
                     .rate
                     .map(|hz| format!(" @ {hz}Hz"))
@@ -192,6 +201,7 @@ pub(super) fn output_target(
             transform_from_degrees(config.transform)
         }),
         vrr: configured.map(|config| config.vrr).unwrap_or_default(),
+        scale: configured.map_or(1.0, |config| config.scale),
     }
 }
 
@@ -217,6 +227,7 @@ mod tests {
             offset,
             transform,
             vrr,
+            scale: 1.0,
         }
     }
 
@@ -237,8 +248,28 @@ mod tests {
                 offset_changed: false,
                 transform_changed: false,
                 vrr_changed: false,
+                scale_changed: false,
             }
         );
+    }
+
+    #[test]
+    fn scale_only_reload_keeps_the_hardware_mode() {
+        let current = state(
+            output_mode(3840, 2160, 60_000),
+            (0, 0),
+            Transform::Normal,
+            halley_config::Vrr::Off,
+        );
+        let target = OutputState {
+            scale: 1.5,
+            ..current
+        };
+        let diff = output_diff(current, target);
+        assert!(diff.scale_changed);
+        assert!(!diff.mode_changed);
+        assert!(!diff.transform_changed);
+        assert!(!diff.size_changed);
     }
 
     #[test]

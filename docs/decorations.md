@@ -35,7 +35,7 @@ decorations:
 end
 ```
 
-`size` and `radius` are output pixels and follow camera zoom. `radius` describes
+`size` and `radius` are logical pixels, multiplied by the display scale, and follow camera zoom. `radius` describes
 the client-content corner; the outer border radius is increased by `size`.
 Setting `radius` to `0` restores square corners. Setting `size` to `0` hides the
 border while retaining rounded client content.

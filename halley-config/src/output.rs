@@ -14,17 +14,18 @@ pub enum Vrr {
     Auto,
 }
 
-/// One physical monitor's configuration - hardware/mode/position only,
-/// deliberately narrow (see `output.rs`'s module doc). No `enabled` field:
-/// comment the whole block out in the config file to disable a monitor,
-/// matching old halley's own simplest working pattern.
+/// One monitor's mode, logical position, transform, and display scale.
+/// Unconfigured connectors keep their preferred mode at scale 1.0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputConfig {
     /// Connector name, e.g. "DP-1" - matched against real connector names
     /// at startup.
     pub name: String,
-    pub width: i32,
-    pub height: i32,
+    /// Omit both dimensions to keep the connector's preferred mode.
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    /// Physical pixels per logical pixel, quantized to the Wayland 1/120 unit.
+    pub scale: f64,
     pub offset_x: i32,
     pub offset_y: i32,
     /// `None` means "use the highest advertised refresh at this exact
@@ -65,6 +66,7 @@ pub(crate) fn is_hardware_field(key: &str) -> bool {
             | "transform"
             | "rotation"
             | "vrr"
+            | "scale"
     )
 }
 
@@ -83,6 +85,7 @@ pub(crate) fn parse_hardware_output(
         &["rate", "refresh-rate", "refresh_rate"][..],
         &["transform", "rotation"][..],
         &["vrr"][..],
+        &["scale"][..],
     ] {
         if assigned_keys(fields)
             .filter(|key| aliases.contains(key))
@@ -101,13 +104,15 @@ pub(crate) fn parse_hardware_output(
     match (width, height) {
         (None, None) => {
             if let Some(key) = assigned_keys(fields)
-                .find(|key| is_hardware_field(key) && *key != "width" && *key != "height")
+                .find(|key| is_hardware_field(key) && !matches!(*key, "width" | "height" | "scale"))
             {
                 return Err(OutputParseError(format!(
                     "output {name:?}: {key} requires width and height"
                 )));
             }
-            return Ok(None);
+            if field(fields, &["scale"]).is_none() {
+                return Ok(None);
+            }
         }
         (Some(_), None) => {
             return Err(OutputParseError(format!(
@@ -122,17 +127,31 @@ pub(crate) fn parse_hardware_output(
         (Some(_), Some(_)) => {}
     }
 
-    let width = width.and_then(as_i32).ok_or_else(|| {
-        OutputParseError(format!("output {name:?}: width must be a whole number"))
-    })?;
-    let height = height.and_then(as_i32).ok_or_else(|| {
-        OutputParseError(format!("output {name:?}: height must be a whole number"))
-    })?;
-    if width <= 0 || height <= 0 {
+    let dimension = |value: Option<&Value>, key: &str| {
+        value
+            .map(|value| {
+                as_i32(value).ok_or_else(|| {
+                    OutputParseError(format!("output {name:?}: {key} must be a whole number"))
+                })
+            })
+            .transpose()
+    };
+    let width = dimension(width, "width")?;
+    let height = dimension(height, "height")?;
+    if width.is_some_and(|value| value <= 0) || height.is_some_and(|value| value <= 0) {
         return Err(OutputParseError(format!(
             "output {name:?}: width/height must be positive"
         )));
     }
+
+    let scale = match field(fields, &["scale"]) {
+        None => 1.0,
+        Some(value) => as_f64(value).and_then(normalize_scale).ok_or_else(|| {
+            OutputParseError(format!(
+                "output {name:?}: scale must be a number from 0.25 through 10.0"
+            ))
+        })?,
+    };
 
     for keys in [&["offset-x", "offset_x"][..], &["offset-y", "offset_y"][..]] {
         if field(fields, keys).is_some_and(|value| as_i32(value).is_none()) {
@@ -204,12 +223,19 @@ pub(crate) fn parse_hardware_output(
         name: name.to_string(),
         width,
         height,
+        scale,
         offset_x,
         offset_y,
         rate,
         transform,
         vrr,
     }))
+}
+
+/// Share validation and protocol precision between persistent config and
+/// output-management requests so clients and compositor use the same scale.
+pub fn normalize_scale(scale: f64) -> Option<f64> {
+    (scale.is_finite() && (0.25..=10.0).contains(&scale)).then(|| (scale * 120.0).round() / 120.0)
 }
 
 fn parse_vrr(raw: &str) -> Vrr {

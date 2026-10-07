@@ -43,7 +43,7 @@ The version-1 semantic API includes:
 | Area | Operations |
 | --- | --- |
 | Server | handshake, version and capability discovery, quit request |
-| Outputs | list output modes and placement; set DPMS state |
+| Outputs | list output modes, logical placement, and display scale; set DPMS state |
 | Nodes | list, inspect, focus, move, close, collapse, restore, and toggle |
 | Clusters | list, inspect, open, activate a slot, cycle layout, finalize a draft |
 | Bearings | query visibility; show, hide, or toggle |

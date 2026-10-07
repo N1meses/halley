@@ -1,5 +1,10 @@
 # Wayland protocol support
 
+Halley advertises `wl_compositor` version 6 and `wp_fractional_scale_manager_v1`
+version 1. Preferred integer and fractional buffer scales follow each window's
+assigned output, including popups and subsurfaces, and update on transfer or
+display-scale reload. See [display scaling](display-scale.md).
+
 Halley advertises `zwp_text_input_manager_v3` version 1 and
 `zwp_input_method_manager_v2` version 1 (`input-method-unstable-v2`). Native Wayland clients bind
 text-input to send surrounding text and receive preedit and committed

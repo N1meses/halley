@@ -296,6 +296,9 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
             },
         );
         wayland::text_input::handle_popup_commit(self, surface);
+        if let Some(output) = wayland::display_scale::output_for_surface(&self.wayland, surface) {
+            wayland::display_scale::send_tree(&root, &output);
+        }
         match toplevel_commit.clone() {
             wayland::xdg_shell::ToplevelCommit::Mapped(mapped)
                 if wayland::clipboard_helper::saved_focus(&mapped).is_some() =>
@@ -1396,11 +1399,9 @@ impl<D: SessionDriver> Dispatch<ExtWorkspaceHandleV1, WorkspaceData, Session<D>>
 
 impl<D: SessionDriver> FractionalScaleHandler for Session<D> {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        let scale = self
-            .driver
-            .primary_output()
-            .current_scale()
-            .fractional_scale();
+        let output = wayland::display_scale::output_for_surface(&self.wayland, &surface)
+            .unwrap_or_else(|| self.driver.primary_output().clone());
+        let scale = output.current_scale().fractional_scale();
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional_scale| {
                 fractional_scale.set_preferred_scale(scale);

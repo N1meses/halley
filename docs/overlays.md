@@ -1,5 +1,9 @@
 # Compositor overlays
 
+Overlay sizes and offsets use logical pixels and follow the monitor's
+[display scale](display-scale.md). Missing notification offsets default to
+zero; bootstrap configs explicitly include `offset-x 0` and `offset-y 0`.
+
 The `overlays:` section is the shared style contract for compositor-owned UI:
 Apogee title bands, the Alt+Tab rail, Bearings chips, the screenshot picker,
 configuration notices, the zoom indicator, the exit confirmation, the one-time
@@ -71,7 +75,7 @@ Notification positions are `top-left`, `top-center`, `top-right`,
 `bottom-left`, `bottom-center`, and `bottom-right`. Durations are positive
 milliseconds. The renderer builds every card at its final pixel dimensions,
 so changing its radius or output scale does not stretch a small blurred texture.
-`offset-x` and `offset-y` are signed pixel offsets from the selected notification
+`offset-x` and `offset-y` are signed logical-pixel offsets from the selected notification
 position. Both default to `0`, including generated/bootstrap configurations.
 Positive values move right/down; negative values move left/up. They apply to
 all notification cards and can be changed through normal configuration reload.

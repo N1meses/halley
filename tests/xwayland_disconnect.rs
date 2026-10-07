@@ -218,6 +218,8 @@ struct NativeState {
     globals: HashMap<String, u32>,
     surface: Option<wl_surface::WlSurface>,
     buffer: Option<wl_buffer::WlBuffer>,
+    integer_scales: Vec<i32>,
+    fractional_scales: Vec<u32>,
 }
 impl Dispatch<wl_registry::WlRegistry, ()> for NativeState {
     fn event(
@@ -268,14 +270,45 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for NativeState {
     }
 }
 delegate_noop!(NativeState: ignore wl_compositor::WlCompositor);
-delegate_noop!(NativeState: ignore wl_surface::WlSurface);
+impl Dispatch<wl_surface::WlSurface, ()> for NativeState {
+    fn event(
+        state: &mut Self,
+        _: &wl_surface::WlSurface,
+        event: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = event {
+            state.integer_scales.push(factor);
+        }
+    }
+}
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1 as fractional_manager, wp_fractional_scale_v1 as fractional,
+};
+delegate_noop!(NativeState: ignore fractional_manager::WpFractionalScaleManagerV1);
+impl Dispatch<fractional::WpFractionalScaleV1, ()> for NativeState {
+    fn event(
+        state: &mut Self,
+        _: &fractional::WpFractionalScaleV1,
+        event: fractional::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let fractional::Event::PreferredScale { scale } = event {
+            state.fractional_scales.push(scale);
+        }
+    }
+}
 delegate_noop!(NativeState: ignore wl_buffer::WlBuffer);
 delegate_noop!(NativeState: ignore pixel::WpSinglePixelBufferManagerV1);
 delegate_noop!(NativeState: ignore wp_viewporter::WpViewporter);
 delegate_noop!(NativeState: ignore wp_viewport::WpViewport);
 delegate_noop!(NativeState: ignore xdg_toplevel::XdgToplevel);
 
-fn native_window(fixture: &Fixture) -> EventQueue<NativeState> {
+fn native_window(fixture: &Fixture) -> (EventQueue<NativeState>, NativeState) {
     let socket = fs::read_dir(&fixture.path)
         .unwrap()
         .filter_map(Result::ok)
@@ -292,7 +325,7 @@ fn native_window(fixture: &Fixture) -> EventQueue<NativeState> {
     let mut state = NativeState::default();
     queue.roundtrip(&mut state).unwrap();
     let compositor: wl_compositor::WlCompositor =
-        registry.bind(state.globals["wl_compositor"], 4, &handle, ());
+        registry.bind(state.globals["wl_compositor"], 6, &handle, ());
     let pixels: pixel::WpSinglePixelBufferManagerV1 = registry.bind(
         state.globals["wp_single_pixel_buffer_manager_v1"],
         1,
@@ -303,6 +336,13 @@ fn native_window(fixture: &Fixture) -> EventQueue<NativeState> {
         registry.bind(state.globals["wp_viewporter"], 1, &handle, ());
     let shell: xdg_wm_base::XdgWmBase = registry.bind(state.globals["xdg_wm_base"], 1, &handle, ());
     let surface = compositor.create_surface(&handle, ());
+    let manager: fractional_manager::WpFractionalScaleManagerV1 = registry.bind(
+        state.globals["wp_fractional_scale_manager_v1"],
+        1,
+        &handle,
+        (),
+    );
+    let _fractional = manager.get_fractional_scale(&surface, &handle, ());
     let viewport = viewporter.get_viewport(&surface, &handle, ());
     viewport.set_destination(240, 160);
     let xdg_surface = shell.get_xdg_surface(&surface, &handle, ());
@@ -314,7 +354,7 @@ fn native_window(fixture: &Fixture) -> EventQueue<NativeState> {
     surface.commit();
     queue.roundtrip(&mut state).unwrap();
     queue.roundtrip(&mut state).unwrap();
-    queue
+    (queue, state)
 }
 
 #[test]
@@ -406,5 +446,89 @@ fn disconnect_removes_cluster_and_collapsed_x11_windows_preserving_native_window
             "dead X11 windows must not keep generating configure requests: {log}"
         );
         eprintln!("{layout}: collapsed and cluster X11 cleanup, native survival and focus passed");
+    }
+}
+
+#[test]
+#[ignore = "requires a Wayland desktop and XWayland; starts an isolated nested compositor"]
+fn display_scale_reload_updates_live_clients_and_native_resolution_capture() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::FileExt;
+    let mut fixture = Fixture::new("tiling");
+    let (mut queue, mut state) = native_window(&fixture);
+    fixture.node("surviving native window");
+    for scale in [1.5, 2.0, 1.0] {
+        fs::write(fixture.path.join("halley.rune"), format!("keybinds:\nend\nview:\n  output:\n    name \"winit\"\n    scale {scale}\n  end\nend\n")).unwrap();
+        fixture.ack(Request::ConfigReload);
+        let output = wait_for("effective scale", || {
+            let Response::Outputs(outputs) = fixture.request(Request::Outputs) else {
+                return None;
+            };
+            outputs
+                .outputs
+                .into_iter()
+                .find(|output| output.scale == scale)
+        });
+        queue.roundtrip(&mut state).unwrap();
+        queue.roundtrip(&mut state).unwrap();
+        assert_eq!(
+            state.fractional_scales.last(),
+            Some(&((scale * 120.0) as u32))
+        );
+        assert_eq!(state.integer_scales.last(), Some(&(scale.ceil() as i32)));
+        let mode = output.modes[output.current_mode.unwrap()];
+        let size = mode.width as usize * mode.height as usize * 4;
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(fixture.path.join(format!("capture-{scale}")))
+            .unwrap();
+        file.set_len(size as u64).unwrap();
+        let request = Request::CaptureFrame(halley_ipc::CaptureFrameRequest {
+            stream_handle: "display-scale-regression".into(),
+            source: halley_ipc::CaptureSource::Monitor {
+                name: output.name,
+                x: 0,
+                y: 0,
+                width: mode.width,
+                height: mode.height,
+            },
+            cursor_mode: halley_ipc::CursorMode::Hidden,
+            buffer: halley_ipc::CaptureBuffer::MemFd {
+                fd_index: 0,
+                offset: 0,
+                size: size as u64,
+                stride: mode.width as u32 * 4,
+            },
+        });
+        let expected = (240.0 * scale).round() as usize;
+        wait_for("native-size captured window", || {
+            let response = fixture
+                .ipc
+                .as_mut()
+                .unwrap()
+                .request(&request, &[file.as_raw_fd()])
+                .unwrap()
+                .response;
+            assert!(matches!(response, Response::Frame(_)), "{response:?}");
+            let mut pixels = vec![0; size];
+            file.read_exact_at(&mut pixels, 0).unwrap();
+            let max_red = pixels
+                .chunks_exact(mode.width as usize * 4)
+                .map(|row| {
+                    row.chunks_exact(4)
+                        .filter(|pixel| pixel[2] > 245 && pixel[1] < 5 && pixel[0] < 5)
+                        .count()
+                })
+                .max()
+                .unwrap();
+            (max_red.abs_diff(expected) <= 2).then_some(())
+        });
+        assert!(fixture.process.try_wait().unwrap().is_none());
+        eprintln!(
+            "scale={scale}: preferred scale and {0}x{1} native capture, window width={expected}",
+            mode.width, mode.height
+        );
     }
 }

@@ -263,63 +263,75 @@ fn opening_endpoint_matches_live_blur_shadow_chrome_and_opacity() {
         ..Default::default()
     };
     let id = Id::new();
-    let mode: Size<i32, Physical> = (257, 193).into();
-    let mut target = <GlesRenderer as Offscreen<GlesTexture>>::create_buffer(
-        &mut renderer,
-        Fourcc::Abgr8888,
-        mode.to_logical(1).to_buffer(1, Transform::Normal),
-    )
-    .unwrap();
-    for transform in [
-        Transform::Normal,
-        Transform::Flipped180,
-        Transform::_90,
-        Transform::_180,
-        Transform::_270,
-        Transform::Flipped,
-        Transform::Flipped90,
-        Transform::Flipped270,
-    ] {
-        let size = transform.transform_size(mode);
-        for noise in [0.0_f32, 0.012] {
-            for tick in 0..5 {
-                let mut native = window_scene(
-                    &mut renderer,
-                    &mut effects,
-                    &mut shadows,
-                    size,
-                    tick,
-                    transform,
-                    noise,
-                );
-                native.extend(background(size, tick));
-                let reference = pixels(&mut renderer, &mut target, mode, transform, &native);
-                let mut opening = window_scene(
-                    &mut renderer,
-                    &mut effects,
-                    &mut shadows,
-                    size,
-                    tick,
-                    transform,
-                    noise,
-                );
-                let shader = shaders
-                    .open_scene_element(&renderer, id.clone(), &mut opening, 1.0, 1.0, 0.37)
-                    .unwrap();
-                assert!(opening.is_empty());
-                opening.push(SceneElement::WindowOpen(shader));
-                opening.extend(background(size, tick));
-                let actual = pixels(&mut renderer, &mut target, mode, transform, &opening);
-                let maximum = actual
-                    .iter()
-                    .zip(&reference)
-                    .map(|(a, b)| a.abs_diff(*b))
-                    .max()
-                    .unwrap();
-                assert!(
-                    maximum <= (noise * 510.0).ceil() as u8 + 2,
-                    "endpoint mismatch: {transform:?}, tick {tick}, noise {noise}, max {maximum}"
-                );
+    let logical_mode: Size<i32, Physical> = (257, 193).into();
+    for scale in [1.0, 1.25, 1.5, 2.0] {
+        let mode = logical_mode.to_f64().upscale(scale).to_i32_round();
+        let mut target = <GlesRenderer as Offscreen<GlesTexture>>::create_buffer(
+            &mut renderer,
+            Fourcc::Abgr8888,
+            mode.to_logical(1).to_buffer(1, Transform::Normal),
+        )
+        .unwrap();
+        for transform in [
+            Transform::Normal,
+            Transform::Flipped180,
+            Transform::_90,
+            Transform::_180,
+            Transform::_270,
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped270,
+        ] {
+            let size = transform.transform_size(logical_mode);
+            effects.set_display_scale("opening-test", scale, transform.transform_size(mode));
+            for noise in [0.0_f32, 0.012] {
+                for tick in 0..5 {
+                    let mut native = window_scene(
+                        &mut renderer,
+                        &mut effects,
+                        &mut shadows,
+                        size,
+                        tick,
+                        transform,
+                        noise,
+                    );
+                    native.extend(background(size, tick));
+                    let native = native
+                        .into_iter()
+                        .map(|element| crate::render::display_scale::element(element, scale, false))
+                        .collect::<Vec<_>>();
+                    let reference = pixels(&mut renderer, &mut target, mode, transform, &native);
+                    let mut opening = window_scene(
+                        &mut renderer,
+                        &mut effects,
+                        &mut shadows,
+                        size,
+                        tick,
+                        transform,
+                        noise,
+                    );
+                    let shader = shaders
+                        .open_scene_element(&renderer, id.clone(), &mut opening, 1.0, 1.0, 0.37)
+                        .unwrap();
+                    assert!(opening.is_empty());
+                    opening.push(SceneElement::WindowOpen(shader));
+                    opening.extend(background(size, tick));
+                    let opening = opening
+                        .into_iter()
+                        .map(|element| crate::render::display_scale::element(element, scale, false))
+                        .collect::<Vec<_>>();
+                    let actual = pixels(&mut renderer, &mut target, mode, transform, &opening);
+                    let maximum = actual
+                        .iter()
+                        .zip(&reference)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap();
+                    assert!(
+                        maximum <= (noise * 510.0).ceil() as u8 + 2,
+                        "endpoint mismatch: scale={scale}, {transform:?}, tick {tick}, noise {noise}, max {maximum}"
+                    );
+                }
             }
         }
     }

@@ -242,8 +242,20 @@ impl Pointer {
         match event {
             InputEvent::PointerMotion { event } => {
                 let delta = event.delta();
+                let position = Point::<f64, Logical>::from(self.position);
+                let scale = space
+                    .outputs()
+                    .find(|output| {
+                        space
+                            .output_geometry(output)
+                            .is_some_and(|geometry| geometry.to_f64().contains(position))
+                    })
+                    .map_or(1.0, |output| output.current_scale().fractional_scale());
                 self.position = clamp_to_outputs(
-                    (self.position.0 + delta.x, self.position.1 + delta.y),
+                    (
+                        self.position.0 + delta.x / scale,
+                        self.position.1 + delta.y / scale,
+                    ),
                     &outputs,
                 );
             }

@@ -38,9 +38,9 @@ pub(crate) fn window_chrome_visible<D: SessionDriver>(
 pub(crate) fn window_capture_size<D: SessionDriver>(
     session: &Session<D>,
     window: &Window,
-) -> smithay::utils::Size<i32, Logical> {
+) -> smithay::utils::Size<i32, smithay::utils::Physical> {
     let client = window.geometry().size;
-    if window_chrome_visible(session, window) {
+    let size = if window_chrome_visible(session, window) {
         crate::titlebar::outer_size_for_client(
             window,
             client,
@@ -49,7 +49,21 @@ pub(crate) fn window_capture_size<D: SessionDriver>(
         )
     } else {
         client
-    }
+    };
+    size.to_f64()
+        .to_physical(window_display_scale(session, window))
+        .to_i32_round()
+}
+
+pub(crate) fn window_display_scale<D: SessionDriver>(session: &Session<D>, window: &Window) -> f64 {
+    window
+        .wl_surface()
+        .and_then(|surface| {
+            crate::wayland::display_scale::output_for_surface(&session.wayland, surface.as_ref())
+        })
+        .unwrap_or_else(|| session.driver.primary_output().clone())
+        .current_scale()
+        .fractional_scale()
 }
 
 pub(crate) fn window_capture_client_offset<D: SessionDriver>(
@@ -843,7 +857,25 @@ pub fn accept_selected<D: SessionDriver>(session: &mut Session<D>) -> bool {
     let Some(accepted) = session.capture.accept() else {
         return false;
     };
-    if let AcceptedTarget::Source(source) = accepted.target {
+    if let AcceptedTarget::Source(mut source) = accepted.target {
+        if let halley_ipc::CaptureSource::Monitor {
+            name,
+            width,
+            height,
+            ..
+        } = &mut source
+        {
+            if let Some(output) = session
+                .wayland
+                .space
+                .outputs()
+                .find(|output| output.name() == *name)
+            {
+                let size = crate::render::output_physical_size(output);
+                *width = size.w;
+                *height = size.h;
+            }
+        }
         if let PendingCapture::Source { reply, .. } = accepted.pending {
             let _ = reply.send(
                 halley_ipc::Response::Source(halley_ipc::SourceChooserResponse::Selected(source)),

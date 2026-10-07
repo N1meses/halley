@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// the end of `Request`/`Response` silently breaks wire-compatibility with
 /// a differently-versioned build - worth remembering as this grows, not
 /// solved here (this first pass has nothing to negotiate against yet).
-pub const HALLEY_IPC_VERSION: u32 = 22;
+pub const HALLEY_IPC_VERSION: u32 = 23;
 pub const HALLEY_API_VERSION: u32 = 1;
 
 /// A request from `halleyctl`, the portal backend, or another local client.
@@ -710,6 +710,8 @@ pub struct OutputInfo {
     pub current_mode: Option<usize>,
     pub offset_x: i32,
     pub offset_y: i32,
+    /// Pixels per logical desktop unit (1.5 means 150%).
+    pub scale: f64,
     /// Configured VRR policy as "off", "on", or "auto".
     pub vrr: String,
     /// Whether the connector advertises usable variable-refresh support.

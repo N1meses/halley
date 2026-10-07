@@ -95,7 +95,7 @@ pub fn destroyed<D: SessionDriver>(session: &mut Session<D>, surface: &WlSurface
 pub fn elements(
     renderer: &mut GlesRenderer,
     icon: Option<&DndIcon>,
-    output: &Output,
+    _output: &Output,
     output_geometry: Rectangle<i32, Logical>,
     pointer_position: (f64, f64),
 ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
@@ -112,7 +112,7 @@ pub fn elements(
     {
         return Vec::new();
     }
-    let scale = Scale::from(output.current_scale().fractional_scale());
+    let scale = Scale::from(1.0);
     let local = (origin - output_geometry.loc)
         .to_f64()
         .to_physical(scale)

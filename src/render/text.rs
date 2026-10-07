@@ -8,7 +8,7 @@ use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
-use smithay::backend::renderer::{ContextId, ImportMem, Renderer};
+use smithay::backend::renderer::{ContextId, ImportMem, Renderer, Texture};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform};
 
@@ -30,6 +30,7 @@ struct TextKey {
     text: String,
     family: String,
     size_px: u16,
+    scale_120: u32,
     rgb: [u8; 3],
 }
 
@@ -42,6 +43,7 @@ pub struct UiTextRenderer {
     context: Option<ContextId<GlesTexture>>,
     text_system: TextSystem,
     font: halley_config::Font,
+    display_scale: f64,
     text: HashMap<TextKey, TextTexture>,
     /// Stable element identities, keyed by what the label *is* rather than by
     /// its call site, so the nineteen `element()` callers need not each invent
@@ -75,6 +77,7 @@ impl UiTextRenderer {
             context: None,
             text_system: TextSystem::new(),
             font: font.clone(),
+            display_scale: 1.0,
             text: HashMap::new(),
             ids: super::ids::ElementIds::default(),
             occurrences: HashMap::new(),
@@ -84,6 +87,10 @@ impl UiTextRenderer {
 
     pub fn font_size(&self) -> u16 {
         configured_font_size(&self.font)
+    }
+
+    pub fn set_display_scale(&mut self, scale: f64) {
+        self.display_scale = scale;
     }
 
     /// Resets per-frame label numbering and ages out unused identities.
@@ -101,6 +108,7 @@ impl UiTextRenderer {
         }
         self.font = font.clone();
         self.text.clear();
+        self.text_system.clear();
         true
     }
 
@@ -269,7 +277,7 @@ impl UiTextRenderer {
         entry.last_used = Instant::now();
         let source = Rectangle::<f64, Logical>::new(
             (0.0, 0.0).into(),
-            (entry.size.w as f64, entry.size.h as f64).into(),
+            (entry.texture.size().w as f64, entry.texture.size().h as f64).into(),
         );
         let base = TextureRenderElement::from_static_texture(
             id,
@@ -312,13 +320,14 @@ impl UiTextRenderer {
             text: text.to_string(),
             family: normalized_family(&self.font),
             size_px: effective_font_size(&self.font, size_px),
+            scale_120: (self.display_scale * 120.0).round() as u32,
             rgb,
         };
         if !self.text.contains_key(&key) {
             let Some(raster) = self.text_system.raster_uncached(
                 &UiFont {
                     family: key.family.clone(),
-                    size: key.size_px,
+                    size: (key.size_px as f64 * self.display_scale).round().max(1.0) as u16,
                 },
                 &key.text,
                 key.rgb,
@@ -332,7 +341,18 @@ impl UiTextRenderer {
                 key.clone(),
                 TextTexture {
                     texture,
-                    size: size.into(),
+                    size: if self.display_scale == 1.0 {
+                        size.into()
+                    } else {
+                        let logical = self.text_system.measure(
+                            &UiFont {
+                                family: key.family.clone(),
+                                size: key.size_px,
+                            },
+                            &key.text,
+                        );
+                        (logical.width.round() as i32, logical.height.round() as i32).into()
+                    },
                     last_used: now,
                 },
             );
@@ -471,5 +491,45 @@ mod tests {
             family: "sans-serif".to_string(),
             size: 12,
         }));
+    }
+    #[test]
+    #[ignore = "requires surfaceless GLES; run with LIBGL_ALWAYS_SOFTWARE=1 and --ignored"]
+    fn display_scale_rasterizes_text_at_native_density_and_separates_caches() {
+        use smithay::backend::egl::{EGLContext, EGLDisplay, native::EGLSurfacelessDisplay};
+        let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }.unwrap();
+        let context = EGLContext::new(&display).unwrap();
+        let mut renderer = unsafe { GlesRenderer::new(context) }.unwrap();
+        let mut text = UiTextRenderer::default();
+        let base_key = text
+            .prepare_key(&mut renderer, "Halley display scale", [255; 3], None)
+            .unwrap()
+            .unwrap();
+        let base = text.text[&base_key].texture.size();
+        text.set_display_scale(2.0);
+        let scaled_key = text
+            .prepare_key(&mut renderer, "Halley display scale", [255; 3], None)
+            .unwrap()
+            .unwrap();
+        let scaled = text.text[&scaled_key].texture.size();
+        assert_ne!(base_key, scaled_key);
+        assert!(
+            scaled.w >= base.w * 3 / 2 && scaled.h >= base.h * 3 / 2,
+            "{base:?} -> {scaled:?}"
+        );
+        let measured = text
+            .measure(&mut renderer, "Halley display scale", [255; 3])
+            .unwrap()
+            .unwrap();
+        assert!(
+            measured.w.abs_diff(base.w) <= 3,
+            "logical label layout changed: {base:?} -> {measured:?}"
+        );
+        text.set_display_scale(1.0);
+        assert_eq!(
+            text.prepare_key(&mut renderer, "Halley display scale", [255; 3], None)
+                .unwrap()
+                .unwrap(),
+            base_key
+        );
     }
 }

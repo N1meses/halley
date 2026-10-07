@@ -99,7 +99,7 @@ pub(super) fn layer_surface_scene_elements(
     backdrop_blur_renderer: &mut crate::render::effects::backdrop_blur::BackdropBlurRenderer,
 ) -> Result<Vec<SceneElement>, Box<dyn Error>> {
     let map = layer_map_for_output(output);
-    let scale = Scale::from(output.current_scale().fractional_scale());
+    let scale = Scale::from(1.0);
     let output_bounds = Rectangle::<i32, Physical>::from_size(output_geometry.size.to_physical(1));
     let mut elements = Vec::new();
 

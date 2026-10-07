@@ -412,6 +412,11 @@ one atomic snapshot; invalid edits leave the last valid runtime state active.
 Nested Rune `gather` dependencies are watched recursively, including missing
 dependencies that are created after startup.
 
+Per-monitor display scaling uses a numeric multiplier: `scale 1.0` means
+100%, `scale 1.5` means 150%. It changes the size of applications and Halley
+UI while retaining the native display resolution. See [display scaling](docs/display-scale.md)
+for mixed-monitor positioning and examples.
+
 A freshly generated config declares no startup clusters, so windows begin on the
 empty Field. The optional `autostart` section can still declare persistent named
 clusters using compact command arrays, including empty `members []`
