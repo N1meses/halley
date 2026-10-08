@@ -219,7 +219,7 @@ impl<D: SessionDriver> Session<D> {
 
         WaylandState::new(
             display_handle.clone(),
-            CompositorState::new::<Self>(&display_handle),
+            CompositorState::new_v6::<Self>(&display_handle),
             dmabuf_state,
             dmabuf_global,
             XdgShellState::new::<Self>(&display_handle),
@@ -394,17 +394,11 @@ impl<D: SessionDriver> Session<D> {
         }
     }
 
-    /// Shows the one-time basics card automatically when Halley generated this
-    /// configuration and this is its first successful native session. Nested
-    /// sessions never call this, and `first_run_eligible` refuses a nested
-    /// backend even if one did.
+    /// Offers the basics card once per package version in a native session.
+    /// Existing configurations qualify; nested sessions never offer it.
     pub fn initialize_basics_card(&mut self) {
-        let Some(config_path) = self.config_path.clone() else {
-            return;
-        };
         let eligible = super::basics::first_run_eligible(
             D::BACKEND_KIND == crate::input::keybinds::BackendKind::Tty,
-            self.user_state.basics_card_pending_for(&config_path),
             self.user_state.basics_card_dismissed(),
         );
         if eligible {
@@ -431,7 +425,7 @@ impl<D: SessionDriver> Session<D> {
     }
 
     /// Dismisses the basics card and remembers that it was dismissed, so it is
-    /// never offered automatically again.
+    /// not offered automatically again for this package version.
     pub fn dismiss_basics_card(&mut self) -> bool {
         if !self
             .shell

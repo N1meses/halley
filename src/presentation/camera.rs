@@ -74,6 +74,42 @@ impl OutputCameras {
         self.insert(output_name, output_size);
     }
 
+    /// Display scaling changes the viewport extent while retaining the Field
+    /// location, zoom, and any fullscreen/maximize restore state.
+    pub fn resize_for_display_scale(
+        &mut self,
+        output_name: &str,
+        output_size: Size<i32, Physical>,
+    ) {
+        let Some(camera) = self.cameras.get_mut(output_name) else {
+            return;
+        };
+        let ratio = Vec2 {
+            x: output_size.w as f32 / camera.base_size.x.max(1.0),
+            y: output_size.h as f32 / camera.base_size.y.max(1.0),
+        };
+        let resize = |size: Vec2| Vec2 {
+            x: size.x * ratio.x,
+            y: size.y * ratio.y,
+        };
+        camera.base_size = Vec2 {
+            x: output_size.w as f32,
+            y: output_size.h as f32,
+        };
+        camera.view_size = resize(camera.view_size);
+        camera.target_view_size = resize(camera.target_view_size);
+        if let Some(restore) = self.fullscreen.get_mut(output_name) {
+            restore.view_size = resize(restore.view_size);
+            restore.handoff_from_view_size = restore.handoff_from_view_size.map(resize);
+            restore.handoff_target_view_size = restore.handoff_target_view_size.map(resize);
+        }
+        if let Some(restore) = self.field_maximize.get_mut(output_name) {
+            restore.view_size = resize(restore.view_size);
+            restore.from_view_size = restore.from_view_size.map(resize);
+            restore.target_view_size = restore.target_view_size.map(resize);
+        }
+    }
+
     pub fn remove(&mut self, output_name: &str) {
         self.cameras.remove(output_name);
         self.fullscreen.remove(output_name);
@@ -423,6 +459,37 @@ fn camera_at_rest(output_size: Size<i32, Physical>) -> Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_scale_resize_preserves_field_location_and_zoom() {
+        let mut cameras = OutputCameras::default();
+        cameras.insert("DP-1".into(), (1280, 800).into());
+        let camera = cameras.get_mut("DP-1").unwrap();
+        camera.center = Vec2 { x: 740.0, y: 480.0 };
+        camera.target_center = Vec2 { x: 780.0, y: 530.0 };
+        camera.view_size = Vec2 {
+            x: 2560.0,
+            y: 1600.0,
+        };
+        camera.target_view_size = Vec2 {
+            x: 1920.0,
+            y: 1200.0,
+        };
+        let before = *camera;
+        cameras.resize_for_display_scale("DP-1", (640, 400).into());
+        let after = cameras.get("DP-1").unwrap();
+        assert_eq!(after.center, before.center);
+        assert_eq!(after.target_center, before.target_center);
+        assert_eq!(scale(after), scale(&before));
+        assert_eq!(
+            after.view_size,
+            Vec2 {
+                x: 1280.0,
+                y: 800.0
+            }
+        );
+        assert_eq!(after.target_view_size, Vec2 { x: 960.0, y: 600.0 });
+    }
 
     #[test]
     fn outputs_keep_independent_camera_state() {

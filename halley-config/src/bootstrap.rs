@@ -286,11 +286,19 @@ mod tests {
     }
 
     #[test]
-    fn template_uses_ring_only_view_entries() {
+    fn template_uses_scale_only_view_entries_with_default_rings() {
         let config = RuneConfig::from_str(DEFAULT_CONFIG).expect("bootstrap template parses");
         let view = crate::parse_view_checked(&config).expect("bootstrap view parses");
 
-        assert!(view.outputs.is_empty());
+        assert_eq!(view.outputs.len(), 2);
+        for output in &view.outputs {
+            assert_eq!(output.scale, 1.0);
+            assert_eq!(output.width, None);
+            assert_eq!(output.height, None);
+        }
+        let overlays = crate::parse_overlays_checked(&config).expect("bootstrap overlays parse");
+        assert_eq!(overlays.notifications.offset_x, 0);
+        assert_eq!(overlays.notifications.offset_y, 0);
         assert_eq!(view.focus_rings.by_output.len(), 2);
         assert!(view.focus_rings.by_output.contains_key("DP-1"));
         assert!(view.focus_rings.by_output.contains_key("DP-2"));

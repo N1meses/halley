@@ -105,7 +105,7 @@ same cursor, focused-window, then output-center fallback chain as launch.
 Travel remains capped at 320 pixels.
 
 The intended open/close pairs are `center-out`/`shrink`, `fade`/`fade`, and
-`launch`/`retract`. All close styles retain the original ease-in-out cubic
+`launch`/`retract`. Built-in close styles retain the original ease-in-out cubic
 timing. Closing snapshots preserve the window's current opening opacity and
 track camera motion while they finish. Layer-shell surfaces and X11
 override-redirect popups are not window-close animation targets.

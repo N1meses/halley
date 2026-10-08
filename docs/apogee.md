@@ -42,6 +42,11 @@ apogee:
 end
 ```
 
+`background-dim` darkens the wallpaper without adding a color tint. `0.0`
+leaves it unchanged and `1.0` makes it black when Apogee is fully open; the
+dimming fades smoothly with the opening and closing transition. Cluster
+Composer uses the same setting.
+
 Tiles use reusable GPU-local offscreen textures. DMA-BUF client buffers remain
 on the GPU through import and composition; there is no CPU readback. A client
 commit only dirties that window's cached tile, commits are coalesced, and

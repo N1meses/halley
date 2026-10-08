@@ -2,6 +2,7 @@ pub mod background_effect;
 pub(crate) mod clipboard_helper;
 pub mod compositor;
 pub mod decoration;
+pub mod display_scale;
 pub mod dmabuf;
 pub mod dnd;
 pub mod ext_workspace;
@@ -15,8 +16,10 @@ pub mod layer_shell;
 pub mod permissions;
 pub mod popup;
 pub mod presentation;
+pub(crate) mod screenshot_clipboard;
 pub mod selection;
 pub mod session_lock;
+mod surface_scale;
 pub mod text_input;
 mod virtual_keyboard;
 pub mod wlr_gamma_control;
@@ -113,6 +116,7 @@ pub fn set_window_output(window: &Window, output: &Output) {
         .inherited
         .write()
         .expect("window output inheritance lock poisoned") = None;
+    display_scale::send_window(window, output);
 }
 
 /// Makes `window` follow a managed owner's output without allowing writes to

@@ -3,6 +3,7 @@ pub mod arrange_texture;
 pub mod background;
 pub mod close;
 pub(crate) mod conservative;
+pub mod display_scale;
 pub mod effects;
 pub mod fullscreen_texture;
 pub mod ids;
@@ -17,6 +18,7 @@ mod selection_check;
 pub mod text;
 pub mod titlebar;
 pub mod window_decoration;
+pub mod window_open;
 pub mod window_shader;
 pub mod window_texture;
 
@@ -47,6 +49,15 @@ pub const CLEAR_COLOR: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
 /// Fail-closed backdrop used for every output while ext-session-lock-v1 owns
 /// the session, including outputs whose locker surface is not ready yet.
 pub const SESSION_LOCK_COLOR: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
+
+pub fn output_physical_size(output: &Output) -> Size<i32, Physical> {
+    output.current_transform().transform_size(
+        output
+            .current_mode()
+            .expect("mapped output has a mode")
+            .size,
+    )
+}
 
 pub fn window_surface_location(
     mapped_geometry_location: Point<i32, Logical>,
@@ -115,7 +126,8 @@ pub fn layer_surface_elements(
     layer: Layer,
 ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
     let map = layer_map_for_output(output);
-    let scale = Scale::from(output.current_scale().fractional_scale());
+    // The complete logical scene is converted to output pixels at its boundary.
+    let scale = Scale::from(1.0);
     map.layers_on(layer)
         .rev()
         .flat_map(|surface| {

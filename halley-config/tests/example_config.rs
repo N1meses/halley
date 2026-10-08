@@ -611,13 +611,17 @@ fn example_config_arrange_animation_parses() {
     );
 }
 
-/// The shipped example uses ring-only view entries by default. A connector
-/// name matching real hardware must not be enough to create modeset work.
+/// The shipped example documents scale without selecting a custom mode.
 #[test]
-fn example_config_view_has_no_hardware_overrides_by_default() {
+fn example_config_view_has_default_scale_without_custom_modes() {
     let config = RuneConfig::from_file(EXAMPLE_PATH).expect("example config parses");
     let view = halley_config::parse_view_checked(&config).expect("example view parses");
-    assert_eq!(view.outputs, Vec::new());
+    assert_eq!(view.outputs.len(), 2);
+    assert!(
+        view.outputs
+            .iter()
+            .all(|output| output.width.is_none() && output.height.is_none() && output.scale == 1.0)
+    );
     assert_eq!(view.focus_rings.by_output.len(), 2);
 }
 

@@ -20,13 +20,11 @@ configuration already share your desktop's administrative trust boundary.
 
 ## Portal backend
 
-Only the session-bus owner of `org.freedesktop.portal.Desktop`, running the
-approved `xdg-desktop-portal` executable as the same Unix user, can invoke the
-backend. Standard `/usr/lib` and `/usr/libexec` installations are recognized.
-For a custom installation, set `HALLEY_PORTAL_FRONTEND` to its absolute
-executable path in the **portal backend's** service environment. Do not approve
-an interpreter or a generic command runner. Requests and sessions remain bound
-to the initiating unique bus connection; sessions also retain their app ID.
+Portal capture uses Halley's normal source chooser and consent flow. Backend
+requests do not require a particular frontend bus name or executable path.
+Requests and sessions remain bound to the initiating unique bus connection;
+sessions also retain their app ID. A different connection cannot reuse or
+close another connection's session.
 
 ## Sensitive Wayland protocols
 

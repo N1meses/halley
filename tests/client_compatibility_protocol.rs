@@ -1,6 +1,8 @@
 //! Client compatibility requests through the production upstream dispatcher.
 #[path = "../src/wayland/clipboard_helper.rs"]
 mod clipboard_helper;
+#[path = "../src/wayland/surface_scale.rs"]
+mod surface_scale;
 #[path = "../src/wayland/dispatch.rs"]
 mod upstream_protocols;
 
@@ -42,6 +44,7 @@ struct Observations {
     content_type: u32,
     icon_name: Option<String>,
     toplevels: Vec<WlSurface>,
+    scale_request: Option<(WlSurface, f64)>,
 }
 
 struct Server {
@@ -124,6 +127,8 @@ upstream_protocols::delegate_upstream_protocols!(Server);
 #[derive(Default)]
 struct Client {
     globals: HashMap<String, (u32, u32)>,
+    integer_scales: Vec<i32>,
+    fractional_scales: Vec<u32>,
 }
 impl Dispatch<wl_registry::WlRegistry, ()> for Client {
     fn event(
@@ -145,7 +150,39 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Client {
     }
 }
 delegate_noop!(Client: ignore wl_compositor::WlCompositor);
-delegate_noop!(Client: ignore wl_surface::WlSurface);
+impl Dispatch<wl_surface::WlSurface, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &wl_surface::WlSurface,
+        event: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = event {
+            state.integer_scales.push(factor);
+        }
+    }
+}
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1 as fractional_manager, wp_fractional_scale_v1 as fractional,
+};
+delegate_noop!(Client: ignore fractional_manager::WpFractionalScaleManagerV1);
+impl Dispatch<fractional::WpFractionalScaleV1, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &fractional::WpFractionalScaleV1,
+        event: fractional::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let fractional::Event::PreferredScale { scale } = event {
+            state.fractional_scales.push(scale);
+        }
+    }
+}
+impl smithay::wayland::fractional_scale::FractionalScaleHandler for Server {}
 delegate_noop!(Client: ignore wl_buffer::WlBuffer);
 delegate_noop!(Client: ignore pixel::WpSinglePixelBufferManagerV1);
 delegate_noop!(Client: ignore content_manager::WpContentTypeManagerV1);
@@ -169,7 +206,9 @@ impl Fixture {
         let (client_socket, server_socket) = UnixStream::pair().unwrap();
         let mut display = Display::<Server>::new().unwrap();
         let mut dh = display.handle();
-        let compositor = CompositorState::new::<Server>(&dh);
+        let compositor = CompositorState::new_v6::<Server>(&dh);
+        let _fractional =
+            smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Server>(&dh);
         let _pixels = SinglePixelBufferState::new::<Server>(&dh);
         let _content = ContentTypeState::new::<Server>(&dh);
         let _icons = XdgToplevelIconManager::new::<Server>(&dh);
@@ -187,6 +226,26 @@ impl Fixture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 display.dispatch_clients(&mut server).unwrap();
+                let request = server.observations.lock().unwrap().scale_request.take();
+                if let Some((surface, scale)) = request {
+                    let output = smithay::output::Output::new(
+                        "scale-test".into(),
+                        smithay::output::PhysicalProperties {
+                            size: (0, 0).into(),
+                            subpixel: smithay::output::Subpixel::Unknown,
+                            make: "test".into(),
+                            model: "test".into(),
+                            serial_number: "test".into(),
+                        },
+                    );
+                    output.change_current_state(
+                        None,
+                        None,
+                        Some(smithay::output::Scale::Fractional(scale)),
+                        None,
+                    );
+                    surface_scale::send_tree(&surface, &output);
+                }
                 display.flush_clients().unwrap();
                 thread::sleep(Duration::from_millis(1));
             }
@@ -211,7 +270,7 @@ impl Fixture {
     fn surface(&self) -> wl_surface::WlSurface {
         let compositor: wl_compositor::WlCompositor = self.registry.bind(
             self.state.globals["wl_compositor"].0,
-            4,
+            6,
             &self.queue.handle(),
             (),
         );
@@ -405,4 +464,42 @@ fn single_pixel_buffers_preserve_color_and_destroy_cleanly() {
     manager.destroy();
     f.sync();
     assert_eq!(f.observations.lock().unwrap().destroyed_buffers, 1);
+}
+
+#[test]
+fn display_scale_preferences_update_after_fractional_and_integer_changes() {
+    let mut f = Fixture::new();
+    let compositor: wl_compositor::WlCompositor =
+        f.registry
+            .bind(f.state.globals["wl_compositor"].0, 6, &f.queue.handle(), ());
+    let surface = compositor.create_surface(&f.queue.handle(), ());
+    let shell: xdg_wm_base::XdgWmBase =
+        f.registry
+            .bind(f.state.globals["xdg_wm_base"].0, 1, &f.queue.handle(), ());
+    let xdg_surface = shell.get_xdg_surface(&surface, &f.queue.handle(), ());
+    let _toplevel = xdg_surface.get_toplevel(&f.queue.handle(), ());
+    let manager: fractional_manager::WpFractionalScaleManagerV1 = f.registry.bind(
+        f.state.globals["wp_fractional_scale_manager_v1"].0,
+        1,
+        &f.queue.handle(),
+        (),
+    );
+    let _fractional = manager.get_fractional_scale(&surface, &f.queue.handle(), ());
+    f.sync();
+    let server_surface = f
+        .observations
+        .lock()
+        .unwrap()
+        .toplevels
+        .last()
+        .unwrap()
+        .clone();
+    for (scale, integer, fractional) in [(1.5, 2, 180), (2.0, 2, 240), (1.0, 1, 120)] {
+        f.observations.lock().unwrap().scale_request = Some((server_surface.clone(), scale));
+        // One roundtrip processes the request; a second receives any notifications flushed after its sync callback.
+        f.sync();
+        f.sync();
+        assert_eq!(f.state.integer_scales.last(), Some(&integer));
+        assert_eq!(f.state.fractional_scales.last(), Some(&fractional));
+    }
 }

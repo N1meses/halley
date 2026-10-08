@@ -811,8 +811,59 @@ impl<D: SessionDriver> XwmHandler for Session<D> {
 
     fn randr_primary_output_change(&mut self, _xwm: XwmId, _output_name: Option<String>) {}
 
-    fn disconnected(&mut self, _xwm: XwmId) {
+    fn disconnected(&mut self, xwm: XwmId) {
+        if self.xwayland.xwm.as_ref().map(X11Wm::id) != Some(xwm) {
+            return;
+        }
         eventline::warn!("xwayland: window manager disconnected");
+
+        // Snapshot before either Space refresh or dropping X11Wm can discard
+        // the mapped windows. Collapsed windows live only in NodesState.
+        let mut surfaces = Vec::new();
+        for surface in self
+            .wayland
+            .space
+            .elements()
+            .chain(self.nodes.records().map(|record| &record.window))
+            .filter_map(Window::x11_surface)
+            .chain(
+                self.xwayland
+                    .pending_windows
+                    .values()
+                    .map(|pending| &pending.surface),
+            )
+            .chain(
+                self.xwayland
+                    .pending_override_redirects
+                    .values()
+                    .map(|pending| &pending.surface),
+            )
+            .filter(|surface| surface.xwm_id() == Some(xwm))
+        {
+            if !surfaces
+                .iter()
+                .any(|existing| same_surface(existing, surface))
+            {
+                surfaces.push(surface.clone());
+            }
+        }
+
+        // The connection is gone: do not send EWMH or focus updates to it.
+        // Drop Smithay's manager first so none of its windows remain eligible
+        // as live keyboard/pointer targets while normal cleanup runs.
+        self.xwayland.control = None;
+        self.xwayland.xwm = None;
+        for surface in surfaces {
+            cancel_pending_override_redirect(self, surface.window_id());
+            forget_window(self, &surface);
+            crate::session::trace::forget_x11(self, &surface);
+        }
         self.xwayland.clear();
+        crate::session::sync_keyboard_focus(self, SERIAL_COUNTER.next_serial());
+        crate::session::pointer::refresh_desktop_client_focus(
+            self,
+            self.start_time.elapsed().as_millis() as u32,
+        );
+        self.request_redraw();
     }
 }

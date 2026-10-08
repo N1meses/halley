@@ -50,6 +50,30 @@ pub(super) fn spawn_detached_with_env(
     launch(&mut process, command_line, wayland_display, x11_display);
 }
 
+/// Open screenshot paths as literal arguments, including spaces and shell metacharacters.
+pub(super) fn spawn_program(
+    program: &str,
+    argument: &std::path::Path,
+    wayland_display: &OsStr,
+    x11_display: Option<&OsStr>,
+    cursor_size: u8,
+    environment: &LaunchEnvironment,
+) -> io::Result<()> {
+    let mut process = Command::new(program);
+    process.arg(argument);
+    configure_environment(
+        &mut process,
+        wayland_display,
+        x11_display,
+        cursor_size,
+        environment,
+        &[],
+    );
+    detach(&mut process);
+    process.spawn()?.wait()?;
+    Ok(())
+}
+
 /// Autostart output belongs in persistent files, rather than the terminal or
 /// /dev/null. Ordinary keybind launches keep their existing behavior.
 pub(super) fn spawn_autostart(

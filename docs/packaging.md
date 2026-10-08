@@ -41,13 +41,18 @@ Without `winit`, `--winit` and automatic nested-session selection report a
 clear error instead of attempting to acquire the real DRM session. An explicit
 `--session` still selects the TTY backend.
 
+Halley Lift is built and packaged separately from
+[its own repository](https://github.com/saltnpepper97/halley-lift). The default
+launcher binding still calls `halley-lift`; ecosystem bundles should depend on
+that package. Historical monorepo release tags continue to contain older Lift sources.
+
 ## Installed resources
 
 Packaged resources use the distribution `/usr` layout:
 
 | Resource | Destination |
 | --- | --- |
-| `halley`, `halleyctl`, `halley-lift`, `xdg-desktop-portal-halley` | `/usr/bin/` |
+| `halley`, `halleyctl`, `xdg-desktop-portal-halley` | `/usr/bin/` |
 | `packaging/wayland-sessions/halley-session` | `/usr/bin/` |
 | `packaging/wayland-sessions/halley.desktop` | `/usr/share/wayland-sessions/` |
 | `packaging/xdg-desktop-portal/halley-portals.conf` | `/usr/share/xdg-desktop-portal/` |
@@ -84,8 +89,11 @@ before Halley starts may instead appear on the terminal or in
 `journalctl --user -u halley.service`.
 
 A direct native `halley` or `halley --session` launch also owns the systemd
-graphical-session lifecycle: it starts `graphical-session.target` after its
-listeners are ready and stops session services and clears display variables
+graphical-session lifecycle: it starts `halley-direct-session.target` after its
+listeners are ready. That target pulls in `graphical-session.target`, which
+refuses manual starts, without launching another compositor. Install the direct
+session target alongside the other systemd resources. Halley stops session
+services and clears display variables
 on exit. A managed launch leaves that cleanup to the launcher. Nested sessions
 do not start or stop host session targets. `HALLEY_NO_INIT_INTEGRATION=1`
 disables this target management too.

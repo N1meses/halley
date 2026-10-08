@@ -296,6 +296,9 @@ impl<D: SessionDriver> CompositorHandler for Session<D> {
             },
         );
         wayland::text_input::handle_popup_commit(self, surface);
+        if let Some(output) = wayland::display_scale::output_for_surface(&self.wayland, surface) {
+            wayland::display_scale::send_tree(&root, &output);
+        }
         match toplevel_commit.clone() {
             wayland::xdg_shell::ToplevelCommit::Mapped(mapped)
                 if wayland::clipboard_helper::saved_focus(&mapped).is_some() =>
@@ -1396,11 +1399,9 @@ impl<D: SessionDriver> Dispatch<ExtWorkspaceHandleV1, WorkspaceData, Session<D>>
 
 impl<D: SessionDriver> FractionalScaleHandler for Session<D> {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        let scale = self
-            .driver
-            .primary_output()
-            .current_scale()
-            .fractional_scale();
+        let output = wayland::display_scale::output_for_surface(&self.wayland, &surface)
+            .unwrap_or_else(|| self.driver.primary_output().clone());
+        let scale = output.current_scale().fractional_scale();
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional_scale| {
                 fractional_scale.set_preferred_scale(scale);
@@ -1443,7 +1444,7 @@ impl<D: SessionDriver> KeyboardShortcutsInhibitHandler for Session<D> {
 }
 
 impl<D: SessionDriver> SelectionHandler for Session<D> {
-    type SelectionUserData = ();
+    type SelectionUserData = crate::wayland::screenshot_clipboard::SelectionData;
 
     #[cfg(feature = "xwayland")]
     fn new_selection(
@@ -1456,16 +1457,27 @@ impl<D: SessionDriver> SelectionHandler for Session<D> {
             .update_selection(target, source.map(|source| source.mime_types()));
     }
 
-    #[cfg(feature = "xwayland")]
     fn send_selection(
         &mut self,
         target: smithay::wayland::selection::SelectionTarget,
         mime_type: String,
         fd: std::os::fd::OwnedFd,
         _seat: Seat<Self>,
-        _user_data: &(),
+        user_data: &Self::SelectionUserData,
     ) {
-        self.xwayland.request_selection(target, mime_type, fd);
+        match user_data {
+            crate::wayland::screenshot_clipboard::SelectionData::Png(png) => {
+                if target == smithay::wayland::selection::SelectionTarget::Clipboard
+                    && mime_type == "image/png"
+                {
+                    crate::wayland::screenshot_clipboard::send(png.clone(), fd);
+                }
+            }
+            crate::wayland::screenshot_clipboard::SelectionData::X11 => {
+                #[cfg(feature = "xwayland")]
+                self.xwayland.request_selection(target, mime_type, fd);
+            }
+        }
     }
 }
 

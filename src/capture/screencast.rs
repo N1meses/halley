@@ -240,22 +240,56 @@ fn cursor_metadata<D: SessionDriver>(
         return None;
     }
     let (x, y) = cursor_position(session, source)?;
+    let scale = match source {
+        halley_ipc::CaptureSource::Monitor { name, .. } => session
+            .wayland
+            .space
+            .outputs()
+            .find(|output| output.name() == *name)?
+            .current_scale()
+            .fractional_scale(),
+        halley_ipc::CaptureSource::Window { surface_id, .. } => {
+            let window = session.wayland.space.elements().find(|window| {
+                window
+                    .wl_surface()
+                    .is_some_and(|surface| surface.id().protocol_id() == *surface_id)
+            })?;
+            crate::capture::window_display_scale(session, window)
+        }
+    };
     let presentation_override = crate::session::cursor_override(session);
     match session.cursor.render_cursor_with_override(
-        1,
+        scale.ceil() as i32,
         crate::frame_clock::monotonic_now(),
         presentation_override,
     ) {
         RenderCursor::Hidden => None,
-        RenderCursor::Named(frame) => Some(halley_ipc::CursorMetadata {
-            x,
-            y,
-            hotspot_x: frame.hotspot_x,
-            hotspot_y: frame.hotspot_y,
-            width: frame.width,
-            height: frame.height,
-            bgra: frame.metadata_bgra.to_vec(),
-        }),
+        RenderCursor::Named(frame) => {
+            let factor = scale / f64::from(frame.scale.max(1));
+            let width = (f64::from(frame.width) * factor).round().max(1.0) as u32;
+            let height = (f64::from(frame.height) * factor).round().max(1.0) as u32;
+            let image = image::RgbaImage::from_raw(
+                frame.width,
+                frame.height,
+                frame.metadata_bgra.to_vec(),
+            )?;
+            let bgra = image::imageops::resize(
+                &image,
+                width,
+                height,
+                image::imageops::FilterType::Triangle,
+            )
+            .into_raw();
+            Some(halley_ipc::CursorMetadata {
+                x,
+                y,
+                hotspot_x: (f64::from(frame.hotspot_x) * factor).round() as i32,
+                hotspot_y: (f64::from(frame.hotspot_y) * factor).round() as i32,
+                width,
+                height,
+                bgra,
+            })
+        }
         RenderCursor::Surface { surface, snapshot } => {
             let bounds = smithay::desktop::utils::bbox_from_surface_tree(
                 &surface,
@@ -271,6 +305,7 @@ fn cursor_metadata<D: SessionDriver>(
                         &surface,
                         snapshot.as_deref(),
                         bounds,
+                        scale,
                     )
                 })
                 .ok()?;
@@ -278,10 +313,10 @@ fn cursor_metadata<D: SessionDriver>(
             Some(halley_ipc::CursorMetadata {
                 x,
                 y,
-                hotspot_x,
-                hotspot_y,
-                width,
-                height,
+                hotspot_x: (f64::from(hotspot_x) * scale).round() as i32,
+                hotspot_y: (f64::from(hotspot_y) * scale).round() as i32,
+                width: (f64::from(width) * scale).round().max(1.0) as u32,
+                height: (f64::from(height) * scale).round().max(1.0) as u32,
                 bgra: pixels,
             })
         }
@@ -313,7 +348,17 @@ fn cursor_position<D: SessionDriver>(
             height,
         } => {
             let position = session.pointer.position();
-            let local = (position.0.round() as i32 - x, position.1.round() as i32 - y);
+            let scale = session
+                .wayland
+                .space
+                .outputs()
+                .find(|output| output.name() == *name)?
+                .current_scale()
+                .fractional_scale();
+            let local = (
+                ((position.0 - f64::from(*x)) * scale).round() as i32,
+                ((position.1 - f64::from(*y)) * scale).round() as i32,
+            );
             (session
                 .wayland
                 .space
@@ -354,9 +399,12 @@ fn cursor_position<D: SessionDriver>(
             }
             let location = session.wayland.space.element_location(&window)?;
             let client_offset = crate::capture::window_capture_client_offset(session, &window);
+            let scale = crate::capture::window_display_scale(session, &window);
             Some((
-                (route.location.x - f64::from(location.x)).round() as i32 + client_offset.x,
-                (route.location.y - f64::from(location.y)).round() as i32 + client_offset.y,
+                ((route.location.x - f64::from(location.x) + f64::from(client_offset.x)) * scale)
+                    .round() as i32,
+                ((route.location.y - f64::from(location.y) + f64::from(client_offset.y)) * scale)
+                    .round() as i32,
             ))
         }
     }

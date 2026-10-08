@@ -484,6 +484,7 @@ mod tests {
                 current_mode: Some(0),
                 offset_x: 0,
                 offset_y: 0,
+                scale: 1.0,
                 vrr: "auto".to_string(),
                 vrr_supported: true,
                 vrr_active: true,

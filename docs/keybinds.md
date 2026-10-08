@@ -301,8 +301,13 @@ transaction is active, its windows are protected from automatic decay. Pressing
 `Mod+A` again restores the exact geometry/output
 snapshot captured by that output's arrangement. The restore transaction is
 recorded before clients are configured, so an immediate or mid-animation second
-press reverses reliably without waiting for clients to commit. `undo-arrange` remains
-available as an unbound compatibility action for custom configurations.
+press reverses reliably without waiting for clients to commit. Moving, resizing,
+or closing any participating window ends that output's restore transaction and
+its decay protection. The current positions become ordinary Field geometry;
+the next `Mod+A` creates a new arrangement instead of restoring the old snapshot.
+Changes to non-participating windows or other outputs do not discard it.
+`undo-arrange` remains available as an unbound compatibility action for custom
+configurations and follows the same lifetime.
 
 `default-terminal` (also accepted as `open-terminal`) launches the first
 available built-in terminal in this order:
@@ -311,25 +316,24 @@ available built-in terminal in this order:
 `terminator`, `mate-terminal`, `qterminal`, `lxterminal`, then `xterm`.
 To choose an exact terminal instead, bind its command directly—for example,
 `"$var.mod+t" "kitty"`.
-The default `$var.mod+d` binding launches `halley-lift`, Halley's bundled search
+The default `$var.mod+d` binding launches `halley-lift`, Halley's separately packaged search
 and action launcher. Lift searches applications, running nodes, clusters,
 compositor actions, and config files in one field, and its `term` mode runs a
 terminal command line. Any other launcher works the same way, because a
 non-built-in action string is a command line: replace the binding with
 `"$var.mod+d" "fuzzel"` to use Fuzzel instead. Freshly generated configs ship
-the Lift binding and keep Fuzzel as a comment. Existing 0.6-or-newer configs keep
-their own launcher binding during routine structural migration. The explicit
-migration of an incompatible pre-0.6 config instead backs it up and replaces it
-with the current default config.
+the Lift binding and keep Fuzzel as a comment. Existing configs keep their own
+launcher binding. Halley never backs up, migrates, or replaces an existing
+config; edit it manually and check it with `halleyctl config verify`.
 The interactive screenshot menu and its area, screen, and window selectors
 force the compositor cursor visible even if a client or inactivity policy had
 hidden it.
-A freshly generated configuration's first native session also shows the one-time
+The first native session of each Halley package version also shows the
 basics card: the Field-first mental model and only the five essential chords
 (`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange, `Mod+N` collapse/restore,
-`Mod+O` Apogee). It appears on that first native session only, captures just
+`Mod+O` Apogee). It appears until dismissed for that version, captures just
 `Enter`, `Escape`, and the first pointer press or touch, and records the
-dismissal so it never reappears automatically. Reopen it by hand from Lift's
+dismissed version so it stays hidden on later launches of that same version. Reopen it by hand from Lift's
 **Show Halley basics** action or `halleyctl basics`. See
 [Compositor overlays](overlays.md) for the card itself and the user-state file
 that remembers the dismissal.

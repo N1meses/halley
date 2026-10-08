@@ -69,6 +69,7 @@ render_elements! {
     RoundedCropped=CropRenderElement<super::window_decoration::RoundedSurfaceElement>,
     WindowResize=super::resize::ResizeRenderElement,
     WindowShader=super::window_shader::WindowShaderRenderElement,
+    WindowOpen=super::window_open::WindowOpenElement,
     WindowBorder=super::window_decoration::RoundedBorderElement,
     RoundedTexture=super::window_decoration::RoundedTextureElement,
     ClusterCore=crate::clusters::render::ClusterCoreElement,
@@ -84,13 +85,37 @@ render_elements! {
     Closing=smithay::backend::renderer::element::texture::TextureRenderElement<
         smithay::backend::renderer::gles::GlesTexture
     >,
+    ScreenshotPreview=smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
     CaptureOverlay=super::overlays::capture::CaptureOverlayElement,
     SourceChooser=super::overlays::source_chooser::SourceChooserElement,
     Border=SolidColorRenderElement,
+    DisplayScaled=super::display_scale::DisplayScaledElement,
     Layer=WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
 pub fn build(
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    primary_output: &Output,
+    output_geometry: Rectangle<i32, Logical>,
+    request: RenderRequest<'_>,
+) -> Result<Vec<SceneElement>, Box<dyn Error>> {
+    let scale = output.current_scale().fractional_scale();
+    let locked = request.desktop.session_lock.active();
+    request.resources.ui_text.set_display_scale(scale);
+    request.resources.backdrop_blur_renderer.set_display_scale(
+        &output.name(),
+        scale,
+        crate::render::output_physical_size(output),
+    );
+    let elements = build_logical(renderer, output, primary_output, output_geometry, request)?;
+    Ok(elements
+        .into_iter()
+        .map(|element| super::display_scale::element(element, scale, locked))
+        .collect())
+}
+
+fn build_logical(
     renderer: &mut GlesRenderer,
     output: &Output,
     primary_output: &Output,
@@ -131,11 +156,7 @@ pub fn build(
             })
             .map(SceneElement::Layer)
             .collect::<Vec<_>>();
-        let backdrop_size = output_geometry
-            .size
-            .to_f64()
-            .to_physical(scale)
-            .to_i32_round();
+        let backdrop_size = crate::render::output_physical_size(output);
         elements.push(SceneElement::Border(super::solid_color_element(
             request
                 .resources
@@ -1102,12 +1123,7 @@ pub fn build(
                 .node_renderer
                 .active_slot_id(crate::render::node::NodeSlot::ClusterComposerBackdrop),
             Rectangle::<i32, Physical>::from_size(output_geometry.size.to_physical(1)),
-            smithay::backend::renderer::Color32F::new(
-                0.01,
-                0.018,
-                0.03,
-                request.overlays.apogee_config.background_dim * alpha,
-            ),
+            overview::apogee_backdrop_color(request.overlays.apogee_config.background_dim, alpha),
         ));
         elements.insert(0, veil);
         if let Some(prepared) = session.prepared() {

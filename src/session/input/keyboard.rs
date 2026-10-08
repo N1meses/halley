@@ -32,6 +32,7 @@ enum KeyboardOutcome {
     ClusterCharacter(char),
     ClusterIntercept,
     BasicsDismiss,
+    EmptyClusterCancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,7 +93,9 @@ pub(super) fn handle<D, B>(
     let state = key_event.state();
     session.keyboard.side_modifiers.update(keycode, state);
     let time = key_event.time();
+    super::super::empty_cluster::sync(session, crate::frame_clock::monotonic_now());
     if state == KeyState::Released {
+        session.shell.overlays.empty_cluster.release(keycode.raw());
         session.key_repeat.release(keycode);
         session.clusters.stop_name_repeat(keycode.raw());
     } else {
@@ -347,6 +350,12 @@ pub(super) fn handle<D, B>(
                 forwarded_non_modifier_press = non_modifier;
                 return FilterResult::Forward;
             }
+            if state == KeyState::Pressed
+                && sym == Some(Keysym::Escape)
+                && data.shell.overlays.empty_cluster.visible()
+            {
+                return FilterResult::Intercept(KeyboardOutcome::EmptyClusterCancel);
+            }
             let context = super::keyboard_binding_context(data);
             match match_keyboard_binding(
                 &data.keyboard.binds,
@@ -399,6 +408,12 @@ pub(super) fn handle<D, B>(
         Some(KeyboardOutcome::ClusterDeleteIntercept) => {
             if state == KeyState::Pressed {
                 session.interactions.suppressed_keys.suppress(keycode);
+            }
+        }
+        Some(KeyboardOutcome::EmptyClusterCancel) => {
+            session.interactions.suppressed_keys.suppress(keycode);
+            if session.shell.overlays.empty_cluster.cancel() {
+                session.request_redraw();
             }
         }
         Some(KeyboardOutcome::BasicsDismiss) => {

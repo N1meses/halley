@@ -38,6 +38,14 @@ pub fn send<D: SessionDriver>(
     mime_type: String,
     fd: OwnedFd,
 ) {
+    if selection == SelectionTarget::Clipboard
+        && mime_type == "image/png"
+        && let Some(data) = current_data_device_selection_userdata(seat)
+        && let crate::wayland::screenshot_clipboard::SelectionData::Png(png) = &*data
+    {
+        crate::wayland::screenshot_clipboard::send(png.clone(), fd);
+        return;
+    }
     match selection {
         SelectionTarget::Clipboard => {
             if let Err(err) = request_data_device_client_selection(seat, mime_type, fd) {
@@ -59,8 +67,18 @@ pub fn set<D: SessionDriver>(
     mime_types: Vec<String>,
 ) {
     match selection {
-        SelectionTarget::Clipboard => set_data_device_selection(display, seat, mime_types, ()),
-        SelectionTarget::Primary => set_primary_selection(display, seat, mime_types, ()),
+        SelectionTarget::Clipboard => set_data_device_selection(
+            display,
+            seat,
+            mime_types,
+            crate::wayland::screenshot_clipboard::SelectionData::X11,
+        ),
+        SelectionTarget::Primary => set_primary_selection(
+            display,
+            seat,
+            mime_types,
+            crate::wayland::screenshot_clipboard::SelectionData::X11,
+        ),
     }
 }
 
@@ -70,10 +88,24 @@ pub fn clear<D: SessionDriver>(
     selection: SelectionTarget,
 ) {
     match selection {
-        SelectionTarget::Clipboard if current_data_device_selection_userdata(seat).is_some() => {
+        SelectionTarget::Clipboard
+            if current_data_device_selection_userdata(seat).is_some_and(|data| {
+                matches!(
+                    *data,
+                    crate::wayland::screenshot_clipboard::SelectionData::X11
+                )
+            }) =>
+        {
             clear_data_device_selection(display, seat)
         }
-        SelectionTarget::Primary if current_primary_selection_userdata(seat).is_some() => {
+        SelectionTarget::Primary
+            if current_primary_selection_userdata(seat).is_some_and(|data| {
+                matches!(
+                    *data,
+                    crate::wayland::screenshot_clipboard::SelectionData::X11
+                )
+            }) =>
+        {
             clear_primary_selection(display, seat)
         }
         _ => {}

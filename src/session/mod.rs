@@ -17,6 +17,7 @@ mod basics;
 pub(crate) mod closing;
 mod cursor;
 mod decay_notice;
+mod empty_cluster;
 mod focus;
 mod foreign_toplevel;
 pub(crate) mod gesture;
@@ -29,6 +30,7 @@ pub(crate) mod opening;
 pub(crate) mod output;
 pub(crate) mod pointer;
 mod protocol;
+mod screenshot;
 mod settings;
 mod spawn;
 mod startup_clusters;
@@ -412,7 +414,8 @@ fn install_overlay_timer<D: SessionDriver>(
             Timer::from_duration(Duration::from_millis(8)),
             |_, _, session| {
                 let now = crate::frame_clock::monotonic_now();
-                let overlays_changed = session.shell.overlays.wakeup(now);
+                let empty_cluster_changed = empty_cluster::sync(session, now);
+                let overlays_changed = session.shell.overlays.wakeup(now) | empty_cluster_changed;
                 let bloom_changed = session.clusters.bloom_wakeup(now);
                 if bloom_changed {
                     for core in session.clusters.bloom_pinned_core_nodes() {

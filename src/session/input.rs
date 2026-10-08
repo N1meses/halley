@@ -1323,6 +1323,14 @@ fn apply_active_resize<D: SessionDriver>(session: &mut Session<D>) -> bool {
             .prepare_surface_target(member, current, global);
         Some(global)
     });
+    if size != state.start_rect.size
+        && let Some(surface) = state.window.wl_surface()
+    {
+        session
+            .interactions
+            .field_arrange
+            .invalidate_surface(surface.as_ref());
+    }
     if let Some(toplevel) = state.window.toplevel() {
         let size = floating_target.map_or(size, |target| target.size);
         toplevel.with_pending_state(|pending| pending.size = Some(size));
@@ -1595,6 +1603,15 @@ where
     if session.session_lock.active() {
         session.interactions.steam_close_pressed = None;
         crate::wayland::session_lock::handle_input(session, event);
+        return;
+    }
+    if let InputEvent::PointerButton { event } = event
+        && event.state() == ButtonState::Released
+        && session
+            .interactions
+            .screenshot_buttons
+            .release_is_suppressed(event.button_code())
+    {
         return;
     }
     if session.shell.overlays.confirmation_modal_active()
@@ -1941,6 +1958,9 @@ where
             session.request_redraw();
             return;
         }
+    }
+    if super::screenshot::handle_pointer(session, event) {
+        return;
     }
     let constrained_motion = super::pointer::constrain_motion(session, &pointer_handle);
 
@@ -2293,6 +2313,19 @@ where
                     },
                 );
                 let camera_scale = crate::presentation::camera::scale(camera).max(0.05);
+                if (output_changed
+                    || session
+                        .wayland
+                        .space
+                        .element_location(&window)
+                        .is_some_and(|location| location != desired_location))
+                    && let Some(surface) = window.wl_surface()
+                {
+                    session
+                        .interactions
+                        .field_arrange
+                        .invalidate_surface(surface.as_ref());
+                }
                 let now = crate::frame_clock::monotonic_now();
                 if let Some(placement) = edge_placement
                     && let crate::input::grab::Grab::MoveWindow {

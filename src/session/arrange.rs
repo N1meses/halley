@@ -32,6 +32,18 @@ impl ArrangeTransactions {
             .insert(output, ArrangeTransaction { restores });
     }
 
+    /// A deliberate edit to any participant accepts the current layout as
+    /// ordinary Field geometry. Forget the entire output's restore snapshot,
+    /// rather than letting a later toggle overwrite that newer choice.
+    pub(crate) fn invalidate_surface(&mut self, surface: &WlSurface) {
+        self.by_output.retain(|_, transaction| {
+            !transaction
+                .restores
+                .iter()
+                .any(|restore| restore.surface == *surface)
+        });
+    }
+
     pub(crate) fn contains_surface(&self, surface: &WlSurface) -> bool {
         self.by_output.values().any(|transaction| {
             transaction
@@ -769,6 +781,66 @@ mod tests {
         assert!(transactions.take("DP-1").is_none());
         assert!(transactions.take("DP-2").is_some());
         assert!(!transactions.active_on("DP-2"));
+    }
+
+    #[test]
+    fn editing_a_participant_forgets_its_whole_output_but_not_other_outputs() {
+        use smithay::reexports::wayland_server::{
+            Client, DataInit, Dispatch, Display, DisplayHandle,
+            protocol::wl_surface::{self, WlSurface},
+        };
+        use std::os::unix::net::UnixStream;
+        use std::sync::Arc;
+
+        struct State;
+        impl Dispatch<WlSurface, ()> for State {
+            fn request(
+                _: &mut Self,
+                _: &Client,
+                _: &WlSurface,
+                _: wl_surface::Request,
+                _: &(),
+                _: &DisplayHandle,
+                _: &mut DataInit<'_, Self>,
+            ) {
+            }
+        }
+        let display = Display::<State>::new().unwrap();
+        let mut handle = display.handle();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let client = handle
+            .insert_client(socket, Arc::new(crate::wayland::ClientState::default()))
+            .unwrap();
+        let surfaces = (0..4)
+            .map(|_| {
+                client
+                    .create_resource::<WlSurface, (), State>(&handle, 1, ())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let restore =
+            |surface: &WlSurface, output: &str| crate::presentation::maximize::FieldRestore {
+                surface: surface.clone(),
+                geometry: Rectangle::new((0, 0).into(), (400, 300).into()),
+                output: output.into(),
+            };
+        let mut transactions = ArrangeTransactions::default();
+        transactions.insert(
+            "DP-1".into(),
+            vec![restore(&surfaces[0], "DP-1"), restore(&surfaces[1], "DP-1")],
+        );
+        transactions.insert("DP-2".into(), vec![restore(&surfaces[2], "DP-2")]);
+
+        transactions.invalidate_surface(&surfaces[3]);
+        assert!(transactions.active_on("DP-1"));
+        assert!(transactions.active_on("DP-2"));
+        transactions.invalidate_surface(&surfaces[1]);
+        assert!(!transactions.active_on("DP-1"));
+        assert!(!transactions.contains_surface(&surfaces[0]));
+        assert!(!transactions.contains_surface(&surfaces[1]));
+        assert!(transactions.active_on("DP-2"));
+        assert!(transactions.contains_surface(&surfaces[2]));
+        assert!(transactions.take("DP-2").is_some());
     }
 
     #[test]

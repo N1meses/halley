@@ -48,7 +48,7 @@ fn lifecycle_child() {
 
 fn lifecycle_calls(ready: bool, managed: bool, fail_start: bool) -> String {
     let scratch = Scratch::new();
-    scratch.executable("systemctl", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CAPTURE\"\nif [ \"${FAIL_START:-}\" = 1 ] && [ \"$2\" = start ]; then exit 1; fi\n");
+    scratch.executable("systemctl", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CAPTURE\"\n# Mirror systemd's RefuseManualStart on the generic graphical target.\nif [ \"$2\" = start ] && [ \"$4\" = graphical-session.target ]; then exit 4; fi\nif [ \"${FAIL_START:-}\" = 1 ] && [ \"$2\" = start ]; then exit 1; fi\n");
     let capture = scratch.0.join("calls");
     let mut process = Command::new(std::env::current_exe().unwrap());
     process
@@ -83,7 +83,10 @@ fn direct_ready_session_starts_target_then_shuts_down_and_clears_display_environ
     let calls = lifecycle_calls(true, false, false);
     let lines: Vec<_> = calls.lines().collect();
     assert_eq!(lines.len(), 3, "{calls}");
-    assert_eq!(lines[0], "--user start --no-block graphical-session.target");
+    assert_eq!(
+        lines[0],
+        "--user start --no-block halley-direct-session.target"
+    );
     assert_eq!(
         lines[1],
         "--user start --job-mode=replace-irreversibly halley-shutdown.target"

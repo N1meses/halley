@@ -204,9 +204,16 @@ pub struct OutputInfo {
     pub current_mode: Option<usize>,
     pub offset_x: i32,
     pub offset_y: i32,
+    /// Physical pixels per logical desktop unit.
+    #[serde(default = "default_output_scale")]
+    pub scale: f64,
     pub vrr: String,
     pub vrr_supported: bool,
     pub vrr_active: bool,
+}
+
+fn default_output_scale() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +298,7 @@ impl From<halley_ipc::OutputInfo> for OutputInfo {
             current_mode: v.current_mode,
             offset_x: v.offset_x,
             offset_y: v.offset_y,
+            scale: v.scale,
             vrr: v.vrr,
             vrr_supported: v.vrr_supported,
             vrr_active: v.vrr_active,

@@ -633,22 +633,31 @@ pub fn toggle_focused_on_output<D: crate::session::SessionDriver>(
     }
 }
 
+fn close_candidate_in_workspace(
+    active: Option<halley_core::cluster::ClusterId>,
+    membership: Option<halley_core::cluster::ClusterId>,
+) -> bool {
+    active.is_none_or(|cluster| membership == Some(cluster))
+}
+
 pub fn close_focused_on_output<D: crate::session::SessionDriver>(
     session: &mut crate::session::Session<D>,
     output: Option<&str>,
 ) {
     let belongs_to_output = |id: NodeId| {
-        output.is_none_or(|output| {
-            session
-                .nodes
-                .record(id)
-                .is_some_and(|record| record.output == output)
-                || session
-                    .clusters
-                    .cluster_for_core(id)
-                    .and_then(|cluster| session.clusters.metadata(cluster))
-                    .is_some_and(|metadata| metadata.output == output)
-        })
+        if let Some(record) = session.nodes.record(id) {
+            let requested_output = output.unwrap_or(&record.output);
+            return record.output == requested_output
+                && close_candidate_in_workspace(
+                    session.clusters.active_on(requested_output),
+                    session.clusters.cluster_for_member(id),
+                );
+        }
+        session
+            .clusters
+            .cluster_for_core(id)
+            .and_then(|cluster| session.clusters.metadata(cluster))
+            .is_some_and(|metadata| output.is_none_or(|output| metadata.output == output))
     };
 
     // Active cluster members are intentionally hidden from the free-field
@@ -664,7 +673,9 @@ pub fn close_focused_on_output<D: crate::session::SessionDriver>(
         .and_then(|surface| session.nodes.id_for_surface(surface))
         .filter(|id| belongs_to_output(*id));
     let logical_focused = session.nodes.focused().filter(|id| belongs_to_output(*id));
-    let output_focused = output.and_then(|output| session.nodes.focused_on_output(output));
+    let output_focused = output
+        .and_then(|output| session.nodes.focused_on_output(output))
+        .filter(|id| belongs_to_output(*id));
     let Some(id) = preferred_close_candidate(client_focused, logical_focused, output_focused)
     else {
         return;
@@ -1607,5 +1618,24 @@ mod close_tests {
     fn cluster_members_reject_individual_minimize_requests() {
         assert!(!collapse_allowed(true));
         assert!(collapse_allowed(false));
+    }
+}
+
+#[cfg(test)]
+mod workspace_close_tests {
+    #[test]
+    fn active_cluster_close_never_targets_a_hidden_field_or_other_cluster_window() {
+        use halley_core::cluster::ClusterId;
+        let active = ClusterId::new(1);
+        assert!(!super::close_candidate_in_workspace(Some(active), None));
+        assert!(!super::close_candidate_in_workspace(
+            Some(active),
+            Some(ClusterId::new(2))
+        ));
+        assert!(super::close_candidate_in_workspace(
+            Some(active),
+            Some(active)
+        ));
+        assert!(super::close_candidate_in_workspace(None, None));
     }
 }

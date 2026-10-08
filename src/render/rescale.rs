@@ -16,8 +16,7 @@ use smithay::utils::{
 /// from whatever `scale` is passed at *query* time (confirmed by reading
 /// `smithay/src/backend/renderer/element/surface.rs`), and the generic
 /// `draw_render_elements` driver both backends use always queries geometry
-/// at `1.0` (matching this project's choice not to touch the
-/// protocol-visible output scale) - so a `zoom_scale` passed at construction
+/// at `1.0` (before the final per-output display-scale wrapper) - so a `zoom_scale` passed at construction
 /// time never survives to the actual draw call. Old halley hit this same
 /// wall and solved it with a custom render element
 /// (`halley-wl/src/render/rescale.rs::RescaledSurfaceElement`) that hardcodes

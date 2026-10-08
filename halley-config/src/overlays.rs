@@ -57,6 +57,8 @@ pub enum NotificationPosition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Notifications {
     pub position: NotificationPosition,
+    pub offset_x: i32,
+    pub offset_y: i32,
     pub success_duration_ms: u64,
     pub error_duration_ms: u64,
 }
@@ -65,6 +67,8 @@ impl Default for Notifications {
     fn default() -> Self {
         Self {
             position: NotificationPosition::TopCenter,
+            offset_x: 0,
+            offset_y: 0,
             success_duration_ms: DEFAULT_SUCCESS_DURATION_MS,
             error_duration_ms: DEFAULT_ERROR_DURATION_MS,
         }
@@ -355,6 +359,22 @@ pub fn parse_overlays_checked(config: &RuneConfig) -> Result<Overlays, OverlayPa
             .clamp(0, 64),
         notifications: Notifications {
             position: notification_position,
+            offset_x: optional_i32(
+                config,
+                &[
+                    "overlays.notifications.offset-x",
+                    "overlay.notifications.offset-x",
+                ],
+            )?
+            .unwrap_or(defaults.notifications.offset_x),
+            offset_y: optional_i32(
+                config,
+                &[
+                    "overlays.notifications.offset-y",
+                    "overlay.notifications.offset-y",
+                ],
+            )?
+            .unwrap_or(defaults.notifications.offset_y),
             success_duration_ms,
             error_duration_ms,
         },
@@ -542,6 +562,8 @@ mod tests {
             overlays.notifications.success_duration_ms,
             DEFAULT_SUCCESS_DURATION_MS
         );
+        assert_eq!(overlays.notifications.offset_x, 0);
+        assert_eq!(overlays.notifications.offset_y, 0);
         assert_eq!(overlays.zoom_indicator, ZoomIndicator::default());
     }
 
@@ -559,6 +581,8 @@ overlays:
   border-size 5
   notifications:
     position "bottom-right"
+    offset-x -40
+    offset-y 20
     success-duration-ms 1500
     error-duration-ms 12000
   end
@@ -589,6 +613,8 @@ end
             overlays.notifications.position,
             NotificationPosition::BottomRight
         );
+        assert_eq!(overlays.notifications.offset_x, -40);
+        assert_eq!(overlays.notifications.offset_y, 20);
         assert_eq!(overlays.notifications.success_duration_ms, 1_500);
         assert_eq!(overlays.notifications.error_duration_ms, 12_000);
         assert!(!overlays.zoom_indicator.enabled);

@@ -12,7 +12,9 @@ use smithay::backend::renderer::gles::{
     UniformName, UniformType, ffi, link_program,
 };
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::backend::renderer::{ContextId, Offscreen, Renderer, Texture};
+use smithay::backend::renderer::{
+    Bind, ContextId, Frame, FrameContext, Offscreen, Renderer, Texture,
+};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Size, Transform};
 
@@ -125,6 +127,7 @@ pub struct BackdropBlurRenderer {
     program_retry: RetryState,
     unsupported_context: Option<ContextId<GlesTexture>>,
     outputs: HashMap<String, OutputResources>,
+    display_scales: HashMap<String, (f64, Size<i32, Physical>)>,
 }
 
 pub struct BackdropBlurElement {
@@ -132,6 +135,7 @@ pub struct BackdropBlurElement {
     commit: CommitCounter,
     size: Size<i32, Physical>,
     geometry: Rectangle<i32, Physical>,
+    display_scale: f64,
     partial: bool,
     patches: Vec<BlurPatch>,
     plan: RefCell<Option<BlurPlan>>,
@@ -147,6 +151,10 @@ pub struct BackdropBlurElement {
 }
 
 impl BackdropBlurRenderer {
+    pub fn set_display_scale(&mut self, output: &str, scale: f64, size: Size<i32, Physical>) {
+        self.display_scales
+            .insert(output.to_string(), (scale, size));
+    }
     pub fn begin_scene(&mut self, output: &str) {
         if let Some(resources) = self.outputs.get_mut(output) {
             resources.scene_identities.clear();
@@ -155,6 +163,7 @@ impl BackdropBlurRenderer {
 
     pub fn remove_output(&mut self, output: &str) {
         self.outputs.remove(output);
+        self.display_scales.remove(output);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -172,6 +181,28 @@ impl BackdropBlurRenderer {
         if patches.is_empty() {
             return Ok(None);
         }
+        let (display_scale, physical_size) = self
+            .display_scales
+            .get(output)
+            .copied()
+            .unwrap_or((1.0, size.to_physical(1)));
+        let patches = patches
+            .into_iter()
+            .map(|patch| BlurPatch {
+                rect: crate::render::display_scale::scale_rect(patch.rect, display_scale),
+                radius: patch.radius * display_scale as f32,
+                alpha: patch.alpha,
+                clip: patch.clip.map(|(rect, radii)| {
+                    (
+                        crate::render::display_scale::scale_rect(rect, display_scale),
+                        crate::render::window_decoration::CornerRadii {
+                            top: radii.top * display_scale as f32,
+                            bottom: radii.bottom * display_scale as f32,
+                        },
+                    )
+                }),
+            })
+            .collect::<Vec<_>>();
         let context = renderer.context_id();
         if self.program_context.as_ref() != Some(&context) {
             self.program_context = Some(context.clone());
@@ -205,7 +236,6 @@ impl BackdropBlurRenderer {
             }
             self.program_retry.recover();
         }
-        let physical_size = size.to_physical(1);
         let levels = config.passes.clamp(1, 5);
         let config_fingerprint = blur_config_fingerprint(config);
         let resources = self
@@ -293,7 +323,7 @@ impl BackdropBlurRenderer {
         let commit = blur_commit(&patches, config, presentation_epoch);
         // Upstream captures the whole effect geometry. Cover the output so
         // blur kernels have valid pixels beyond each displayed patch.
-        let geometry = Rectangle::from_size(physical_size);
+        let geometry = Rectangle::from_size(size.to_physical(1));
         let partial = false;
         let _ = output_transform;
         Ok(Some(BackdropBlurElement {
@@ -304,6 +334,7 @@ impl BackdropBlurRenderer {
             commit,
             size: physical_size,
             geometry,
+            display_scale,
             partial,
             patches,
             plan: RefCell::new(None),
@@ -693,6 +724,46 @@ fn run_blur(
     })?
 }
 
+impl BackdropBlurElement {
+    pub(crate) fn visible_geometry(&self) -> Rectangle<i32, Physical> {
+        self.patches
+            .iter()
+            .map(|patch| patch.rect)
+            .reduce(|a, b| a.merge(b))
+            .map(|rect| crate::render::display_scale::scale_rect(rect, 1.0 / self.display_scale))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn capture_with_background(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        background: &[crate::render::scene::SceneElement],
+        cache: &UserDataMap,
+    ) -> Result<(), GlesError> {
+        self.capture_framebuffer(frame, self.src(), self.geometry, cache)?;
+        if !self.element.captured.get() || background.is_empty() {
+            return Ok(());
+        }
+        let transform = frame.transformation();
+        let mode_size = transform.invert().transform_size(self.size);
+        let mut guard = FrameContext::renderer(frame);
+        let renderer = guard.as_mut();
+        let mut textures = self.textures.borrow_mut();
+        let mut target = renderer.bind(&mut textures.accum)?;
+        let mut backdrop = renderer.render(&mut target, mode_size, transform)?;
+        // Preserve the normal background-to-foreground order in the blur's
+        // existing capture, while leaving the actual output untouched.
+        smithay::backend::renderer::utils::draw_render_elements(
+            &mut backdrop,
+            1.0,
+            background,
+            &[Rectangle::from_size(self.size)],
+        )?;
+        let _ = backdrop.finish()?;
+        Ok(())
+    }
+}
+
 impl Element for BackdropBlurElement {
     fn id(&self) -> &Id {
         &self.id
@@ -745,7 +816,7 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                     textures.chain.len() as u32,
                     self.offset,
                     &self.patches,
-                    &[self.geometry],
+                    &[Rectangle::from_size(self.size)],
                 )
             } else {
                 regions::plan_for_outputs(
@@ -878,6 +949,7 @@ impl RenderElement<GlesRenderer> for BackdropBlurElement {
                 &damage,
                 self.saturation,
                 self.noise,
+                dst.loc - self.geometry.loc,
             ) {
                 suspend_blur(&self.retry, "composite pass", &error);
                 return Ok(());
@@ -899,6 +971,7 @@ fn suspend_blur(retry: &Rc<RefCell<RetryState>>, stage: &str, error: &GlesError)
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn composite_patch(
     frame: &mut GlesFrame<'_, '_>,
     texture: &GlesTexture,
@@ -907,15 +980,19 @@ fn composite_patch(
     damage: &[Rectangle<i32, Physical>],
     saturation: f32,
     noise: f32,
+    destination_offset: smithay::utils::Point<i32, Physical>,
 ) -> Result<(), GlesError> {
+    // Sampling and clipping remain in output coordinates. Only the drawn
+    // quad moves when a window scene is relocated into an offscreen texture.
+    let destination = Rectangle::new(patch.rect.loc + destination_offset, patch.rect.size);
     let local_damage = damage
         .iter()
         .filter_map(|damage| {
-            patch.rect.intersection(*damage).map(|visible| {
+            destination.intersection(*damage).map(|visible| {
                 Rectangle::new(
                     (
-                        visible.loc.x - patch.rect.loc.x,
-                        visible.loc.y - patch.rect.loc.y,
+                        visible.loc.x - destination.loc.x,
+                        visible.loc.y - destination.loc.y,
                     )
                         .into(),
                     visible.size,
@@ -944,7 +1021,7 @@ fn composite_patch(
             (f64::from(patch.rect.loc.x), f64::from(patch.rect.loc.y)).into(),
             (f64::from(patch.rect.size.w), f64::from(patch.rect.size.h)).into(),
         ),
-        patch.rect,
+        destination,
         &local_damage,
         &[],
         Transform::Normal,

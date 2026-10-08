@@ -1085,8 +1085,13 @@ fn apply_tty_output_config(app: &mut TtyApp, outputs_config: &[halley_config::Ou
         if change.size_changed
             && let Some(geometry) = app.wayland.space.output_geometry(&change.output)
         {
-            app.cameras
-                .reset(change.output.name(), geometry.size.to_physical(1));
+            if change.scale_changed {
+                app.cameras
+                    .resize_for_display_scale(&change.output.name(), geometry.size.to_physical(1));
+            } else {
+                app.cameras
+                    .reset(change.output.name(), geometry.size.to_physical(1));
+            }
             let external = app
                 .fullscreen
                 .reconfigure_output(&app.wayland, &change.output);
@@ -1098,6 +1103,7 @@ fn apply_tty_output_config(app: &mut TtyApp, outputs_config: &[halley_config::Ou
 
     if layout_changed {
         app.wayland.space.refresh();
+        crate::wayland::display_scale::refresh(&app.wayland, app.driver.backend.primary_output());
         // A pure output move rebases every window's global coordinates; the X
         // server only learns about it through this resync.
         crate::xwayland::sync_positions(app);
@@ -1490,6 +1496,7 @@ fn auto_vrr_eligible(app: &TtyApp, output: &Output, now: Duration) -> bool {
         || overlays.notification.is_some()
         || overlays.zoom_indicator.is_some()
         || overlays.cluster_indicator.is_some()
+        || overlays.empty_cluster.is_some()
     {
         return false;
     }

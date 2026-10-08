@@ -16,6 +16,7 @@ const AVAILABLE_TARGETS: u32 = TARGET_SCREEN | TARGET_WINDOW | TARGET_AREA;
 
 type Vardict = HashMap<String, OwnedValue>;
 
+#[derive(Clone)]
 pub struct ScreenshotInterface {
     connection: Connection,
 }
@@ -28,7 +29,7 @@ impl ScreenshotInterface {
 
 #[interface(name = "org.freedesktop.impl.portal.Screenshot")]
 impl ScreenshotInterface {
-    fn screenshot(
+    async fn screenshot(
         &self,
         handle: OwnedObjectPath,
         app_id: &str,
@@ -36,39 +37,47 @@ impl ScreenshotInterface {
         options: Vardict,
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<(u32, Vardict)> {
-        let owner = crate::auth::frontend(&self.connection, &header)?;
-        let _request = export_request(&self.connection, &handle, owner.as_str())?;
-        let interactive = extract_bool(&options, "interactive").unwrap_or(false);
-        let target = match extract_u32(&options, "target") {
-            Some(TARGET_SCREEN) => ScreenshotTarget::Screen,
-            Some(TARGET_WINDOW) => ScreenshotTarget::Window,
-            Some(TARGET_AREA) => ScreenshotTarget::Area,
-            None if interactive => ScreenshotTarget::Area,
-            None => ScreenshotTarget::Screen,
-            Some(_) => return Ok((2, Vardict::new())),
-        };
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        let app_id = app_id.to_owned();
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            let owner = crate::auth::sender(sender.as_ref())?;
+            let _request = export_request(&this.connection, &handle, owner.as_str())?;
+            let interactive = extract_bool(&options, "interactive").unwrap_or(false);
+            let target = match extract_u32(&options, "target") {
+                Some(TARGET_SCREEN) => ScreenshotTarget::Screen,
+                Some(TARGET_WINDOW) => ScreenshotTarget::Window,
+                Some(TARGET_AREA) => ScreenshotTarget::Area,
+                None if interactive => ScreenshotTarget::Area,
+                None => ScreenshotTarget::Screen,
+                Some(_) => return Ok((2, Vardict::new())),
+            };
 
-        eventline::info!(
-            "portal screenshot: app_id={app_id:?} interactive={interactive} target={target:?}"
-        );
-        match crate::compositor::screenshot(handle.to_string(), target) {
-            Ok(ScreenshotResponse::Saved { path }) => {
-                let mut results = Vardict::new();
-                results.insert(
-                    "uri".to_string(),
-                    owned(Value::from(path_to_file_uri(&path)))?,
-                );
-                Ok((0, results))
+            eventline::info!(
+                "portal screenshot: app_id={app_id:?} interactive={interactive} target={target:?}"
+            );
+            match crate::compositor::screenshot(handle.to_string(), target) {
+                Ok(ScreenshotResponse::Saved { path }) => {
+                    let mut results = Vardict::new();
+                    results.insert(
+                        "uri".to_string(),
+                        owned(Value::from(path_to_file_uri(&path)))?,
+                    );
+                    Ok((0, results))
+                }
+                Ok(ScreenshotResponse::Cancelled) => Ok((1, Vardict::new())),
+                Ok(ScreenshotResponse::Failed { message }) | Err(message) => {
+                    eventline::warn!("portal screenshot failed: {message}");
+                    Ok((2, Vardict::new()))
+                }
             }
-            Ok(ScreenshotResponse::Cancelled) => Ok((1, Vardict::new())),
-            Ok(ScreenshotResponse::Failed { message }) | Err(message) => {
-                eventline::warn!("portal screenshot failed: {message}");
-                Ok((2, Vardict::new()))
-            }
-        }
+        })
+        .await
     }
 
-    fn pick_color(
+    async fn pick_color(
         &self,
         handle: OwnedObjectPath,
         _app_id: &str,
@@ -76,9 +85,16 @@ impl ScreenshotInterface {
         _options: Vardict,
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<(u32, Vardict)> {
-        let owner = crate::auth::frontend(&self.connection, &header)?;
-        let _request = export_request(&self.connection, &handle, owner.as_str())?;
-        Ok((2, Vardict::new()))
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            let owner = crate::auth::sender(sender.as_ref())?;
+            let _request = export_request(&this.connection, &handle, owner.as_str())?;
+            Ok((2, Vardict::new()))
+        })
+        .await
     }
 
     #[zbus(property)]
@@ -92,6 +108,7 @@ impl ScreenshotInterface {
     }
 }
 
+#[derive(Clone)]
 struct RequestInterface {
     owner: String,
     request_handle: String,
@@ -99,15 +116,22 @@ struct RequestInterface {
 
 #[interface(name = "org.freedesktop.impl.portal.Request")]
 impl RequestInterface {
-    fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
-        crate::auth::same_owner(
-            header.sender().map(|name| name.as_str()).unwrap_or(""),
-            &self.owner,
-        )?;
-        if let Err(err) = crate::compositor::cancel_screenshot(self.request_handle.clone()) {
-            eventline::debug!("portal request close: {err}");
-        }
-        Ok(())
+    async fn close(&self, #[zbus(header)] header: Header<'_>) -> fdo::Result<()> {
+        let this = self.clone();
+        let sender = header.sender().map(|name| name.to_owned());
+        // zbus dispatches even synchronous interface methods on its async executor.
+        // Keep IPC waits and object cleanup off that executor.
+        blocking::unblock(move || {
+            crate::auth::same_owner(
+                sender.as_ref().map(|name| name.as_str()).unwrap_or(""),
+                &this.owner,
+            )?;
+            if let Err(err) = crate::compositor::cancel_screenshot(this.request_handle.clone()) {
+                eventline::debug!("portal request close: {err}");
+            }
+            Ok(())
+        })
+        .await
     }
 }
 

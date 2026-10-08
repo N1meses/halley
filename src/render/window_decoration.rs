@@ -33,6 +33,7 @@ pub mod slot {
     pub const JOIN_TINT_FALLBACK: usize = 4;
     pub const TITLEBAR_BACKGROUND: usize = 5;
     pub const TITLEBAR_BACKGROUND_FALLBACK: usize = 6;
+    pub const WINDOW_OPEN: usize = 7;
     /// Button backplates are offset by their control index.
     pub const TITLEBAR_BUTTON: usize = 16;
     /// Button glyphs are offset by their control index. The unmaximize glyph
@@ -769,23 +770,32 @@ impl RenderElement<GlesRenderer> for RoundedSurfaceElement {
                 self.transform(),
                 self.alpha(),
                 &self.program,
-                self.clip,
-                self.radii,
+                MaskGeometry {
+                    source: self.inner.src(),
+                    destination: self.destination,
+                    clip: self.clip,
+                    radii: self.radii,
+                },
                 (1.0, 1.0, 1.0, 1.0),
             ),
             WaylandSurfaceTexture::SolidColor(color) => {
-                let white_src = Rectangle::<f64, Buffer>::from_size(self.white.size().to_f64());
+                let white_full = Rectangle::<f64, Buffer>::from_size(self.white.size().to_f64());
+                let white_src = proxy_texture_source(src, self.inner.src(), white_full.size);
                 draw_masked_texture(
                     frame,
                     &self.white,
                     white_src,
                     dst,
                     damage,
-                    Transform::Normal,
+                    self.transform(),
                     self.alpha(),
                     &self.program,
-                    self.clip,
-                    self.radii,
+                    MaskGeometry {
+                        source: white_full,
+                        destination: self.destination,
+                        clip: self.clip,
+                        radii: self.radii,
+                    },
                     (color.r(), color.g(), color.b(), color.a()),
                 )
             }
@@ -854,8 +864,12 @@ impl RenderElement<GlesRenderer> for RoundedTextureElement {
             self.transform(),
             self.alpha(),
             &self.program,
-            self.clip,
-            self.radii,
+            MaskGeometry {
+                source: self.base.src(),
+                destination: self.base.geometry(Scale::from(1.0)),
+                clip: self.clip,
+                radii: self.radii,
+            },
             self.content_color,
         )
     }
@@ -959,6 +973,30 @@ impl RenderElement<GlesRenderer> for RoundedBorderElement {
     }
 }
 
+struct MaskGeometry {
+    source: Rectangle<f64, Buffer>,
+    destination: Rectangle<i32, Physical>,
+    clip: Rectangle<i32, Physical>,
+    radii: CornerRadii,
+}
+
+fn proxy_texture_source(
+    source: Rectangle<f64, Buffer>,
+    original: Rectangle<f64, Buffer>,
+    proxy_size: smithay::utils::Size<f64, Buffer>,
+) -> Rectangle<f64, Buffer> {
+    let scale_x = proxy_size.w / original.size.w.max(f64::EPSILON);
+    let scale_y = proxy_size.h / original.size.h.max(f64::EPSILON);
+    Rectangle::new(
+        (
+            (source.loc.x - original.loc.x) * scale_x,
+            (source.loc.y - original.loc.y) * scale_y,
+        )
+            .into(),
+        (source.size.w * scale_x, source.size.h * scale_y).into(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_masked_texture(
     frame: &mut GlesFrame<'_, '_>,
@@ -969,23 +1007,35 @@ fn draw_masked_texture(
     transform: Transform,
     alpha: f32,
     program: &GlesTexProgram,
-    clip: Rectangle<i32, Physical>,
-    radii: CornerRadii,
+    mask: MaskGeometry,
     content_color: (f32, f32, f32, f32),
 ) -> Result<(), GlesError> {
-    let uv_to_draw = texture_matrix(src, dst, texture.size(), transform, texture.is_y_inverted())
-        .invert()
-        .unwrap_or_else(Matrix3::identity);
+    // Recover coordinates in the original surface geometry from texture UVs.
+    // `src`/`dst` may have been cropped or moved into an opening snapshot;
+    // combining that relocated destination with an output-local clip shifts
+    // the mask and removes the top/left of real clients.
+    let uv_to_draw = texture_matrix(
+        mask.source,
+        mask.destination,
+        texture.size(),
+        transform,
+        texture.is_y_inverted(),
+    )
+    .invert()
+    .unwrap_or_else(Matrix3::identity);
     let uniforms = [
-        Uniform::new("clip_size", (clip.size.w as f32, clip.size.h as f32)),
+        Uniform::new(
+            "clip_size",
+            (mask.clip.size.w as f32, mask.clip.size.h as f32),
+        ),
         Uniform::new(
             "draw_offset",
             (
-                (dst.loc.x - clip.loc.x) as f32,
-                (dst.loc.y - clip.loc.y) as f32,
+                (mask.destination.loc.x - mask.clip.loc.x) as f32,
+                (mask.destination.loc.y - mask.clip.loc.y) as f32,
             ),
         ),
-        Uniform::new("corner_radii", (radii.top, radii.bottom)),
+        Uniform::new("corner_radii", (mask.radii.top, mask.radii.bottom)),
         Uniform::new(
             "uv_to_draw_col_0",
             (uv_to_draw.x.x, uv_to_draw.x.y, uv_to_draw.x.z),

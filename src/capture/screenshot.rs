@@ -77,6 +77,18 @@ fn save_region_inner<D: SessionDriver>(
     if outputs.is_empty() {
         return Err(io::Error::other("selected screenshot region contains no output").into());
     }
+    // A multi-monitor image uses a common pixel density, retaining native
+    // detail on the densest selected monitor and keeping the layout contiguous.
+    let image_scale = outputs
+        .iter()
+        .map(|(output, _)| output.current_scale().fractional_scale())
+        .fold(0.0_f64, f64::max);
+    let full_monitor_size = (outputs.len() == 1 && region == outputs[0].1)
+        .then(|| render::output_physical_size(&outputs[0].0));
+    let mut image_region = region.to_f64().upscale(image_scale).to_i32_round();
+    if let Some(size) = full_monitor_size {
+        image_region.size = size.to_logical(1);
+    }
     let primary = session.driver.primary_output().clone();
     let target_time = crate::frame_clock::monotonic_now();
     let node_grab_active = matches!(
@@ -165,18 +177,25 @@ fn save_region_inner<D: SessionDriver>(
                         resources: crate::render::resources::RenderResources::from(&mut *resources),
                     },
                 )?;
+                let physical = render::output_physical_size(output);
+                let mut image_geometry = geometry.to_f64().upscale(image_scale).to_i32_round();
+                if full_monitor_size.is_some() {
+                    image_geometry.size = physical.to_logical(1);
+                }
+                let pixels =
+                    resize_output_pixels(pixels, physical, image_geometry.size.to_physical(1))?;
                 Ok(OutputImage {
-                    geometry: *geometry,
+                    geometry: image_geometry,
                     pixels,
                 })
             })
             .collect()
     })?;
 
-    let pixels = composite_region(region, &images)?;
+    let pixels = composite_region(image_region, &images)?;
     Ok(CapturedImage {
-        width: region.size.w as u32,
-        height: region.size.h as u32,
+        width: image_region.size.w as u32,
+        height: image_region.size.h as u32,
         pixels,
     })
 }
@@ -328,7 +347,7 @@ where
         .space
         .output_geometry(&output)
         .ok_or_else(|| io::Error::other(format!("output {name} has no geometry")))?;
-    if geometry.size != (width, height).into() {
+    if render::output_physical_size(&output) != (width, height).into() {
         return Err(io::Error::other("selected output size changed").into());
     }
     let primary = session.driver.primary_output().clone();
@@ -415,7 +434,7 @@ where
                 resources: crate::render::resources::RenderResources::from(resources),
             },
         )?;
-        consume(renderer, &elements, geometry.size.to_physical(1))
+        consume(renderer, &elements, render::output_physical_size(&output))
     })
 }
 
@@ -425,16 +444,14 @@ pub(crate) fn capture_monitor_region_pixels<D: SessionDriver>(
     region: Rectangle<i32, Physical>,
     show_cursor: bool,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let geometry = session
-        .wayland
-        .space
-        .output_geometry(output)
-        .ok_or_else(|| io::Error::other("screencopy output is not mapped"))?;
+    if session.wayland.space.output_geometry(output).is_none() {
+        return Err(io::Error::other("screencopy output is not mapped").into());
+    }
     with_monitor_scene(
         session,
         &output.name(),
-        geometry.size.w,
-        geometry.size.h,
+        render::output_physical_size(output).w,
+        render::output_physical_size(output).h,
         show_cursor,
         |renderer, elements, _| {
             let offset = region.loc.upscale(-1);
@@ -462,17 +479,15 @@ pub(crate) fn render_monitor_region_dmabuf<D: SessionDriver>(
     show_cursor: bool,
     dmabuf: &mut Dmabuf,
 ) -> Result<SyncPoint, Box<dyn Error>> {
-    let geometry = session
-        .wayland
-        .space
-        .output_geometry(output)
-        .ok_or_else(|| io::Error::other("screencopy output is not mapped"))?;
+    if session.wayland.space.output_geometry(output).is_none() {
+        return Err(io::Error::other("screencopy output is not mapped").into());
+    }
     session.driver.import_dmabuf(dmabuf);
     with_monitor_scene(
         session,
         &output.name(),
-        geometry.size.w,
-        geometry.size.h,
+        render::output_physical_size(output).w,
+        render::output_physical_size(output).h,
         show_cursor,
         |renderer, elements, _| {
             let offset = region.loc.upscale(-1);
@@ -561,14 +576,17 @@ where
     let maximized = window
         .wl_surface()
         .is_some_and(|surface| session.maximize.contains(surface.as_ref()));
+    let scale = crate::capture::window_display_scale(session, window);
     let decorations = &session.settings.decorations;
     let font = &session.settings.font;
     let resources = &mut session.render;
+    resources.ui_text.set_display_scale(scale);
     session.driver.with_renderer(|renderer| {
-        let texture = crate::render::window_texture::capture_decorated(
+        let texture = crate::render::window_texture::capture_decorated_at_scale(
             renderer,
             window,
             None,
+            scale,
             decorations,
             font,
             focused,
@@ -640,20 +658,34 @@ pub(crate) fn capture_cursor_surface_tree(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     snapshot: Option<&crate::cursor::CursorSurfaceSnapshot>,
     geometry: Rectangle<i32, Logical>,
+    scale: f64,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let size = geometry.size.to_physical(1);
-    let location = smithay::utils::Point::from((-geometry.loc.x, -geometry.loc.y)).to_physical(1);
+    let size = geometry.size.to_f64().to_physical(scale).to_i32_round();
+    let location = smithay::utils::Point::from((-geometry.loc.x, -geometry.loc.y))
+        .to_f64()
+        .to_physical(scale)
+        .to_i32_round();
     let elements = crate::cursor::render::surface_elements(
         renderer,
         surface,
         snapshot,
         location,
-        Scale::from(1.0),
+        Scale::from(scale),
         Kind::Cursor,
     )?;
     if elements.is_empty() {
         return Err(io::Error::other("cursor surface tree is empty").into());
     }
+    let elements = elements
+        .into_iter()
+        .map(|element| {
+            crate::render::display_scale::element(
+                crate::render::scene::SceneElement::Cursor(element.into()),
+                scale,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
     capture_elements(
         renderer,
         Fourcc::Abgr8888,
@@ -700,7 +732,7 @@ fn capture_output(
     request: RenderRequest<'_>,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let elements = render::scene::build(renderer, output, primary, geometry, request)?;
-    let size = geometry.size.to_physical(1);
+    let size = render::output_physical_size(output);
     capture_elements(
         renderer,
         Fourcc::Abgr8888,
@@ -708,6 +740,25 @@ fn capture_output(
         &elements,
         render::CLEAR_COLOR,
     )
+}
+
+fn resize_output_pixels(
+    pixels: Vec<u8>,
+    source: smithay::utils::Size<i32, Physical>,
+    destination: smithay::utils::Size<i32, Physical>,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    if source == destination {
+        return Ok(pixels);
+    }
+    let image = image::RgbaImage::from_raw(source.w as u32, source.h as u32, pixels)
+        .ok_or_else(|| io::Error::other("captured output size does not match pixels"))?;
+    Ok(image::imageops::resize(
+        &image,
+        destination.w as u32,
+        destination.h as u32,
+        image::imageops::FilterType::Triangle,
+    )
+    .into_raw())
 }
 
 fn composite_region(

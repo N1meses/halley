@@ -20,6 +20,10 @@ struct Notification {
     expires_at: Duration,
     dismissed: Option<(Duration, f32)>,
     expiry_notified: bool,
+    screenshot: Option<std::sync::Arc<crate::capture::preview::ScreenshotPreview>>,
+    hovered: bool,
+    hovered_action: Option<super::screenshot::ScreenshotAction>,
+    hold_duration: Duration,
 }
 
 impl Notification {
@@ -27,7 +31,7 @@ impl Notification {
         if let Some((dismissed_at, from)) = self.dismissed {
             return from * (1.0 - transition_progress(now.saturating_sub(dismissed_at)));
         }
-        if now >= self.expires_at {
+        if !self.hovered && now >= self.expires_at {
             return 1.0 - transition_progress(now.saturating_sub(self.expires_at));
         }
         self.enter_from
@@ -36,7 +40,7 @@ impl Notification {
 
     fn finished(&self, now: Duration) -> bool {
         let end = self.dismissed.map(|(at, _)| at).unwrap_or(self.expires_at) + TRANSITION_DURATION;
-        now >= end
+        (!self.hovered || self.dismissed.is_some()) && now >= end
     }
 
     fn animating(&self, now: Duration) -> bool {
@@ -45,7 +49,7 @@ impl Notification {
         }
         now < self.shown_at + TRANSITION_DURATION
             || self.dismissed.is_some()
-            || now >= self.expires_at
+            || (!self.hovered && now >= self.expires_at)
     }
 }
 
@@ -137,6 +141,7 @@ struct ClusterDeleteConfirmation {
 
 #[derive(Clone, Debug, Default)]
 pub struct OverlayManager {
+    pub(crate) empty_cluster: super::empty_cluster::Prompt,
     exit: bool,
     cluster_delete: Option<ClusterDeleteConfirmation>,
     basics: Option<BasicsCard>,
@@ -148,6 +153,8 @@ pub struct OverlayManager {
 #[derive(Clone, Debug)]
 pub struct NotificationSnapshot {
     pub message: String,
+    pub screenshot: Option<std::sync::Arc<crate::capture::preview::ScreenshotPreview>>,
+    pub hovered_action: Option<super::screenshot::ScreenshotAction>,
     pub kind: NotificationKind,
     pub mix: f32,
 }
@@ -187,6 +194,7 @@ pub struct OverlaySnapshot {
     pub notification: Option<NotificationSnapshot>,
     pub zoom_indicator: Option<ZoomIndicatorSnapshot>,
     pub cluster_indicator: Option<ClusterIndicatorSnapshot>,
+    pub empty_cluster: Option<super::empty_cluster::Snapshot>,
 }
 
 impl OverlayManager {
@@ -324,6 +332,72 @@ impl OverlayManager {
         );
     }
 
+    pub fn clear_screenshot(&mut self) {
+        if self
+            .notification
+            .as_ref()
+            .is_some_and(|n| n.screenshot.is_some())
+        {
+            self.notification = None;
+        }
+    }
+
+    pub fn attach_screenshot_preview(
+        &mut self,
+        preview: Option<std::sync::Arc<crate::capture::preview::ScreenshotPreview>>,
+    ) {
+        if let Some(notification) = self.notification.as_mut() {
+            if preview.is_some() {
+                notification.message = "Screenshot saved".into();
+            }
+            notification.screenshot = preview;
+        }
+    }
+
+    pub fn screenshot_accepts_input(&self, output: &str, now: Duration) -> bool {
+        self.notification.as_ref().is_some_and(|n| {
+            n.output == output
+                && n.screenshot.is_some()
+                && n.dismissed.is_none()
+                && (n.hovered || now < n.expires_at)
+        })
+    }
+
+    pub fn screenshot_hover(
+        &mut self,
+        hovered: bool,
+        action: Option<super::screenshot::ScreenshotAction>,
+        now: Duration,
+    ) -> bool {
+        let Some(notification) = self
+            .notification
+            .as_mut()
+            .filter(|n| n.screenshot.is_some() && n.dismissed.is_none() && !n.finished(now))
+        else {
+            return false;
+        };
+        let changed = notification.hovered != hovered || notification.hovered_action != action;
+        if notification.hovered && !hovered {
+            notification.expires_at = now + notification.hold_duration;
+            notification.expiry_notified = false;
+        }
+        notification.hovered = hovered;
+        notification.hovered_action = action;
+        changed
+    }
+
+    pub fn screenshot_feedback(&mut self, message: &str, now: Duration) {
+        if let Some(notification) = self
+            .notification
+            .as_mut()
+            .filter(|n| n.screenshot.is_some())
+        {
+            notification.message = message.into();
+            notification.expires_at = now + notification.hold_duration;
+            notification.expiry_notified = false;
+        }
+    }
+
     /// Shows the one-time explanation for the first automatic decay collapse.
     ///
     /// It uses the ordinary non-modal notification surface: it appears on the
@@ -389,6 +463,10 @@ impl OverlayManager {
             expires_at: now + Duration::from_millis(duration_ms.max(1)),
             dismissed: None,
             expiry_notified: false,
+            screenshot: None,
+            hovered: false,
+            hovered_action: None,
+            hold_duration: Duration::from_millis(duration_ms.max(1)),
         });
     }
 
@@ -473,6 +551,7 @@ impl OverlayManager {
 
     pub fn snapshot(&self, output: &str, now: Duration) -> OverlaySnapshot {
         OverlaySnapshot {
+            empty_cluster: self.empty_cluster.snapshot(output),
             exit_mix: self.exit.then_some(1.0),
             confirmation: self.cluster_delete.as_ref().and_then(|confirmation| {
                 (confirmation.output == output).then(|| ConfirmationSnapshot {
@@ -492,6 +571,8 @@ impl OverlayManager {
                 (notification.output == output && !notification.finished(now)).then(|| {
                     NotificationSnapshot {
                         message: notification.message.clone(),
+                        screenshot: notification.screenshot.clone(),
+                        hovered_action: notification.hovered_action,
                         kind: notification.kind,
                         mix: notification.mix(now),
                     }
@@ -503,12 +584,16 @@ impl OverlayManager {
                     mix: indicator.mix(now),
                 })
             }),
-            cluster_indicator: self.cluster_indicators.get(output).and_then(|indicator| {
-                (!indicator.finished(now)).then(|| ClusterIndicatorSnapshot {
-                    label: indicator.label.clone(),
-                    mix: indicator.mix(now),
-                })
-            }),
+            cluster_indicator: self
+                .cluster_indicators
+                .get(output)
+                .filter(|_| !self.empty_cluster.owns_output(output))
+                .and_then(|indicator| {
+                    (!indicator.finished(now)).then(|| ClusterIndicatorSnapshot {
+                        label: indicator.label.clone(),
+                        mix: indicator.mix(now),
+                    })
+                }),
         }
     }
 
@@ -541,6 +626,7 @@ impl OverlayManager {
         }
         if let Some(notification) = self.notification.as_mut()
             && notification.dismissed.is_none()
+            && !notification.hovered
             && now >= notification.expires_at
             && !notification.expiry_notified
         {
@@ -716,6 +802,62 @@ mod tests {
             "Screenshot saved to /home/test/Pictures/Screenshots"
         );
         assert_eq!(notification.kind, NotificationKind::Success);
+    }
+
+    #[test]
+    fn screenshot_hover_holds_the_card_and_expiry_retires_input() {
+        let mut overlays = OverlayManager::default();
+        overlays.show_screenshot_saved(
+            "DP-1".into(),
+            Path::new("/tmp/shots"),
+            4000,
+            Duration::ZERO,
+        );
+        let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+            &[255; 4],
+            smithay::backend::allocator::Fourcc::Abgr8888,
+            (1, 1),
+            1,
+            smithay::utils::Transform::Normal,
+            None,
+        );
+        overlays.attach_screenshot_preview(Some(std::sync::Arc::new(
+            crate::capture::preview::ScreenshotPreview {
+                path: "/tmp/shots/screenshot.png".into(),
+                buffer,
+                size: (1, 1),
+                png: vec![1, 2, 3].into(),
+            },
+        )));
+        assert!(!overlays.confirmation_modal_active());
+        assert!(!overlays.screenshot_accepts_input("DP-2", Duration::from_millis(200)));
+        assert!(overlays.screenshot_hover(
+            true,
+            Some(super::super::screenshot::ScreenshotAction::Copy),
+            Duration::from_millis(1000)
+        ));
+        overlays.wakeup(Duration::from_secs(30));
+        assert!(overlays.screenshot_accepts_input("DP-1", Duration::from_secs(30)));
+        assert!(!overlays.animating_on_output("DP-1", Duration::from_secs(30)));
+        overlays.screenshot_feedback("Copied to clipboard", Duration::from_secs(30));
+        assert_eq!(
+            overlays
+                .snapshot("DP-1", Duration::from_secs(30))
+                .notification
+                .unwrap()
+                .message,
+            "Copied to clipboard"
+        );
+        overlays.screenshot_hover(false, None, Duration::from_secs(31));
+        assert!(overlays.screenshot_accepts_input("DP-1", Duration::from_secs(34)));
+        assert!(!overlays.screenshot_accepts_input("DP-1", Duration::from_secs(35)));
+        overlays.wakeup(Duration::from_secs(36));
+        assert!(
+            overlays
+                .snapshot("DP-1", Duration::from_secs(36))
+                .notification
+                .is_none()
+        );
     }
 
     /// Milestone 4: the one-time decay explanation is an ordinary success

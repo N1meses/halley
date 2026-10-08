@@ -268,7 +268,45 @@ pub fn elements(
             renderer,
             screen,
             notification,
-            config.notifications.position,
+            config.notifications,
+            visuals,
+            node_renderer,
+            ui_text,
+            &mut elements,
+        )?;
+    }
+    if let Some(empty) = snapshot.empty_cluster {
+        let title = format!("{} is empty", empty.name.trim());
+        let (title, _) = fit_middle(
+            renderer,
+            ui_text,
+            &title,
+            visuals.text.bytes(),
+            (screen.size.w - 84).max(80),
+        )?;
+        let (shortcut, _) = fit_middle(
+            renderer,
+            ui_text,
+            &empty.shortcut,
+            visuals.text.bytes(),
+            (screen.size.w - 260).max(80),
+        )?;
+        let actions = if empty.armed {
+            vec![
+                (shortcut.as_str(), "press again to delete"),
+                ("Esc", "cancel"),
+            ]
+        } else {
+            vec![(shortcut.as_str(), "press to delete cluster")]
+        };
+        shortcut_card_elements(
+            renderer,
+            screen,
+            1.0,
+            &title,
+            None,
+            &actions,
+            false,
             visuals,
             node_renderer,
             ui_text,
@@ -318,7 +356,35 @@ fn confirmation_elements(
     ui_text: &mut UiTextRenderer,
     elements: &mut Vec<SceneElement>,
 ) -> Result<(), Box<dyn Error>> {
-    let actions = [("Enter", confirm_label), ("Esc", "cancel")];
+    shortcut_card_elements(
+        renderer,
+        screen,
+        mix,
+        title,
+        message,
+        &[("Enter", confirm_label), ("Esc", "cancel")],
+        true,
+        visuals,
+        node_renderer,
+        ui_text,
+        elements,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shortcut_card_elements(
+    renderer: &mut GlesRenderer,
+    screen: Rectangle<i32, Physical>,
+    mix: f32,
+    title: &str,
+    message: Option<&str>,
+    actions: &[(&str, &str)],
+    dim: bool,
+    visuals: OverlayVisuals,
+    node_renderer: &mut NodeRenderer,
+    ui_text: &mut UiTextRenderer,
+    elements: &mut Vec<SceneElement>,
+) -> Result<(), Box<dyn Error>> {
     let title_size = ui_text
         .measure(renderer, title, visuals.text.bytes())?
         .unwrap_or((0, 0).into());
@@ -330,7 +396,7 @@ fn confirmation_elements(
     let mut action_width = 0;
     let mut action_height = 0;
     let mut action_sizes = Vec::new();
-    for (key, label) in actions {
+    for &(key, label) in actions {
         let key_size = ui_text
             .measure(renderer, key, visuals.text.bytes())?
             .unwrap_or((0, 0).into());
@@ -422,12 +488,14 @@ fn confirmation_elements(
         visuals.fill,
         0.97 * mix,
     )?));
-    let color = backdrop_dim(0.62 * mix);
-    elements.push(SceneElement::Border(crate::render::solid_color_element(
-        node_renderer.active_slot_id(crate::render::node::NodeSlot::ShellBackdrop),
-        screen,
-        color,
-    )));
+    if dim {
+        let color = backdrop_dim(0.62 * mix);
+        elements.push(SceneElement::Border(crate::render::solid_color_element(
+            node_renderer.active_slot_id(crate::render::node::NodeSlot::ShellBackdrop),
+            screen,
+            color,
+        )));
+    }
     Ok(())
 }
 
@@ -436,12 +504,24 @@ fn notification_elements(
     renderer: &mut GlesRenderer,
     screen: Rectangle<i32, Physical>,
     notification: crate::shell::overlay::NotificationSnapshot,
-    position: halley_config::NotificationPosition,
+    config: halley_config::Notifications,
     visuals: OverlayVisuals,
     node_renderer: &mut NodeRenderer,
     ui_text: &mut UiTextRenderer,
     elements: &mut Vec<SceneElement>,
 ) -> Result<(), Box<dyn Error>> {
+    if notification.screenshot.is_some() {
+        return super::screenshot::elements(
+            renderer,
+            screen,
+            notification,
+            config,
+            visuals,
+            node_renderer,
+            ui_text,
+            elements,
+        );
+    }
     let max_text_width = ((screen.size.w as f32 * 0.70).round() as i32 - 32).max(80);
     let color = match notification.kind {
         crate::shell::overlay::NotificationKind::Success => visuals.text,
@@ -454,34 +534,24 @@ fn notification_elements(
         color.bytes(),
         max_text_width,
     )?;
-    let card =
-        Rectangle::<i32, Physical>::new((0, 0).into(), (text_size.w + 32, text_size.h + 16).into());
-    let margin = 24;
-    let slide = ((1.0 - notification.mix) * 8.0).round() as i32;
-    let x = match position {
-        halley_config::NotificationPosition::TopLeft
-        | halley_config::NotificationPosition::BottomLeft => margin,
-        halley_config::NotificationPosition::TopCenter
-        | halley_config::NotificationPosition::BottomCenter => (screen.size.w - card.size.w) / 2,
-        halley_config::NotificationPosition::TopRight
-        | halley_config::NotificationPosition::BottomRight => screen.size.w - card.size.w - margin,
-    };
-    let y = match position {
-        halley_config::NotificationPosition::TopLeft
-        | halley_config::NotificationPosition::TopCenter
-        | halley_config::NotificationPosition::TopRight => margin - slide,
-        halley_config::NotificationPosition::BottomLeft
-        | halley_config::NotificationPosition::BottomCenter
-        | halley_config::NotificationPosition::BottomRight => {
-            screen.size.h - card.size.h - margin + slide
-        }
-    };
-    let card = Rectangle::new((x, y).into(), card.size);
+    let layout = ui_text.padded_label_layout(text_size)?;
+    let card_size: smithay::utils::Size<i32, Logical> = (
+        layout.card.width.round() as i32,
+        layout.card.height.round() as i32,
+    )
+        .into();
+    let card = crate::shell::screenshot::notification_rect(
+        Rectangle::<i32, Logical>::from_size(screen.size.to_logical(1)),
+        card_size,
+        config,
+        notification.mix,
+    )
+    .to_physical(1);
     if let Some(text) = ui_text.element(
         renderer,
         (
-            card.loc.x + 16,
-            card.loc.y + (card.size.h - text_size.h) / 2,
+            card.loc.x + layout.label.origin.x.round() as i32,
+            card.loc.y + layout.label.origin.y.round() as i32,
         )
             .into(),
         &message,
@@ -672,7 +742,7 @@ fn zoom_indicator_card_rect(
     Rectangle::new((x, y).into(), card_size)
 }
 
-fn fit_middle(
+pub(super) fn fit_middle(
     renderer: &mut GlesRenderer,
     ui_text: &mut UiTextRenderer,
     value: &str,

@@ -117,6 +117,23 @@ impl WinitBackend {
             None,
         );
     }
+
+    pub fn set_display_scale(&self, scale: f64) {
+        self.output.change_current_state(
+            None,
+            None,
+            Some(smithay::output::Scale::Fractional(scale)),
+            None,
+        );
+    }
+
+    pub fn logical_size(&self) -> Size<i32, Physical> {
+        self.window_size()
+            .to_f64()
+            .to_logical(self.output.current_scale().fractional_scale())
+            .to_i32_ceil()
+            .to_physical(1)
+    }
 }
 
 impl crate::ipc::OutputInfoSource for WinitBackend {
@@ -132,6 +149,7 @@ impl crate::ipc::OutputInfoSource for WinitBackend {
             current_mode: Some(0),
             offset_x: location.x,
             offset_y: location.y,
+            scale: self.output.current_scale().fractional_scale(),
             // The dev-mode nested backend has no real VRR/hardware concept
             // at all - config-driven output selection doesn't apply to it
             // either (see `WinitBackend`'s own doc comment).
@@ -224,6 +242,7 @@ impl Renderable for WinitBackend {
                     },
                 );
             }
+            crate::render::window_open::extend_render_states(&elements, &mut element_states);
             let _ = frame.finish()?;
         }
 

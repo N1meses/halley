@@ -4,6 +4,15 @@ use super::*;
 
 pub(super) const CLUSTER_MEMBER_BORDER_PX: f32 = 7.0;
 
+pub(super) fn apogee_backdrop_color(
+    dim: f32,
+    progress: f32,
+) -> smithay::backend::renderer::Color32F {
+    // Smithay expects premultiplied RGBA. Neutral black only attenuates the
+    // wallpaper, and contributes no color even at zero transition opacity.
+    smithay::backend::renderer::Color32F::BLACK * (dim * progress)
+}
+
 pub(super) fn preview_content_radius(overlay_radius: f32) -> f32 {
     overlay_radius.max(0.0)
 }
@@ -287,12 +296,7 @@ pub(super) fn apogee_elements(
             now,
         )?;
     }
-    let backdrop_color = smithay::backend::renderer::Color32F::new(
-        0.01,
-        0.018,
-        0.03,
-        config.background_dim * visuals.overlay_alpha,
-    );
+    let backdrop_color = apogee_backdrop_color(config.background_dim, visuals.overlay_alpha);
     elements.push(SceneElement::Border(crate::render::solid_color_element(
         node_renderer.active_slot_id(crate::render::node::NodeSlot::ApogeeBackdrop),
         output_local,

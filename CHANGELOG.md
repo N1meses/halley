@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Configure per-monitor display scaling with numeric `view.output.scale`
+  multipliers, including fractional values and live reload. Scale applications,
+  compositor UI, pointer coordinates, and native-resolution captures together;
+  report the effective scale in `halleyctl outputs`. Bootstrap and examples
+  include `scale 1.0`; existing configs keep that default when omitted. The
+  private IPC wire version is now 23; rebuild companion tools with Halley.
+
+### Fixed
+- Let the cursor and dragged windows cross gaps between configured monitors,
+  including gaps created by increasing display scale while keeping existing
+  monitor offsets.
+- Remove stale keybind documentation describing config migration and include
+  zero notification offsets in the split-config example.
+- Dim Apogee and Cluster Composer backdrops without adding a blue tint or an
+  initial brightness jump. Zero `apogee.background-dim` leaves wallpaper colors
+  unchanged throughout opening and closing transitions.
+- Remove X11 windows, collapsed nodes, cluster membership, and stale focus when
+  the XWayland window-manager connection is lost. Match destroyed surfaces by
+  their shared identity so cleanup still works after Smithay marks them dead.
+
+## [0.8.0] - 2026-10-05
+
+### Added
+- Delete an empty active cluster with two deliberate presses of the configured
+  close shortcut. Its non-modal card shows the resolved binding; Escape cancels,
+  and launchers, interactive overlays, new members, or leaving the cluster clear
+  confirmation. Held keys cannot confirm deletion.
+- Share text shaping, glyph rasterization, and cached notification layout with
+  Halley UI. Native GPU rendering, Wayland buffers, and the blur-capable Smithay
+  revision remain in Halley.
+- Package Halley Lift independently from its own repository. The default
+  launcher binding remains `halley-lift`; install Lift separately.
+- Include `examples/shaders/close-wave.frag`, the inward spiral counterpart to
+  the wave opening shader, with matching 900 ms timing and setup instructions.
+- Include `examples/shaders/open-wave.frag`, a custom opening shader with spiral
+  ripples, refraction, a cyan/violet crest, and a pixel fringe. Document its
+  recommended 900 ms linear timing in `docs/window-shaders.md`.
+- Advertise `ext_foreign_toplevel_list_v1` and
+  `zwlr_foreign_toplevel_manager_v1` for taskbars and docks to list windows,
+  track their state, and request activation, close, minimize, maximize, and
+  fullscreen through Halley's existing window actions.
+- Show a screenshot preview with Copy and Open controls after native
+  captures. Copy provides the PNG image to Wayland and XWayland applications;
+  hovering keeps the card visible, and clipboard contents outlive the card.
+- Add signed `overlays.notifications.offset-x` and `offset-y` settings relative
+  to the selected position, both defaulting to zero in bootstrap configs.
 - Save autostart command output and exit status in private, persistent logs
   under `$XDG_STATE_HOME/halley/autostart`, with three generations capped at
   1 MiB each per command. Detached loggers preserve service independence from
@@ -48,7 +94,7 @@ All notable changes to this project will be documented in this file.
 - Add compact startup cluster declarations under `autostart`, with persistent
   named cores, optional layout/output selection, empty `members []` support,
   and launch attribution for native Wayland and XWayland windows.
-- Flash an empty active cluster's name and layout at the center of its output;
+- Show an empty active cluster's name and close shortcut in a centered card;
   populated clusters reveal their windows directly without an activation card.
   Explicit layout changes still flash the updated name and layout.
 - Delete runtime workspaces from a bloomed core's compact close control or by
@@ -61,16 +107,13 @@ All notable changes to this project will be documented in this file.
   window rectangle. The shader replaces scale and fade. Node collapse stays on
   the CPU path. A missing or invalid shader is logged once and the configured
   type draws instead. See `docs/window-shaders.md`.
-- Show a one-time **Halley basics** card on a freshly generated configuration's
-  first native session: the Field-first mental model plus only the five
-  essential operations (`Mod+D` Lift, `Mod+Left-drag` move, `Mod+A` arrange,
-  `Mod+N` collapse/restore, `Mod+O` Apogee). It reuses the compositor-owned
-  overlay styling, is non-modal (only `Enter`, `Escape`, and the first pointer
-  press or touch are captured), and records its dismissal in
-  `$XDG_STATE_HOME/halley/state.rune`. Existing configurations, explicitly
-  selected paths, and nested `--winit` sessions never show it automatically.
-  Reopen it any time from Halley Lift's new **Show Halley basics** action or with
-  `halleyctl basics`. See `docs/overlays.md`.
+- Show the non-modal **Halley basics** introduction once per compositor version,
+  including for existing configurations. It explains the Field and the five
+  essential operations, records dismissal in
+  `$XDG_STATE_HOME/halley/state.rune`, and stays dismissed when reinstalling the
+  same version. Nested `--winit` sessions never show it automatically. Reopen it
+  from Lift's **Show Halley basics** action or with `halleyctl basics`.
+  See `docs/overlays.md`.
 - Explain the first automatic decay collapse once, in a non-modal notice:
   `<Application> was collapsed into a node. Click the node or press Mod+N to
   restore it.` The name is the collapsed window's title, falling back to its
@@ -82,6 +125,15 @@ All notable changes to this project will be documented in this file.
   `docs/overlays.md` and `docs/nodes.md`.
 
 ### Changed
+- Refresh the README demonstrations with two new screenshots and link standalone
+  Lift installation and launcher references to its own repository.
+- End an output's saved `Mod+A` arrangement when a participating window is
+  manually moved, resized, or closed. The next press arranges the current Field
+  windows instead of restoring stale geometry. Untouched arrangements still
+  toggle back, including during their animation; unrelated windows and other
+  outputs retain their existing restore state.
+- Simplify screenshot previews to Copy and Open controls, removing the close
+  button; previews expire automatically after their configured duration.
 - Keep compositor shortcuts available while exclusive layer-shell surfaces
   have keyboard focus. Session locks and active shortcut inhibitors continue
   to block bindings. Adapted from noervthere's layer-focus fix.
@@ -102,9 +154,8 @@ All notable changes to this project will be documented in this file.
 - Apply window-rule `opacity` to client content and popups only. Titlebars,
   borders, pin badges, and compositor shadows stay fully opaque. Open and
   close animations still fade chrome with the window.
-- Start the systemd session without waiting for a compositor readiness signal,
-  while still reporting executable startup failures. Keep session output and
-  errors in `$XDG_RUNTIME_DIR/halley-session.log` after the service stops.
+- Keep session output and errors in `$XDG_RUNTIME_DIR/halley-session.log`
+  after the service stops, while reporting executable startup failures.
 - Keep directional `Mod+Arrow` Field focus from panning the camera while a
   `Mod+A` arrangement is active on that output.
 - Pause automatic decay for windows in an active Field arrangement; undoing the
@@ -161,6 +212,35 @@ All notable changes to this project will be documented in this file.
   they compete.
 
 ### Fixed
+- Keep focus inside the active cluster when its final window closes. Closing an
+  empty cluster can no longer reach a hidden Field window, including through
+  remembered per-output focus.
+- Suppress the specific XWayland attribute-lookup race for helper windows that
+  have already disappeared, preventing harmless warnings from flooding either
+  log. Other X11, connection, and device failures remain visible.
+- Render custom opening shaders from the complete live window scene, including
+  backdrop blur, themed shadows, and independently faded client content and
+  decorations. The final shader frame now matches normal composition instead
+  of revealing those effects abruptly when the animation finishes.
+- Keep rounded client and decoration masks attached to their pixels when
+  cropped or moved into an opening snapshot, preventing empty top/left regions
+  and displaced textures in Wayland and XWayland windows.
+- Preserve client visibility and presentation feedback through custom opening
+  shaders, so applications keep loading and animating at the output's callback
+  cadence instead of being throttled as hidden windows.
+- Limit overlay animation redraw demand to the output that owns the overlay,
+  preventing local notices and cards from keeping other monitors repainting.
+- Clear native output state, then pause DRM devices before releasing GPU
+  access on logout. Leave console restoration to the seat/VT manager instead
+  of replaying the startup DRM snapshot rejected by AMD with `EINVAL`.
+- Start direct TTY graphical sessions through `halley-direct-session.target`,
+  avoiding systemd's refusal to start `graphical-session.target` manually and
+  restoring session-service activation and logout environment cleanup.
+- Keep the cursor updating while moving across a screenshot preview, even when
+  its hover state stays unchanged. Only the affected output needs that redraw.
+- Restore portal capture startup by removing the frontend bus-name and executable
+  gate. Keep chooser consent and request/session ownership, and run blocking
+  portal work off the D-Bus executor so capture and cancellation remain responsive.
 - Wait for compositor readiness before starting managed graphical-session
   services, honor development binaries through the systemd launcher, and give
   direct TTY launches the same graphical-session startup and logout cleanup.
@@ -200,10 +280,8 @@ All notable changes to this project will be documented in this file.
 - Deny raw Wayland screen capture, clipboard data control, virtual keyboards,
   and input-method registration by default. Grant each capability separately
   to explicitly approved executable identities at connection admission.
-- Authenticate portal backend calls against the frontend bus owner and executable
-  file identity (including across mount namespaces),
-  pin requests and sessions to their creator, enforce application ownership, and
-  bound session allocation. Remove completed request objects.
+- Pin portal requests and sessions to their creator, enforce application
+  ownership, and bound session allocation. Remove completed request objects.
 - Require explicit approval of a unique D-Bus connection for accessibility
   keyboard monitoring; owning the public Orca bus name no longer grants access.
 - Revert the dedicated synchronized DPMS wake modeset after reports of black

@@ -372,6 +372,13 @@ fn format_output(output: &OutputInfo) -> Result<String, String> {
             output.offset_x, output.offset_y
         )
         .unwrap();
+        writeln!(
+            formatted,
+            "  Scale: {} ({}%)",
+            output.scale,
+            output.scale * 100.0
+        )
+        .unwrap();
         let vrr_state = if !output.vrr_supported {
             "unsupported"
         } else if output.vrr_active {
@@ -475,6 +482,7 @@ mod tests {
             current_mode: Some(1),
             offset_x: 0,
             offset_y: 0,
+            scale: 1.0,
             vrr: "off".into(),
             vrr_supported: false,
             vrr_active: false,

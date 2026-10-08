@@ -40,7 +40,7 @@ daily workflow is one loop:
 > Field becomes messy → collapse work intentionally → retrieve it spatially →
 > use clusters later only when deliberately configured.
 
-1. **Launch freely.** `Super+D` opens Halley Lift, so whatever you start lands
+1. **Launch freely.** `Super+D` opens [Lift](https://github.com/saltnpepper97/halley-lift), the separately installed launcher, so whatever you start lands
    directly on the Field.
 2. **Position and overlap naturally.** `Super+Left-drag` moves a window, and
    ordinary windows are free to overlap instead of being solved into slots.
@@ -81,7 +81,7 @@ questions. They are layers, not replacements for each other.
 | Focus carousel | `Alt+Tab` / `Alt+Shift+Tab` | Recent-work navigation — what did I just come from? |
 | Bearings | `Super+Z` hold / `Super+Shift+Z` toggle | Offscreen spatial retrieval — where did work go beyond this monitor's view? |
 | Apogee | `Super+O` | Visual inventory across monitors — what is open on every display? |
-| Halley Lift | `Super+D` | Direct search by application, node, cluster, or compositor action — what is this called? |
+| Lift | `Super+D` | Direct search by application, node, cluster, or compositor action — what is this called? |
 
 The escalation is deliberate: the arrows move one step, `Alt+Tab` recalls recent
 work, Bearings and Apogee show where things are, and Lift finds something by
@@ -101,6 +101,13 @@ turning funding thresholds into product promises.
 
 Sponsorship does **not** buy roadmap control. Halley remains
 maintainer-directed.
+
+---
+
+## Demo
+
+![Halley Field with overlapping windows](demo/demo1.png)
+![Halley desktop with an editor and browser](demo/demo2.png)
 
 ---
 
@@ -163,7 +170,7 @@ declaring startup clusters in `autostart` or by creating them at runtime.
 
 ## First Run
 
-A newly generated configuration's first native session shows one compositor-owned
+The first native session of each Halley version shows a compositor-owned
 **Halley basics** card: the Field-first mental model, plus only the five
 operations it depends on.
 
@@ -177,17 +184,18 @@ The card names your configured `mod` key, so a nested `halley --winit` session
 shows `Alt+D` where a native session shows `Super+D`. It is a primer rather than
 a tutorial: it lists no zoom, Bearings, Trail, pinning, or cluster layouts, it
 never dims or blocks the desktop, and only its own dismissal keys are captured.
-`Enter`, `Escape`, or a click closes it for good. Clusters stay out of first-run
-training for 0.8.0 — the card names no cluster action, core, or layout — so you
+`Enter`, `Escape`, or a click dismisses it for that Halley version. Clusters
+stay out of first-run training for 0.8.0 — the card names no cluster action, core, or layout — so you
 only meet clusters when you deliberately configure them.
 
-It appears only for a configuration Halley generated itself. Existing
-configurations, nested `halley --winit` sessions, and explicitly selected
-`-c PATH` files never show it automatically. Dismissal is remembered in
-`$XDG_STATE_HOME/halley/state.rune`, falling back to
+Existing configurations and explicitly selected `-c PATH` files qualify too;
+nested `halley --winit` sessions never show it automatically. Bumping Halley's
+package version re-offers the introduction on the next native launch, while
+reinstalling the same version preserves dismissal. The dismissed version is
+remembered in `$XDG_STATE_HOME/halley/state.rune`, falling back to
 `~/.local/state/halley/state.rune`; that file is user state, not configuration,
 is never migrated, and is safe to delete. Reopen the card whenever you like from
-Halley Lift's **Show Halley basics** action or with `halleyctl basics`.
+Lift's **Show Halley basics** action or with `halleyctl basics`.
 
 ---
 
@@ -231,7 +239,7 @@ unchanged Field.
 | **Trail** | Per-output recent-focus navigation and remote inspection |
 | **Bearings** | Directional overlays and offscreen navigation |
 | **Apogee** | Multi-monitor overview and live previews |
-| **Lift** | Bundled search and action launcher, bound to `Super+D` in fresh configs |
+| **Lift** | [Separately packaged](https://github.com/saltnpepper97/halley-lift) search and action launcher, bound to `Super+D` in fresh configs |
 | **Capture** | Native menu, region, screen, and window screenshots plus portal screencasting |
 | **IPC/API** | Persistent typed clients, capability discovery, subscriptions, and `halleyctl` |
 | **XWayland** | Native embedded XWayland and compositor-owned X11 window management |
@@ -286,12 +294,15 @@ cd halley
 cargo build --release --workspace
 ```
 
+The compositor workspace builds Halley, its CLI, and its portal. Install
+[Lift](https://github.com/saltnpepper97/halley-lift) separately with
+`cargo install halley-lift --version 0.3.0 --locked`, or through its own package.
+
 The build produces:
 
 ```text
 target/release/halley
 target/release/halleyctl
-target/release/halley-lift
 target/release/xdg-desktop-portal-halley
 ```
 
@@ -300,7 +311,6 @@ For user-local testing:
 ```sh
 install -Dm755 target/release/halley ~/.local/bin/halley
 install -Dm755 target/release/halleyctl ~/.local/bin/halleyctl
-install -Dm755 target/release/halley-lift ~/.local/bin/halley-lift
 install -Dm755 target/release/xdg-desktop-portal-halley \
   ~/.local/bin/xdg-desktop-portal-halley
 ```
@@ -347,7 +357,7 @@ swipe, and hold actions.
 | Clusters | `Super+0..9` | Open a per-monitor cluster slot |
 | Bearings | `Super+Z` / `Super+Shift+Z` | Offscreen retrieval: hold or toggle Bearings |
 | Launch | `Super+T` | Open the first supported terminal |
-| Launch | `Super+D` | Open Halley Lift to search applications, nodes, clusters, and compositor actions (Fuzzel is a commented alternative) |
+| Launch | `Super+D` | Open Lift to search applications, nodes, clusters, and compositor actions (Fuzzel is a commented alternative) |
 | Reload | `Super+Shift+R` | Reload the selected configuration |
 | Zoom | `Super+-` / `Super+=` / `Super+Shift+0` | Zoom out, in, or reset |
 | Pointer | `Super+Left Mouse` | Move a window |
@@ -369,8 +379,8 @@ and `stack` scopes. Left/right Super, Alt, Ctrl, and Shift can be matched
 independently. Compositor move, resize, and pan grabs are ordinary remappable
 bindings rather than hardcoded mouse policy.
 
-`Super+D` opens Halley Lift, the bundled search and action launcher documented
-in [`halley-lift/README.md`](halley-lift/README.md). It searches applications,
+`Super+D` opens [Lift](https://github.com/saltnpepper97/halley-lift),
+the independently packaged search and action launcher. It searches applications,
 running nodes, clusters, compositor actions, and config files from one field,
 and it can run terminal commands. Prefer a separate launcher? Any non-built-in
 action string is a command line, so replacing one line is enough:
@@ -380,7 +390,7 @@ action string is a command line, so replacing one line is enough:
 ```
 
 Existing 0.6-or-newer configurations keep whatever launcher they already bind.
-Only a newly generated config defaults to Halley Lift. Change the launcher
+Only a newly generated config defaults to Lift. Change the launcher
 binding yourself to use a different launcher.
 
 ---
@@ -401,6 +411,11 @@ Pass `-c PATH` or `--config PATH` to select another file. Valid edits reload as
 one atomic snapshot; invalid edits leave the last valid runtime state active.
 Nested Rune `gather` dependencies are watched recursively, including missing
 dependencies that are created after startup.
+
+Per-monitor display scaling uses a numeric multiplier: `scale 1.0` means
+100%, `scale 1.5` means 150%. It changes the size of applications and Halley
+UI while retaining the native display resolution. See [display scaling](docs/display-scale.md)
+for mixed-monitor positioning and examples.
 
 A freshly generated config declares no startup clusters, so windows begin on the
 empty Field. The optional `autostart` section can still declare persistent named
@@ -436,7 +451,7 @@ and sequenced state subscriptions.
 
 The postcard-based `halley-ipc` crate is Halley's private transport codec, not
 an external compatibility contract. External programs should use
-`halley-api`; `halleyctl` and Halley Lift are reference consumers of that API.
+`halley-api`; `halleyctl` and Lift are reference consumers of that API.
 
 ---
 

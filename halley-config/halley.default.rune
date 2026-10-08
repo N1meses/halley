@@ -61,6 +61,11 @@ view:
     # DRM connector name exactly as printed by `halleyctl outputs`.
     name "DP-1"
 
+    # Display size multiplier: 1.0 = 100%, 1.5 = 150%, 2.0 = 200%.
+    # Optional without width/height; keeps the preferred mode when omitted.
+    # Monitor positions and UI dimensions are logical pixels.
+    scale 1.0
+
     # Uncomment and edit the complete hardware group to select a mode. Width
     # and height must be supplied together; offset, rate, transform, and VRR
     # are only valid when both are present.
@@ -91,6 +96,7 @@ view:
 
   output:
     name "DP-2"
+    scale 1.0
     focus-ring:
       radius-x 820.0
       radius-y 420.0
@@ -284,10 +290,10 @@ end
 # top-levels; the content radius also clips unmanaged X11 popup windows.
 decorations:
   border:
-    # Border width in output pixels. It follows camera zoom visually.
+    # Border width in logical pixels. It follows camera zoom visually.
     size 3
 
-    # Client-content corner radius in output pixels. The compositor grows the
+    # Client-content corner radius in logical pixels. The compositor grows the
     # outer border radius concentrically. Set to 0 for square corners.
     radius 8
 
@@ -353,6 +359,9 @@ overlays:
 
   notifications:
     position "top-center"
+    # Offset from the selected position; positive moves right/down.
+    offset-x 0
+    offset-y 0
     success-duration-ms 4000
     error-duration-ms 9000
   end

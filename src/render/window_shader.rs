@@ -1,8 +1,9 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::rc::Rc;
+use std::time::{Instant, SystemTime};
 
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
@@ -64,6 +65,9 @@ void main() {
 }
 "#;
 
+#[cfg(test)]
+mod pixel_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShaderKind {
     Open,
@@ -85,6 +89,7 @@ pub struct WindowAnimationShaders {
     close: Option<CompiledProgram>,
     failed_open: Option<String>,
     failed_close: Option<String>,
+    open_buffers: HashMap<Id, (Instant, Rc<super::window_open::OpenBuffer>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +130,8 @@ impl WindowAnimationShaders {
     }
 
     pub fn ensure(&mut self, renderer: &mut GlesRenderer, config_dir: Option<&Path>) {
+        self.open_buffers
+            .retain(|_, (used, _)| used.elapsed().as_secs() < 2);
         self.open = compile_requested(
             renderer,
             ShaderKind::Open,
@@ -152,30 +159,36 @@ impl WindowAnimationShaders {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn open_element(
-        &self,
+    pub fn open_scene_element(
+        &mut self,
         renderer: &GlesRenderer,
-        texture: &WindowTexture,
         id: Id,
-        geo: Rectangle<i32, Physical>,
+        elements: &mut Vec<super::scene::SceneElement>,
         progress: f32,
         clamped_progress: f32,
         random_seed: f32,
-        alpha: f32,
-    ) -> Option<WindowShaderRenderElement> {
+    ) -> Option<super::window_open::WindowOpenElement> {
         let program = self
             .open
             .as_ref()
             .filter(|program| program.context == renderer.context_id())?;
-        Some(shader_element(
-            texture,
+        let bounds = super::window_open::scene_bounds(elements)?;
+        let (used, buffer) = self.open_buffers.entry(id.clone()).or_insert_with(|| {
+            (
+                Instant::now(),
+                Rc::new(super::window_open::OpenBuffer::new(None)),
+            )
+        });
+        *used = Instant::now();
+        Some(super::window_open::WindowOpenElement::new(
             id,
-            geo,
+            std::mem::take(elements),
+            bounds,
+            program.program.clone(),
             progress,
             clamped_progress,
             random_seed,
-            alpha,
-            program.program.clone(),
+            Rc::clone(buffer),
         ))
     }
 

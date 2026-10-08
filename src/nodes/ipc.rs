@@ -313,6 +313,10 @@ pub(crate) fn resize_selected_direction<D: crate::session::SessionDriver>(
     if size == current.size {
         return false;
     }
+    session
+        .interactions
+        .field_arrange
+        .invalidate_surface(&record.surface);
     if let Some(toplevel) = record.window.toplevel() {
         toplevel.with_pending_state(|pending| pending.size = Some(size));
         toplevel.send_pending_configure();
@@ -414,6 +418,12 @@ fn move_node<D: crate::session::SessionDriver>(
                 },
             )
             .loc;
+        if next != location {
+            session
+                .interactions
+                .field_arrange
+                .invalidate_surface(&record.surface);
+        }
         session.wayland.space.relocate_element(&record.window, next);
         if crate::xwayland::is_x11(&record.window) {
             crate::xwayland::configure_window(
